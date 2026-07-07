@@ -1,0 +1,18 @@
+{
+	"workspaceRoot": "{{WORKSPACE_ROOT}}",
+	"protectedRoots": [
+		"{{LABAGENTS_REPO}}",
+		"{{PI_REPO}}"
+	],
+	"allowReadWithinWorkspace": true,
+	"allowWriteWithinWorkspace": true,
+	"allowSearchWithinWorkspace": true,
+	"allowListWithinWorkspace": true,
+	"bash": {
+		"mode": "workspace-only",
+		"blockedPathSubstrings": [
+			"{{LABAGENTS_REPO}}",
+			"{{PI_REPO}}"
+		]
+	}
+}

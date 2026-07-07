@@ -1,0 +1,6 @@
+{
+	"extensions": [
+		"{{LABAGENTS_REPO}}/src/extensions/guardrail/index.ts",
+		"{{LABAGENTS_REPO}}/src/extensions/experiment-research/index.ts"
+	]
+}

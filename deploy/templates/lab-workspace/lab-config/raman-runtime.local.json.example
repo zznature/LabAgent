@@ -1,0 +1,9 @@
+{
+	"enabled": false,
+	"pythonExecutable": "python",
+	"stage": {
+		"config": {
+			"port": "COM5"
+		}
+	}
+}

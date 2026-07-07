@@ -1,0 +1,11 @@
+{
+	"name": "@labagents/experiment-research",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"test": "vitest --run --dir test"
+	},
+	"exports": {
+		".": "./index.ts"
+	}
+}

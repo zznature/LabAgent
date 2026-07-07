@@ -1,0 +1,56 @@
+{
+	"enabled": true,
+	"pythonRoot": "lab-config/drivers/raman-python",
+	"pythonExecutable": "python",
+	"stage": {
+		"resourceId": "stage-main",
+		"kind": "stage",
+		"runtime": "raman_python",
+		"driver": "mc_newton_xyz",
+		"config": {
+			"port": "COM5",
+			"xChannel": 1,
+			"yChannel": 2,
+			"zChannel": 3,
+			"baudrate": 115200
+		},
+		"leasePolicy": "exclusive",
+		"simulationAvailable": true,
+		"limits": {
+			"xRangeUm": [0, 50000],
+			"yRangeUm": [0, 50000],
+			"zRangeUm": [0, 5000]
+		}
+	},
+	"frameProvider": {
+		"resourceId": "frame-main",
+		"kind": "frame_provider",
+		"runtime": "raman_python",
+		"driver": "labspec_file_bridge_frame",
+		"config": {
+			"bridgeDir": "D:\\RamanLab\\SpecBridge",
+			"imageFormat": "tif",
+			"minCaptureIntervalMs": 400
+		},
+		"leasePolicy": "shared-read",
+		"simulationAvailable": false
+	},
+	"spectrometer": {
+		"resourceId": "spectrometer-main",
+		"kind": "spectrometer",
+		"runtime": "raman_python",
+		"driver": "labspec_file_bridge_spectrum",
+		"config": {
+			"bridgeDir": "D:\\RamanLab\\SpecBridge",
+			"requestFilename": "spectrum_request.ini",
+			"resultFilename": "spectrum_result.ini"
+		},
+		"leasePolicy": "exclusive",
+		"simulationAvailable": false
+	},
+	"preflight": {
+		"requirePythonRoot": true,
+		"requireBridgeDirs": false,
+		"connectStage": false
+	}
+}

@@ -1,0 +1,68 @@
+node_modules/
+.DS_Store
+*.log
+*.tmp
+__pycache__/
+*.pyc
+lab-records/
+
+node_modules/
+dist/
+*.log
+.DS_Store
+*.tsbuildinfo
+# packages/*/node_modules/
+packages/*/dist/
+packages/*/dist-chrome/
+packages/*/dist-firefox/
+*.cpuprofile
+
+# Environment
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Experiment research runtime records (per-run artifacts, not source)
+.pi/raman-lab-config/raman-runtime.local.json
+.pi/raman-lab-config/raman-runtime.json
+.pi/experiment-runs/
+assets/agent_sessions/
+assets/ppt/
+artifacts/*
+
+# Editor files
+.agents/
+.vscode/
+.zed/
+.idea/
+.claude/
+.cursor/
+CLAUDE.md
+.codegraph/
+.mcp.json
+opencode.jsonc
+*.swp
+*.swo
+*~
+
+# Package specific
+.npm/
+coverage/
+.nyc_output/
+.pi_config/
+tui-debug.log
+compaction-results/
+.opencode/
+syntax.jsonl
+out.jsonl
+pi-*.html
+out.html
+packages/coding-agent/binaries/
+todo.md
+plans/
+.pi/hf-sessions/
+.pi/hf-sessions-backup/
+collect.sh
