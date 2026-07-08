@@ -21,16 +21,42 @@ The agent must run from a workspace that does not contain product source code.
 deploy/setup-workspace.sh /path/to/RamanLabWorkspace
 ```
 
+On a Windows lab machine, run the PowerShell script from the LabAgents product
+repo:
+
+```powershell
+.\deploy\setup-workspace.ps1 C:\RamanLab\RamanLabWorkspace
+```
+
 The setup script creates `.pi/settings.json`, `.pi/labagents-policy.json`, the
 `lab-config/` configuration directory (runtime configs, user prompts, and the
 deployed Raman Python driver copy), and the `lab-records/` output directory.
 It does not overwrite `lab-config/raman-runtime.local.json` or
 `lab-config/user-prompts.md`; re-running it refreshes the driver copy.
 
+For live Raman hardware, install the deployed Python driver dependencies on the
+lab machine:
+
+```powershell
+python -m pip install -r C:\RamanLab\RamanLabWorkspace\lab-config\drivers\raman-python\requirements.txt
+```
+
+The MC.Newton LT-06 vendor SDK wheel is bundled under
+`lab-config\drivers\raman-python\vendor\` and is loaded directly by the stage
+driver if it has not been installed into the Python environment. Installing it
+separately is optional unless the lab wants the SDK available outside
+LabAgents.
+
 ## Run
 
 ```sh
 deploy/run-labagents.sh /path/to/RamanLabWorkspace
+```
+
+On Windows:
+
+```powershell
+.\deploy\run-labagents.ps1 C:\RamanLab\RamanLabWorkspace
 ```
 
 The run script launches the locally installed, pinned `pi` binary from this

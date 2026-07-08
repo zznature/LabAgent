@@ -22,7 +22,7 @@ guardrail confines tool access to the workspace and blocks the product repo.
 
 ```text
 labagents/
-  src/                          # 1. all product source in one place
+  src/                          # all product source in one place
     extensions/
       experiment-research/      # semantic Raman planning, operator, runtime tools
       guardrail/                # pi tool-level workspace boundary checks

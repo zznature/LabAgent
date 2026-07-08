@@ -25,7 +25,7 @@ function Render-Template {
 	$content = $content.Replace("{{LABAGENTS_REPO}}", $LabAgentsRepo.Replace("\", "/"))
 	$content = $content.Replace("{{WORKSPACE_ROOT}}", $WorkspaceRoot.Replace("\", "/"))
 	$content = $content.Replace("{{PI_REPO}}", $PiRepo.Replace("\", "/"))
-	Set-Content -Path $Destination -Value $content -NoNewline
+	Set-Content -Path $Destination -Value $content -NoNewline -Encoding utf8
 }
 
 Render-Template `
@@ -37,6 +37,17 @@ Render-Template `
 Render-Template `
 	-Source (Join-Path $TemplateRoot "lab-config/raman-runtime.lab.json.template") `
 	-Destination (Join-Path $WorkspaceRoot "lab-config/raman-runtime.lab.json")
+
+# Dev mode: disable the guardrail extension for this workspace. Used when the
+# workspace is nested inside the product repo, where the default protectedRoot
+# (the repo itself) would otherwise block all workspace access. The policy file
+# is still rendered so run-labagents.ps1's presence check passes; it is simply
+# unused without the guardrail extension.
+if ($env:LABAGENTS_DEV -eq "1") {
+	$settingsPath = Join-Path $WorkspaceRoot ".pi/settings.json"
+	$lines = Get-Content -Path $settingsPath | Where-Object { $_ -notmatch "guardrail" }
+	Set-Content -Path $settingsPath -Value $lines -Encoding utf8
+}
 
 $LocalConfig = Join-Path $WorkspaceRoot "lab-config/raman-runtime.local.json"
 if (-not (Test-Path $LocalConfig)) {

@@ -33,6 +33,16 @@ render_template "$TEMPLATE_ROOT/.pi/settings.json.template" "$WORKSPACE_ROOT/.pi
 render_template "$TEMPLATE_ROOT/.pi/labagents-policy.json.template" "$WORKSPACE_ROOT/.pi/labagents-policy.json"
 render_template "$TEMPLATE_ROOT/lab-config/raman-runtime.lab.json.template" "$WORKSPACE_ROOT/lab-config/raman-runtime.lab.json"
 
+# Dev mode: disable the guardrail extension for this workspace. Used when the
+# workspace is nested inside the product repo (e.g. ./RamanLabWorkspace), where
+# the default protectedRoot (the repo itself) would otherwise block all
+# workspace access. The policy file is still rendered so run-labagents.sh's
+# presence check passes; it is simply unused without the guardrail extension.
+if [ "${LABAGENTS_DEV:-0}" = "1" ]; then
+  grep -v "guardrail" "$WORKSPACE_ROOT/.pi/settings.json" > "$WORKSPACE_ROOT/.pi/settings.json.tmp"
+  mv "$WORKSPACE_ROOT/.pi/settings.json.tmp" "$WORKSPACE_ROOT/.pi/settings.json"
+fi
+
 if [ ! -f "$WORKSPACE_ROOT/lab-config/raman-runtime.local.json" ]; then
   cp "$TEMPLATE_ROOT/lab-config/raman-runtime.local.json.example" \
     "$WORKSPACE_ROOT/lab-config/raman-runtime.local.json"
