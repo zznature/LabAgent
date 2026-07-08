@@ -47,17 +47,14 @@ const AutofocusParamsSchema = Type.Object(
 				{ additionalProperties: false },
 			),
 		),
-		coarseRangeUm: Type.Optional(Type.Number({ minimum: 0 })),
-		coarseStepUm: Type.Optional(Type.Number({ minimum: 0 })),
-		fineRangeUm: Type.Optional(Type.Number({ minimum: 0 })),
-		fineStepUm: Type.Optional(Type.Number({ minimum: 0 })),
-		zStartUm: Type.Optional(Type.Number()),
-		zEndUm: Type.Optional(Type.Number()),
+		zStartUm: Type.Number(),
+		zEndUm: Type.Number(),
 		pointCount: Type.Optional(Type.Integer({ minimum: 3 })),
-		minPoints: Type.Optional(Type.Integer({ minimum: 3 })),
-		maxPoints: Type.Optional(Type.Integer({ minimum: 3 })),
-		targetSpacingUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+		stageTimeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+		frameTimeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+		settleMs: Type.Optional(Type.Integer({ minimum: 0 })),
 		framesPerZ: Type.Optional(Type.Integer({ minimum: 1 })),
+		warmupFramesPerZ: Type.Optional(Type.Integer({ minimum: 0 })),
 		targetToleranceUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 		finalToleranceUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 		finalApproachOffsetUm: Type.Optional(Type.Number({ minimum: 0 })),
@@ -484,19 +481,14 @@ export const ramanRunAutofocusTool = {
 		const zMaxUm = stageZRange[1];
 		const roi = params.roi ?? DEFAULT_AUTOFOCUS_ROI;
 		const autofocusParams = {
-			zMinUm,
-			zMaxUm,
-			coarseRangeUm: params.coarseRangeUm,
-			coarseStepUm: params.coarseStepUm,
-			fineRangeUm: params.fineRangeUm,
-			fineStepUm: params.fineStepUm,
 			zStartUm: params.zStartUm,
 			zEndUm: params.zEndUm,
 			pointCount: params.pointCount,
-			minPoints: params.minPoints,
-			maxPoints: params.maxPoints,
-			targetSpacingUm: params.targetSpacingUm,
+			stageTimeoutMs: params.stageTimeoutMs,
+			frameTimeoutMs: params.frameTimeoutMs,
+			settleMs: params.settleMs,
 			framesPerZ: params.framesPerZ,
+			warmupFramesPerZ: params.warmupFramesPerZ,
 			targetToleranceUm: params.targetToleranceUm,
 			finalToleranceUm: params.finalToleranceUm,
 			finalApproachOffsetUm: params.finalApproachOffsetUm,
@@ -525,17 +517,7 @@ export const ramanRunAutofocusTool = {
 				false,
 			);
 		}
-		if ((params.zStartUm === undefined) !== (params.zEndUm === undefined)) {
-			return error(
-				"Fixed-range autofocus requires both zStartUm and zEndUm when either is provided.",
-				"autofocus_invalid_z_range",
-				proposalState,
-				false,
-			);
-		}
 		if (
-			params.zStartUm !== undefined &&
-			params.zEndUm !== undefined &&
 			(params.zStartUm < zMinUm || params.zStartUm > zMaxUm || params.zEndUm < zMinUm || params.zEndUm > zMaxUm)
 		) {
 			return error(
@@ -548,7 +530,7 @@ export const ramanRunAutofocusTool = {
 
 		if (params.confirmed !== true) {
 			return warning(
-				`Autofocus requires explicit confirmation before Z motion. ROI: x=${roi.x}, y=${roi.y}, width=${roi.width}, height=${roi.height}; allowed Z range: ${zMinUm}-${zMaxUm} um.`,
+				`Fixed-range autofocus requires explicit confirmation before Z motion. ROI: x=${roi.x}, y=${roi.y}, width=${roi.width}, height=${roi.height}; scan range: ${params.zStartUm}-${params.zEndUm} um; allowed Z range: ${zMinUm}-${zMaxUm} um.`,
 				proposalState,
 			);
 		}

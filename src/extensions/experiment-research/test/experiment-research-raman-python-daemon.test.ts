@@ -37,6 +37,8 @@ rl.on("line", (raw) => {
       payload.position = { xUm: 11, yUm: 22, zUm: 33 };
     } else if (req.action === "stage_move") {
       payload.finalPosition = req.payload.target;
+      payload.stageMoveCommands = [{ axis: "z", target_um: req.payload.target.zUm, method: "fake.move" }];
+      payload.stageSettleDiagnostics = { status: "settled", axes: ["z"] };
     } else if (req.action === "frame_capture") {
       payload.framePath = "D:\\RamanLab\\SpecBridge\\frames\\frame_1.tif";
     } else if (req.action === "spectrum") {
@@ -49,6 +51,15 @@ rl.on("line", (raw) => {
       payload.status = "ok";
       payload.zBestUm = 260;
       payload.confidence = 0.95;
+      payload.params = {
+        zStartUm: req.payload.params.zStartUm,
+        zEndUm: req.payload.params.zEndUm,
+        effectivePointCount: 10,
+        warmupFramesPerZ: req.payload.params.warmupFramesPerZ ?? 1
+      };
+      payload.scanPoints = [{ zUm: 260, score: 1.2, saturationRatio: 0 }];
+      payload.stageMoveCommands = [{ axis: "z", target_um: 260, method: "fake.move" }];
+      payload.stageSettleDiagnostics = { status: "settled", axes: ["z"] };
     } else if (req.action === "preflight") {
       payload.pythonRootExists = true;
     }
@@ -61,7 +72,7 @@ const tempRoots: string[] = [];
 const liveCwds: string[] = [];
 const liveDaemons: RamanPythonDaemon[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	while (liveDaemons.length > 0) {
 		liveDaemons.pop()?.shutdown();
 	}
@@ -71,10 +82,11 @@ afterEach(() => {
 			shutdownRamanPythonDaemon(cwd);
 		}
 	}
+	await new Promise((resolve) => setTimeout(resolve, 100));
 	while (tempRoots.length > 0) {
 		const path = tempRoots.pop();
 		if (path) {
-			rmSync(path, { recursive: true, force: true });
+			rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 		}
 	}
 });
@@ -186,6 +198,18 @@ describe("experiment research Raman Python daemon transport", () => {
 		expect(spectrum.status).toBe("success");
 		expect(spectrum.artifacts.map((artifact) => artifact.kind).sort()).toEqual(["spectrum", "spectrum-plot"]);
 		expect(spectrum.payload?.snr).toBe(12);
+
+		const autofocus = await runtime.autofocus.runSingle({
+			action: "autofocus.run_single",
+			stageResourceId: "stage-main",
+			frameProviderResourceId: "frame-main",
+			roi: { x: 100, y: 100, width: 64, height: 64 },
+			params: { zStartUm: 220, zEndUm: 300, pointCount: 10, warmupFramesPerZ: 1 },
+			timeoutMs: 5_000,
+		});
+		expect(autofocus.status).toBe("success");
+		expect((autofocus.payload?.params as Record<string, unknown>).effectivePointCount).toBe(10);
+		expect(autofocus.payload?.stageSettleDiagnostics).toEqual({ status: "settled", axes: ["z"] });
 	});
 
 	it("serializes concurrent actions so the single hardware session is never touched in parallel", async () => {

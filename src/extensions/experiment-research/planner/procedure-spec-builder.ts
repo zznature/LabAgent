@@ -55,17 +55,14 @@ interface AutofocusInput {
 		height: number;
 	};
 	params?: {
-		coarseRangeUm?: number;
-		coarseStepUm?: number;
-		fineRangeUm?: number;
-		fineStepUm?: number;
 		zStartUm?: number;
 		zEndUm?: number;
 		pointCount?: number;
-		minPoints?: number;
-		maxPoints?: number;
-		targetSpacingUm?: number;
+		stageTimeoutMs?: number;
+		frameTimeoutMs?: number;
+		settleMs?: number;
 		framesPerZ?: number;
+		warmupFramesPerZ?: number;
 		targetToleranceUm?: number;
 		finalToleranceUm?: number;
 		finalApproachOffsetUm?: number;

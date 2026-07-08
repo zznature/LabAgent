@@ -67,10 +67,11 @@ describe("experiment research core schemas", () => {
 						enabled: true,
 						roi: { x: 100, y: 120, width: 80, height: 80 },
 						params: {
-							coarseRangeUm: 60,
-							coarseStepUm: 10,
-							fineRangeUm: 10,
-							fineStepUm: 2,
+							zStartUm: 260,
+							zEndUm: 340,
+							pointCount: 10,
+							framesPerZ: 1,
+							warmupFramesPerZ: 1,
 						},
 					},
 					acquisition: {
@@ -181,6 +182,11 @@ describe("experiment research core schemas", () => {
 						params: {
 							zStartUm: 1500,
 							zEndUm: 1580,
+							pointCount: 10,
+							stageTimeoutMs: 3000,
+							frameTimeoutMs: 500,
+							settleMs: 100,
+							warmupFramesPerZ: 1,
 							targetToleranceUm: 1,
 							finalToleranceUm: 1,
 						},

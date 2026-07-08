@@ -458,10 +458,9 @@ domain:
         # Raman lab optimized fixed-range autofocus path.
         zStartUm: 340
         zEndUm: 260
-        targetSpacingUm: 5
-        minPoints: 5
-        maxPoints: 10
+        pointCount: 10
         framesPerZ: 1
+        warmupFramesPerZ: 1
         finalVerificationFramesPerZ: 1
     acquisition:
       integrationTimeS: 10
@@ -478,7 +477,9 @@ domain:
 - `laserPowerPercent` 是请求的 LabSpec 激光功率百分比档位
 - `limits.maxLaserPowerPercent` 是本次 run 的安全上界
 - Raman lab 的实际硬件功率不是连续值，spectrometer resource config 应声明允许的固定档位，例如 `0.01 / 0.1 / 1 / 3.2 / 5 / 10 / 25 / 50 / 100`
-- `autofocus.params.zStartUm/zEndUm` 表示实验室优化过的固定 Z range autofocus；旧的 `coarseRangeUm/fineRangeUm` coarse/fine path 仍作为兼容路径保留。
+- `autofocus.params.zStartUm/zEndUm` 表示实验室优化过的固定 Z range autofocus；MVP live daemon 不再支持旧的 `coarseRangeUm/fineRangeUm` coarse/fine path。
+- fixed-range autofocus 当前固定使用 10 点扫描；`pointCount` 可表达调用意图，但 daemon 会归一为有效 10 点，并在返回 payload 的 `params.effectivePointCount` / `params.effectiveSpacingUm` 中记录实际值。
+- `warmupFramesPerZ` 表示每个 Z 采样点丢弃的预热帧数；`framesPerZ` 表示参与评分的帧数。file-backed frame provider 会尽量只保留代表评分帧，减少 bridge 目录堆积。
 
 ## 9. 预检与维护工具如何接 Raman
 

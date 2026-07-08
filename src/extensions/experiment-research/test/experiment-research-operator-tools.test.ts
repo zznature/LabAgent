@@ -313,7 +313,7 @@ describe("experiment research operator tools", () => {
 
 		const proposalResult = await extension.tools
 			.get("raman_run_autofocus")
-			?.execute("autofocus-proposal", {}, undefined, undefined, context);
+			?.execute("autofocus-proposal", { zStartUm: 260, zEndUm: 340 }, undefined, undefined, context);
 		const proposalDetails = asRecord(proposalResult?.details);
 		const proposalState = asRecord(proposalDetails.stateAfter);
 
@@ -321,11 +321,12 @@ describe("experiment research operator tools", () => {
 		expect(proposalState.requiresConfirmation).toBe(true);
 		expect(proposalState.confirmed).toBe(false);
 		expect(asRecord(proposalState.roi)).toEqual({ x: 100, y: 100, width: 64, height: 64 });
-		expect(asRecord(proposalState.params).zMinUm).toBe(200);
+		expect(asRecord(proposalState.params).zStartUm).toBe(260);
+		expect(asRecord(proposalState.params).zEndUm).toBe(340);
 
 		const autofocusResult = await extension.tools
 			.get("raman_run_autofocus")
-			?.execute("autofocus-confirmed", { confirmed: true }, undefined, undefined, context);
+			?.execute("autofocus-confirmed", { zStartUm: 260, zEndUm: 340, confirmed: true }, undefined, undefined, context);
 		const autofocusDetails = asRecord(autofocusResult?.details);
 		const autofocusState = asRecord(autofocusDetails.stateAfter);
 
@@ -340,7 +341,7 @@ describe("experiment research operator tools", () => {
 		const unsafeContext = { cwd: unsafeCwd } as ExtensionContext;
 		const unsafeResult = await extension.tools
 			.get("raman_run_autofocus")
-			?.execute("autofocus-unsafe", { confirmed: true }, undefined, undefined, unsafeContext);
+			?.execute("autofocus-unsafe", { zStartUm: 260, zEndUm: 340, confirmed: true }, undefined, undefined, unsafeContext);
 		const unsafeDetails = asRecord(unsafeResult?.details);
 
 		expect(unsafeDetails.status).toBe("error");

@@ -77,17 +77,14 @@ export const RamanAutofocusSchema = Type.Object(
 		params: Type.Optional(
 			Type.Object(
 				{
-					coarseRangeUm: Type.Optional(Type.Number({ minimum: 0 })),
-					coarseStepUm: Type.Optional(Type.Number({ minimum: 0 })),
-					fineRangeUm: Type.Optional(Type.Number({ minimum: 0 })),
-					fineStepUm: Type.Optional(Type.Number({ minimum: 0 })),
 					zStartUm: Type.Optional(Type.Number()),
 					zEndUm: Type.Optional(Type.Number()),
 					pointCount: Type.Optional(Type.Integer({ minimum: 3 })),
-					minPoints: Type.Optional(Type.Integer({ minimum: 3 })),
-					maxPoints: Type.Optional(Type.Integer({ minimum: 3 })),
-					targetSpacingUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+					stageTimeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+					frameTimeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+					settleMs: Type.Optional(Type.Integer({ minimum: 0 })),
 					framesPerZ: Type.Optional(Type.Integer({ minimum: 1 })),
+					warmupFramesPerZ: Type.Optional(Type.Integer({ minimum: 0 })),
 					targetToleranceUm: Type.Optional(Type.Number({ minimum: 5 })),
 					finalToleranceUm: Type.Optional(Type.Number({ minimum: 5 })),
 					finalApproachOffsetUm: Type.Optional(Type.Number({ minimum: 0 })),

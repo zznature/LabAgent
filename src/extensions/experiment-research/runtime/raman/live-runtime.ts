@@ -447,6 +447,24 @@ function normalizeAutofocusResult(spec: ProcedureSpec, runtime: RamanLiveRuntime
 	return result;
 }
 
+function resolveAutofocusActionParams(spec: ProcedureSpec): NonNullable<AutofocusRunSingleAction["params"]> | ActionResult {
+	const params = spec.domain.raman.autofocus.params;
+	if (typeof params?.zStartUm !== "number" || typeof params.zEndUm !== "number") {
+		return failedActionResult("Fixed-range autofocus requires zStartUm and zEndUm in ProcedureSpec domain.raman.autofocus.params.", {
+			errorCode: "autofocus_invalid_params",
+			message: "Live Raman autofocus no longer supports coarse/fine search parameters; provide fixed zStartUm and zEndUm.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		});
+	}
+	return {
+		...params,
+		zStartUm: params.zStartUm,
+		zEndUm: params.zEndUm,
+	};
+}
+
 function autofocusRange(spec: ProcedureSpec): { zStartUm: number; zEndUm: number } | undefined {
 	const params = spec.domain.raman.autofocus.params;
 	const zStartUm = params?.zStartUm;
@@ -509,7 +527,7 @@ export async function validateRuntimeAnchorState(
 
 	const range = autofocusRange(spec);
 	const zAnchorUm = zAnchorFromSpec(spec);
-	const allowedDriftUm = Math.max(spec.domain.raman.autofocus.params?.targetSpacingUm ?? 5, 5);
+	const allowedDriftUm = 5;
 	const details: Record<string, unknown> = {
 		stagePosition: position,
 		autofocusRange: range,
@@ -631,6 +649,14 @@ export async function runLiveRamanUnit(
 		}
 
 		if (action.kind === "autofocus") {
+			const autofocusParams = resolveAutofocusActionParams(spec);
+			if ("status" in autofocusParams) {
+				return {
+					status: "failed",
+					error: toRuntimeError(autofocusParams, "autofocus_invalid_params"),
+					artifactRefs,
+				};
+			}
 			autofocusResult = normalizeAutofocusResult(
 				spec,
 				runtime,
@@ -639,7 +665,7 @@ export async function runLiveRamanUnit(
 					stageResourceId,
 					frameProviderResourceId,
 					roi: spec.domain.raman.autofocus.roi,
-					params: spec.domain.raman.autofocus.params,
+					params: autofocusParams,
 					timeoutMs: 30_000,
 				}),
 			);

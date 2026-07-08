@@ -128,6 +128,13 @@ function createSinglePointSpec(overrides?: {
 				autofocus: {
 					enabled: true,
 					roi: { x: 100, y: 100, width: 64, height: 64 },
+					params: {
+						zStartUm: 220,
+						zEndUm: 300,
+						pointCount: 10,
+						framesPerZ: 1,
+						warmupFramesPerZ: 1,
+					},
 				},
 				acquisition: {
 					integrationTimeMs: 1000,

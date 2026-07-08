@@ -601,7 +601,7 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				createActionResult(
 					await daemon.request(
 						"autofocus",
-						{ roi: action.roi, params: action.params ?? {}, timeoutMs: action.timeoutMs },
+						{ roi: action.roi, params: action.params, timeoutMs: action.timeoutMs },
 						action.timeoutMs + 10_000,
 					),
 				),

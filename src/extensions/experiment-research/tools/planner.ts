@@ -204,10 +204,9 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 					params: {
 						zStartUm: 1450,
 						zEndUm: 1550,
-						targetSpacingUm: 5,
-						minPoints: 5,
-						maxPoints: 25,
+						pointCount: 10,
 						framesPerZ: 1,
+						warmupFramesPerZ: 1,
 						finalVerificationFramesPerZ: 1,
 					},
 				},
