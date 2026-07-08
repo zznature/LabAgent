@@ -1,9 +1,9 @@
 {
-	"enabled": false,
-	"pythonExecutable": "python",
+	"enabled": true,
+	"pythonExecutable": "{{WORKSPACE_ROOT}}/.venv/Scripts/python.exe",
 	"stage": {
 		"config": {
-			"port": "COM5"
+			"port": "COM17"
 		}
 	}
 }

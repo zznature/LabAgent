@@ -11,6 +11,7 @@ New-Item -ItemType Directory -Force -Path $WorkspacePath | Out-Null
 $WorkspaceRoot = (Resolve-Path $WorkspacePath).Path
 $DefaultPiRepo = Join-Path (Split-Path -Parent $LabAgentsRepo) "pi"
 $PiRepo = if ($env:PI_REPO) { (Resolve-Path $env:PI_REPO).Path } elseif (Test-Path $DefaultPiRepo) { (Resolve-Path $DefaultPiRepo).Path } else { $DefaultPiRepo }
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 New-Item -ItemType Directory -Force -Path (Join-Path $WorkspaceRoot ".pi") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $WorkspaceRoot "lab-config") | Out-Null
@@ -25,7 +26,7 @@ function Render-Template {
 	$content = $content.Replace("{{LABAGENTS_REPO}}", $LabAgentsRepo.Replace("\", "/"))
 	$content = $content.Replace("{{WORKSPACE_ROOT}}", $WorkspaceRoot.Replace("\", "/"))
 	$content = $content.Replace("{{PI_REPO}}", $PiRepo.Replace("\", "/"))
-	Set-Content -Path $Destination -Value $content -NoNewline -Encoding utf8
+	[System.IO.File]::WriteAllText($Destination, $content, $Utf8NoBom)
 }
 
 Render-Template `
@@ -46,7 +47,7 @@ Render-Template `
 if ($env:LABAGENTS_DEV -eq "1") {
 	$settingsPath = Join-Path $WorkspaceRoot ".pi/settings.json"
 	$lines = Get-Content -Path $settingsPath | Where-Object { $_ -notmatch "guardrail" }
-	Set-Content -Path $settingsPath -Value $lines -Encoding utf8
+	[System.IO.File]::WriteAllText($settingsPath, ($lines -join [Environment]::NewLine), $Utf8NoBom)
 }
 
 $LocalConfig = Join-Path $WorkspaceRoot "lab-config/raman-runtime.local.json"

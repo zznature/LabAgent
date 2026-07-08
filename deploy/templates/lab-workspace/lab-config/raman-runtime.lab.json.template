@@ -1,7 +1,7 @@
 {
 	"enabled": true,
 	"pythonRoot": "lab-config/drivers/raman-python",
-	"pythonExecutable": "python",
+	"pythonExecutable": "{{WORKSPACE_ROOT}}/.venv/Scripts/python.exe",
 	"stage": {
 		"resourceId": "stage-main",
 		"kind": "stage",
