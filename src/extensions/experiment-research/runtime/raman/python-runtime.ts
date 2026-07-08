@@ -38,6 +38,8 @@ export interface RamanPythonRuntimeConfigInfo {
 	source: RamanPythonRuntimeConfigSource;
 	path?: string;
 	enabled: boolean;
+	pythonExecutable?: string;
+	pythonRoot?: string;
 	resources?: {
 		stage: {
 			resourceId: string;
@@ -475,8 +477,24 @@ function configCandidates(cwd: string): RamanPythonRuntimeConfigCandidate[] {
 	];
 }
 
-function readConfigFile(path: string): RamanPythonRuntimeConfig {
+function readConfigRecord(path: string): Record<string, unknown> {
 	const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+	if (!isRecord(parsed)) {
+		throw new Error(`Invalid Raman Python runtime config at ${path}: config must be a JSON object.`);
+	}
+	return parsed;
+}
+
+function mergeConfigRecord(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...base };
+	for (const [key, overrideValue] of Object.entries(override)) {
+		const baseValue = merged[key];
+		merged[key] = isRecord(baseValue) && isRecord(overrideValue) ? mergeConfigRecord(baseValue, overrideValue) : overrideValue;
+	}
+	return merged;
+}
+
+function validateConfig(path: string, parsed: Record<string, unknown>): RamanPythonRuntimeConfig {
 	if (!isRecord(parsed) || typeof parsed.enabled !== "boolean") {
 		throw new Error(`Invalid Raman Python runtime config at ${path}: enabled must be boolean.`);
 	}
@@ -492,15 +510,28 @@ function readConfigFile(path: string): RamanPythonRuntimeConfig {
 }
 
 function readConfig(cwd: string): LoadedRamanPythonRuntimeConfig | undefined {
-	for (const candidate of configCandidates(cwd)) {
-		const path = candidate.path;
-		if (!existsSync(path)) {
-			continue;
+	const [localCandidate, labCandidate] = configCandidates(cwd);
+	if (localCandidate && existsSync(localCandidate.path)) {
+		const localConfig = readConfigRecord(localCandidate.path);
+		if (localConfig.enabled === false || !labCandidate || !existsSync(labCandidate.path)) {
+			return {
+				source: localCandidate.source,
+				path: localCandidate.path,
+				config: validateConfig(localCandidate.path, localConfig),
+			};
 		}
+		const labConfig = readConfigRecord(labCandidate.path);
 		return {
-			source: candidate.source,
-			path,
-			config: readConfigFile(path),
+			source: localCandidate.source,
+			path: localCandidate.path,
+			config: validateConfig(localCandidate.path, mergeConfigRecord(labConfig, localConfig)),
+		};
+	}
+	if (labCandidate && existsSync(labCandidate.path)) {
+		return {
+			source: labCandidate.source,
+			path: labCandidate.path,
+			config: validateConfig(labCandidate.path, readConfigRecord(labCandidate.path)),
 		};
 	}
 	return undefined;
@@ -520,12 +551,16 @@ export function getRamanPythonRuntimeConfigInfo(cwd: string): RamanPythonRuntime
 			source: loaded.source,
 			path: loaded.path,
 			enabled: false,
+			pythonExecutable: config.pythonExecutable,
+			pythonRoot: config.pythonRoot,
 		};
 	}
 	return {
 		source: loaded.source,
 		path: loaded.path,
 		enabled: config.enabled,
+		pythonExecutable: config.pythonExecutable,
+		pythonRoot: config.pythonRoot,
 		resources: {
 			stage: {
 				resourceId: config.stage.resourceId,

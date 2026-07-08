@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
 import {
 	clearRamanLiveRuntime,
+	getRamanPythonRuntimeConfigInfo,
 	getRamanLiveRuntime,
 	RAMAN_PYTHON_RUNTIME_LAB_CONFIG_PATH,
 	RAMAN_PYTHON_RUNTIME_LOCAL_CONFIG_PATH,
@@ -128,6 +129,12 @@ function writeDisabledRuntimeConfig(cwd: string, relativePath: string): void {
 	writeFileSync(configPath, `${JSON.stringify({ enabled: false }, null, 2)}\n`, "utf-8");
 }
 
+function writePartialRuntimeConfig(cwd: string, relativePath: string, config: Record<string, unknown>): void {
+	const configPath = join(cwd, relativePath);
+	mkdirSync(dirname(configPath), { recursive: true });
+	writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+}
+
 function createNoHardwareRuntime(): RamanLiveRuntime {
 	return {
 		preflight() {
@@ -187,10 +194,18 @@ describe("experiment research Python Raman runtime config", () => {
 		);
 	});
 
-	it("prefers local config over lab config", async () => {
+	it("merges local config over lab config", async () => {
 		const cwd = createTempCwd();
 		writeRuntimeConfig(cwd, RAMAN_PYTHON_RUNTIME_LAB_CONFIG_PATH, true, "COM5");
-		writeRuntimeConfig(cwd, RAMAN_PYTHON_RUNTIME_LOCAL_CONFIG_PATH, true, "COM17");
+		writePartialRuntimeConfig(cwd, RAMAN_PYTHON_RUNTIME_LOCAL_CONFIG_PATH, {
+			enabled: true,
+			pythonExecutable: "C:\\Users\\RAMAN\\miniconda3\\python.exe",
+			stage: {
+				config: {
+					port: "COM17",
+				},
+			},
+		});
 		const extension = loadExperimentExtension();
 		const [sessionStart] = extension.handlers.get("session_start") ?? [];
 
@@ -198,6 +213,15 @@ describe("experiment research Python Raman runtime config", () => {
 
 		const runtime = getRamanLiveRuntime(cwd);
 		expect(runtime?.stage.resource.config.port).toBe("COM17");
+		expect(runtime?.stage.resource.config.xChannel).toBe(1);
+		expect(runtime?.frame.resource.config.bridgeDir).toBe("D:\\RamanLab\\SpecBridge");
+		expect(getRamanPythonRuntimeConfigInfo(cwd)).toEqual(
+			expect.objectContaining({
+				source: "local",
+				enabled: true,
+				pythonExecutable: "C:\\Users\\RAMAN\\miniconda3\\python.exe",
+			}),
+		);
 		const labState = await extension.tools
 			.get("get_lab_state")
 			?.execute("lab-state", {}, undefined, undefined, { cwd } as ExtensionContext);
