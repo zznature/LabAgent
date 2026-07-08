@@ -34,6 +34,7 @@ labagents/
 
   deploy/                       # deployment scripts and workspace templates
     setup-workspace.sh / .ps1   # generate or refresh a lab workspace
+    sync-driver.ps1             # refresh only the deployed Raman Python driver
     run-labagents.sh / .ps1     # start the pinned pi runtime from the workspace
     smoke-mac.mjs               # verifies the deployment boundary
     templates/
@@ -76,6 +77,9 @@ Everything needed to create and run a lab deployment:
   `lab-config/` and `lab-records/`, and refreshes the deployed driver copy at
   `lab-config/drivers/raman-python/`. It never overwrites an existing
   `raman-runtime.local.json` or `user-prompts.md`.
+- `sync-driver.ps1` refreshes only the deployed Raman Python driver copy at
+  `lab-config/drivers/raman-python/`. It does not rewrite `.pi` files or
+  `lab-config/*.json` / `lab-config/user-prompts.md`.
 - `run-labagents.*` starts the pinned local pi binary with cwd set to the lab
   workspace.
 - `smoke-mac.mjs` verifies the generated workspace: extension paths, policy
@@ -130,6 +134,8 @@ Copying it into `lab-config/drivers/` gives a clean release boundary:
 - Lab configuration and its driver deployment travel together.
 
 Re-running `setup-workspace.*` refreshes the copy after a product upgrade.
+For driver-only development updates on Windows, run `deploy/sync-driver.ps1`
+against the workspace instead.
 
 ## Boundary Rules
 

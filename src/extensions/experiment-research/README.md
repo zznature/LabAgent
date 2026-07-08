@@ -101,20 +101,24 @@ The rebuild loads stable lab hardware context at session start. Runtime config
 resolution is:
 
 ```text
-lab-config/raman-runtime.local.json
-> lab-config/raman-runtime.lab.json
+lab-config/raman-runtime.lab.json
++ lab-config/raman-runtime.local.json overrides
 > no live runtime
 ```
 
 `raman-runtime.lab.json` is the committed lab default. `raman-runtime.local.json`
-is a git-ignored local override for temporary port/path/enablement changes.
+is a git-ignored local override for temporary port/path/enablement changes. The
+local file is merged over the lab default, so a machine can override only fields
+such as `pythonExecutable`, `stage.config.port`, or LabSpec bridge directories.
+Set `"enabled": false` in local config to explicitly disable live hardware on
+one machine.
 
 Current lab default:
 
 ```json
 {
   "enabled": true,
-  "pythonExecutable": "python",
+  "pythonExecutable": "C:\\RamanLab\\RamanLabWorkspace\\.venv\\Scripts\\python.exe",
   "pythonRoot": "lab-config/drivers/raman-python",
   "stage": {
     "resourceId": "stage-main",
@@ -170,9 +174,10 @@ Current lab default:
 }
 ```
 
-Set `"enabled": false` in `raman-runtime.local.json` to keep hardware disabled
-explicitly on one machine. Without an enabled registered runtime,
-live-supervised `approve_and_start_run` returns `live_runtime_unavailable`;
+Use an absolute workspace-local `pythonExecutable` path. The deployment template
+renders it as `<workspace>\\.venv\\Scripts\\python.exe`; local config can still
+override it for a machine-specific environment. Without an enabled registered
+runtime, live-supervised `approve_and_start_run` returns `live_runtime_unavailable`;
 simulation remains available.
 
 The committed lab default lives at:

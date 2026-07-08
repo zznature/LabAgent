@@ -156,13 +156,25 @@ LabAgent 初始化时加载它，把设备能力与边界带入上下文。
 lab-config/raman-runtime.local.json
 ```
 
-加载优先级固定为：
+加载语义固定为：
 
 ```text
-raman-runtime.local.json > raman-runtime.lab.json > no live runtime
+raman-runtime.lab.json + raman-runtime.local.json overrides > no live runtime
 ```
 
-这避免把临时现场调整写回实验室默认配置。
+`raman-runtime.local.json` 是覆盖层，不是完整替代；常见用法是只覆盖
+`pythonExecutable`、`stage.config.port` 或 LabSpec bridge 目录。若本机需要显式禁用
+live hardware，在 local 文件中设置 `"enabled": false`。这避免把临时现场调整写回实验室默认配置。
+
+`pythonExecutable` 应写绝对路径，避免不同 shell / conda 环境下裸 `python` 指向不确定。
+默认使用 workspace-local `.venv`：
+
+```json
+{ "pythonExecutable": "C:\\RamanLab\\RamanLabWorkspace\\.venv\\Scripts\\python.exe" }
+```
+
+若某台机器必须使用不同环境，只在 `raman-runtime.local.json` 覆盖
+`pythonExecutable`，不要把用户级 conda/base 路径写进 lab 默认配置。
 
 Live runtime 使用的 Python 硬件驱动固定在：
 
