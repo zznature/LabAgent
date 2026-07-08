@@ -229,7 +229,8 @@ class AutofocusController:
         confidence, diagnostics = self._fixed_range_confidence(result)
         quality = self._quality_from_confidence(confidence)
         recommendation = self._recommendation_from_diagnostics(diagnostics)
-        message = "" if quality == "good" else f"Fixed-range focus quality is {quality} (confidence {confidence:.2f})."
+        status = FocusStatus.OK if confidence >= 0.2 else FocusStatus.LOW_CONFIDENCE
+        message = "" if status == FocusStatus.OK else f"Fixed-range focus quality is {quality} (confidence {confidence:.2f})."
         curve = ScanCurve(
             phase="coarse",
             points=[
@@ -238,7 +239,7 @@ class AutofocusController:
             ],
         )
         return FocusResult(
-            status=FocusStatus.OK,
+            status=status,
             z_best_um=result.final_z_um,
             final_score=result.final_verification.score,
             confidence=confidence,

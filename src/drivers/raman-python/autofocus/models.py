@@ -52,6 +52,7 @@ class Frame:
     image: np.ndarray       # 2D grayscale (H, W) or 3D (H, W, C)
     timestamp: float        # Seconds, monotonic clock
     seq: int                # Monotonically increasing frame index
+    path: str | None = None # Source file path when the provider is file-backed.
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,18 @@ class FrameProvider(Protocol):
 
     def wait_for_next(self, after_ts: float, timeout_ms: int) -> Frame:
         """Block until a Frame with timestamp > after_ts arrives; raise FrameTimeoutError on timeout."""
+        ...
+
+    def wait_for_batch(self, count: int, after_ts: float, timeout_ms: int) -> list[Frame]:
+        """Block until count fresh frames are available."""
+        ...
+
+
+class FrameRetentionProvider(Protocol):
+    """Optional file retention interface for providers that persist frames."""
+
+    def discard_frames(self, paths: list[str]) -> None:
+        """Discard captured frames that should not be retained as artifacts."""
         ...
 
 
@@ -103,7 +116,7 @@ class AutofocusParams:
 
     # Timing
     settle_ms: int = 100
-    frame_timeout_ms: int = 500
+    frame_timeout_ms: int = 3000
     stage_timeout_ms: int = 3000
 
     # Acquisition
@@ -145,14 +158,12 @@ class FixedRangeAutofocusParams:
 
     z_start_um: float
     z_end_um: float
-    point_count: Optional[int] = None
-    min_points: int = 5
-    max_points: int = 10
-    target_spacing_um: float = 5.0
-    stage_timeout_ms: int = 3000
-    frame_timeout_ms: int = 500
+    point_count: int = 10
+    stage_timeout_ms: int = 30000
+    frame_timeout_ms: int = 3000
     settle_ms: int = 100
     frames_per_z: int = 1
+    warmup_frames_per_z: int = 1
     target_tolerance_um: float = 5.0
     final_tolerance_um: float = 5.0
     final_approach_offset_um: float = 3.0
@@ -163,14 +174,8 @@ class FixedRangeAutofocusParams:
     def __post_init__(self) -> None:
         if self.z_start_um == self.z_end_um:
             raise ValueError("z_start_um and z_end_um must be different.")
-        if self.point_count is not None and self.point_count < 3:
-            raise ValueError("point_count must be at least 3 when set.")
-        if self.min_points < 3:
-            raise ValueError("min_points must be at least 3.")
-        if self.max_points < self.min_points:
-            raise ValueError("max_points must be greater than or equal to min_points.")
-        if self.target_spacing_um <= 0:
-            raise ValueError("target_spacing_um must be positive.")
+        if self.point_count < 3:
+            raise ValueError("point_count must be at least 3.")
         if self.stage_timeout_ms <= 0:
             raise ValueError("stage_timeout_ms must be positive.")
         if self.frame_timeout_ms <= 0:
@@ -179,6 +184,8 @@ class FixedRangeAutofocusParams:
             raise ValueError("settle_ms must be non-negative.")
         if self.frames_per_z <= 0:
             raise ValueError("frames_per_z must be positive.")
+        if self.warmup_frames_per_z < 0:
+            raise ValueError("warmup_frames_per_z must be non-negative.")
         if self.target_tolerance_um <= 0:
             raise ValueError("target_tolerance_um must be positive.")
         if self.final_tolerance_um <= 0:

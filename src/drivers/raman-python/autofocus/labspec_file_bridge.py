@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import json
 from pathlib import Path
 
 from autofocus.exceptions import FrameTimeoutError
@@ -13,6 +14,16 @@ from mapping import (
     create_labspec_video_frame_request,
     read_labspec_result,
 )
+
+
+def _trace_bridge(bridge_dir: Path, message: str, payload: dict | None = None) -> None:
+    try:
+        trace_path = bridge_dir / "frame_bridge_trace.log"
+        record = {"ts": time.time(), "message": message, "payload": payload or {}}
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 class LabSpecFileBridgeFrameProvider:
@@ -42,11 +53,17 @@ class LabSpecFileBridgeFrameProvider:
 
     def connect(self) -> tuple[int, int]:
         self.bridge_dir.mkdir(parents=True, exist_ok=True)
-        if not self.accept_existing_on_connect:
-            self._seen_paths = set(self._iter_stable_frame_paths())
+        # Each capture request uses a unique output path, so scanning all historical
+        # frames is unnecessary and can delay start_video by minutes in busy bridges.
+        self._seen_paths = set()
         start_request = create_labspec_start_video_request(
             bridge_dir=self.bridge_dir,
             request_id=f"start_video_{time.monotonic_ns()}",
+        )
+        _trace_bridge(
+            self.bridge_dir,
+            "start_video_request_created",
+            {"requestId": start_request.request_id, "requestPath": str(start_request.request_path), "resultPath": str(start_request.result_path)},
         )
         self._wait_for_result(
             start_request.result_path,
@@ -87,6 +104,11 @@ class LabSpecFileBridgeFrameProvider:
 
         deadline = time.monotonic() + timeout_ms / 1000.0
         request = self._request_capture(timeout_ms)
+        _trace_bridge(
+            self.bridge_dir,
+            "capture_frame_request_created",
+            {"requestId": request.request_id, "requestPath": str(request.request_path), "resultPath": str(request.result_path), "outputPath": str(request.output_path)},
+        )
         requested_path = request.output_path
         if requested_path is None:
             raise FrameTimeoutError(f"LabSpec capture request {request.request_id} has no output path")
@@ -101,7 +123,7 @@ class LabSpecFileBridgeFrameProvider:
                 image = np.asarray(Image.open(result_frame_path))
                 self._seen_paths.add(result_frame_path)
                 self._seq += 1
-                frame = Frame(image=image, timestamp=frame_ts, seq=self._seq)
+                frame = Frame(image=image, timestamp=frame_ts, seq=self._seq, path=str(result_frame_path))
                 self._last_frame = frame
                 return frame
             time.sleep(0.05)
@@ -109,6 +131,26 @@ class LabSpecFileBridgeFrameProvider:
             f"No LabSpec bridge frame for request {request.request_id} in {self.bridge_dir} "
             f"within {timeout_ms}ms"
         )
+
+    def wait_for_batch(self, count: int, after_ts: float, timeout_ms: int) -> list[Frame]:
+        if count <= 0:
+            raise ValueError("count must be positive.")
+        frames: list[Frame] = []
+        current_after_ts = after_ts
+        for _ in range(count):
+            frame = self.wait_for_next(after_ts=current_after_ts, timeout_ms=timeout_ms)
+            frames.append(frame)
+            current_after_ts = frame.timestamp
+        return frames
+
+    def discard_frames(self, paths: list[str]) -> None:
+        for value in paths:
+            path = Path(value)
+            try:
+                if path.exists() and path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
 
     def _request_capture(self, timeout_ms: int):
         request_id = f"cap_{time.monotonic_ns()}"

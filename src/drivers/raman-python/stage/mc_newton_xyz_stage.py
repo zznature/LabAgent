@@ -56,8 +56,8 @@ class MCNewtonXYZStageController:
         channel_switch_wait_ms: float = 100.0,
         disable_on_disconnect: bool = True,
         exclusive_channel: bool = True,
-        x_target_tolerance_um: float = 1.0,
-        y_target_tolerance_um: float = 1.0,
+        x_target_tolerance_um: float = 5.0,
+        y_target_tolerance_um: float = 5.0,
         z_target_tolerance_um: float = 5.0,
         stability_tolerance_um: float = 0.2,
         settle_correction_attempts: int = 0,
@@ -118,7 +118,8 @@ class MCNewtonXYZStageController:
         self._enabled_channels: set[int] = set()
         self._last_targets_um: dict[str, float] = {}
         self._last_pulse_axes: set[str] = set()
-        self.last_move_commands: list[dict[str, float | str | bool]] = []
+        self.last_move_commands: list[dict[str, Any]] = []
+        self.last_settle_diagnostics: dict[str, Any] = {}
 
     def __enter__(self) -> "MCNewtonXYZStageController":
         self.connect()
@@ -327,11 +328,46 @@ class MCNewtonXYZStageController:
         target_axes = self._normalize_wait_axes(axes)
         t_start = time.monotonic()
         previous = {axis: self.get_axis_position_um(axis, preserve_enabled_channels=True) for axis in target_axes}
+        samples: list[dict[str, Any]] = []
+        diagnostics: dict[str, Any] = {
+            "status": "waiting",
+            "axes": sorted(target_axes),
+            "timeoutMs": int(timeout_ms),
+            "targetsUm": {
+                axis: target
+                for axis, target in self._last_targets_um.items()
+                if axis in target_axes
+            },
+            "tolerancesUm": {
+                axis: self._target_tolerances_um.get(axis, 1.0)
+                for axis in target_axes
+            },
+            "stabilityToleranceUm": self._stability_tolerance_um,
+            "initialReadUm": dict(previous),
+            "moveCommandsAtStart": list(self.last_move_commands),
+            "samples": samples,
+        }
+        self.last_settle_diagnostics = diagnostics
 
         while True:
             time.sleep(0.100)
             remaining = {axis: self.read_remaining_pulses(axis) for axis in target_axes}
             current = {axis: self.get_axis_position_um(axis, preserve_enabled_channels=True) for axis in target_axes}
+            elapsed_ms = (time.monotonic() - t_start) * 1000.0
+            sample = {
+                "elapsedMs": elapsed_ms,
+                "currentUm": dict(current),
+                "previousUm": dict(previous),
+                "remainingPulses": dict(remaining),
+                "deltaToTargetUm": {
+                    axis: current[axis] - target
+                    for axis, target in self._last_targets_um.items()
+                    if axis in current
+                },
+            }
+            samples.append(sample)
+            if len(samples) > 120:
+                samples.pop(0)
             all_pulses_done = all(value <= 0 for value in remaining.values())
             all_stable = all(
                 abs(current[axis] - previous[axis]) < self._stability_tolerance_um
@@ -343,11 +379,28 @@ class MCNewtonXYZStageController:
                 if axis in target_axes
             )
             if all_pulses_done and all_stable and all_reached:
+                diagnostics.update({
+                    "status": "settled",
+                    "elapsedMs": elapsed_ms,
+                    "finalReadUm": dict(current),
+                    "finalRemainingPulses": dict(remaining),
+                    "sampleCountRetained": len(samples),
+                    "moveCommandsAtEnd": list(self.last_move_commands),
+                })
                 return
 
             previous = current
-            elapsed_ms = (time.monotonic() - t_start) * 1000.0
             if elapsed_ms > timeout_ms:
+                verification_reads = self._verification_reads(target_axes, count=3)
+                diagnostics.update({
+                    "status": "timeout",
+                    "elapsedMs": elapsed_ms,
+                    "latestReadUm": dict(current),
+                    "latestRemainingPulses": dict(remaining),
+                    "verificationReads": verification_reads,
+                    "sampleCountRetained": len(samples),
+                    "moveCommandsAtEnd": list(self.last_move_commands),
+                })
                 current_text = ", ".join(f"{axis}={value:.3f}" for axis, value in current.items())
                 target_text = ", ".join(f"{axis}={value:.3f}" for axis, value in self._last_targets_um.items())
                 pulse_text = ", ".join(f"{axis}={value}" for axis, value in remaining.items())
@@ -431,8 +484,26 @@ class MCNewtonXYZStageController:
         self._select_axis(axis)
         self._apply_axis_motion_profile(axis)
         target_mm = target_um / 1000.0
-        self._send_move_target_mm(axis, target_mm)
+        self._send_move_target_mm(axis, target_mm, target_um)
         self._last_targets_um[axis.lower()] = target_um
+
+    def _verification_reads(self, axes: set[str], count: int) -> list[dict[str, Any]]:
+        reads: list[dict[str, Any]] = []
+        for index in range(count):
+            if index > 0:
+                time.sleep(0.050)
+            read: dict[str, Any] = {"index": index, "positionsUm": {}, "remainingPulses": {}, "errors": {}}
+            for axis in sorted(axes):
+                try:
+                    read["positionsUm"][axis] = self.get_axis_position_um(axis, preserve_enabled_channels=True)
+                except Exception as exc:
+                    read["errors"][f"{axis}Position"] = f"{type(exc).__name__}: {exc}"
+                try:
+                    read["remainingPulses"][axis] = self.read_remaining_pulses(axis)
+                except Exception as exc:
+                    read["errors"][f"{axis}Pulses"] = f"{type(exc).__name__}: {exc}"
+            reads.append(read)
+        return reads
 
     def _normalize_wait_axes(self, axes: set[str] | None) -> set[str]:
         if axes is None:
@@ -461,7 +532,7 @@ class MCNewtonXYZStageController:
         )
         self._configured_axis_profiles[key] = profile
 
-    def _send_move_target_mm(self, axis: str, target_mm: float) -> None:
+    def _send_move_target_mm(self, axis: str, target_mm: float, target_um: float) -> None:
         assert self._sdk is not None
         status, response = self._sdk_call(self._sdk.move_close_target, target_mm)
         tolerated_empty_target_error = (
@@ -472,6 +543,9 @@ class MCNewtonXYZStageController:
             "axis": axis.lower(),
             "method": "sdk.move_close_target",
             "target_mm": target_mm,
+            "target_um": target_um,
+            "channel": self._channels[axis.lower()],
+            "profile": str(self._axis_motion_profiles[axis.lower()]),
             "status": getattr(status, "name", str(status)),
             "response": str(response),
             "tolerated": tolerated_empty_target_error,

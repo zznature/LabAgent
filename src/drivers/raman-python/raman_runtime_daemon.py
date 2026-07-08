@@ -12,7 +12,8 @@ Protocol (one JSON object per line):
              "payload": {...}}
   response: {"requestId": str, "ok": bool, ...}
 
-This module is the live runtime import surface.
+This module is the live runtime import surface. ``docs/Raman`` stays
+reference-only and must not be imported here.
 """
 
 from __future__ import annotations
@@ -33,6 +34,17 @@ sys.stdout = sys.stderr
 _DAEMON_ROOT = Path(__file__).resolve().parent
 if str(_DAEMON_ROOT) not in sys.path:
     sys.path.insert(0, str(_DAEMON_ROOT))
+
+
+def _trace(message: str, payload: dict | None = None) -> None:
+    try:
+        trace_path = Path(".pi/experiment-research/raman-daemon-trace.log")
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"ts": __import__("time").time(), "message": message, "payload": payload or {}}
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def emit(value: dict) -> None:
@@ -62,6 +74,34 @@ def _fail(
         "safeToResume": safe_to_resume,
         "payload": payload or {},
     }
+
+
+def _stage_move_commands(stage: Any | None) -> list[dict[str, Any]]:
+    if stage is None:
+        return []
+    commands = getattr(stage, "last_move_commands", [])
+    if not isinstance(commands, list):
+        return []
+    return [dict(command) for command in commands if isinstance(command, dict)]
+
+
+def _stage_settle_diagnostics(stage: Any | None) -> dict[str, Any]:
+    if stage is None:
+        return {}
+    diagnostics = getattr(stage, "last_settle_diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        return {}
+    return dict(diagnostics)
+
+
+def _stage_error_payload(stage: Any | None, extra: dict | None = None) -> dict:
+    payload = {
+        "stageMoveCommands": _stage_move_commands(stage),
+        "stageSettleDiagnostics": _stage_settle_diagnostics(stage),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 def _stable_file(path: Path) -> bool:
@@ -121,10 +161,7 @@ def parse_spectrum_metrics(
     snr = (peak - baseline) / noise if noise > 0 else 0.0
     denominator = abs(baseline) if abs(baseline) > 1e-9 else 1.0
     return {
-        "saturated": bool(
-            saturation_intensity is not None
-            and max(intensities) >= saturation_intensity
-        ),
+        "saturated": bool(saturation_intensity is not None and max(intensities) >= saturation_intensity),
         "snr": float(max(0.0, snr)),
         "targetPeakBaselineRatio": float(peak / denominator),
     }
@@ -162,13 +199,16 @@ class HardwareSession:
         from autofocus.labspec_file_bridge import LabSpecFileBridgeFrameProvider
 
         if self._frame is None:
+            bridge_dir = Path(frame_cfg["config"]["bridgeDir"])
+            _trace("frame_provider_connect_start", {"bridgeDir": str(bridge_dir), "timeoutMs": initial_timeout_ms})
             provider = LabSpecFileBridgeFrameProvider(
-                Path(frame_cfg["config"]["bridgeDir"]),
+                bridge_dir,
                 image_format=frame_cfg["config"]["imageFormat"],
                 min_capture_interval_ms=frame_cfg["config"]["minCaptureIntervalMs"],
                 initial_timeout_ms=initial_timeout_ms,
             )
             provider.connect()
+            _trace("frame_provider_connect_ok", {"bridgeDir": str(bridge_dir)})
             self._frame = provider
         return self._frame
 
@@ -230,33 +270,19 @@ def _handle_preflight(session: HardwareSession, request: dict, payload: dict) ->
     details = {
         "pythonRootExists": python_root.exists(),
         "frameBridgeDirExists": Path(frame_cfg["config"]["bridgeDir"]).exists(),
-        "spectrumBridgeDirExists": Path(
-            spectrometer_cfg["config"]["bridgeDir"]
-        ).exists(),
+        "spectrumBridgeDirExists": Path(spectrometer_cfg["config"]["bridgeDir"]).exists(),
     }
     if payload.get("requirePythonRoot", True) and not details["pythonRootExists"]:
-        return _fail(
-            "python_root_missing",
-            f"Python root does not exist: {python_root}",
-            payload=details,
-        )
+        return _fail("python_root_missing", f"Python root does not exist: {python_root}", payload=details)
     if payload.get("requireBridgeDirs", False) and (
         not details["frameBridgeDirExists"] or not details["spectrumBridgeDirExists"]
     ):
-        return _fail(
-            "bridge_dir_missing",
-            "One or more LabSpec bridge directories are missing.",
-            payload=details,
-        )
+        return _fail("bridge_dir_missing", "One or more LabSpec bridge directories are missing.", payload=details)
     if payload.get("connectStage", False):
         stage = session.stage(request["stage"])
         position = stage.get_position_um()
         session.disable_stage_axes()
-        details["stagePosition"] = {
-            "xUm": position.x_um,
-            "yUm": position.y_um,
-            "zUm": position.z_um,
-        }
+        details["stagePosition"] = {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um}
     return _success("Python Raman preflight completed.", details)
 
 
@@ -266,47 +292,51 @@ def _handle_stage_position(session: HardwareSession, request: dict) -> dict:
     session.disable_stage_axes()
     return _success(
         "Stage position read.",
-        {
-            "position": {
-                "xUm": position.x_um,
-                "yUm": position.y_um,
-                "zUm": position.z_um,
-            }
-        },
+        {"position": {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um}},
     )
 
 
 def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -> dict:
     target = payload["target"]
     stage = session.stage(request["stage"])
-    stage.move_absolute_and_wait_um(
-        x_um=target.get("xUm"),
-        y_um=target.get("yUm"),
-        z_um=target.get("zUm"),
-        timeout_ms=int(payload["timeoutMs"]),
-    )
-    position = stage.get_position_um()
+    try:
+        stage.move_absolute_and_wait_um(
+            x_um=target.get("xUm"),
+            y_um=target.get("yUm"),
+            z_um=target.get("zUm"),
+            timeout_ms=int(payload["timeoutMs"]),
+        )
+        position = stage.get_position_um()
+    except Exception as exc:
+        error_payload = _stage_error_payload(stage, {"target": target, "exceptionType": type(exc).__name__})
+        _trace("stage_move_error", error_payload)
+        session.disable_stage_axes()
+        return _fail(
+            "stage_move_failed",
+            str(exc),
+            retry_safe=True,
+            safe_to_resume=True,
+            payload=error_payload,
+        )
     session.disable_stage_axes()
     return _success(
         "Stage moved to requested point.",
         {
-            "finalPosition": {
-                "xUm": position.x_um,
-                "yUm": position.y_um,
-                "zUm": position.z_um,
-            }
+            "finalPosition": {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um},
+            "stageMoveCommands": _stage_move_commands(stage),
+            "stageSettleDiagnostics": _stage_settle_diagnostics(stage),
         },
     )
 
 
-def _handle_frame_capture(
-    session: HardwareSession, request: dict, payload: dict
-) -> dict:
+def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict) -> dict:
     frame_cfg = request["frameProvider"]
     bridge_dir = Path(frame_cfg["config"]["bridgeDir"])
     image_format = frame_cfg["config"]["imageFormat"]
     timeout_ms = int(payload["timeoutMs"])
+    _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
     provider = session.frame(frame_cfg, timeout_ms)
+    _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
     frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
     return _success(
         "Frame captured through LabSpec bridge.",
@@ -321,82 +351,66 @@ def _handle_frame_capture(
 
 def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) -> dict:
     from autofocus.controller import AutofocusController
-    from autofocus.models import ROI, AutofocusParams, FixedRangeAutofocusParams
+    from autofocus.models import FixedRangeAutofocusParams, ROI
 
     stage_cfg = request["stage"]
-    z_range = stage_cfg["limits"]["zRangeUm"]
     params = payload.get("params") or {}
     timeout_ms = int(payload["timeoutMs"])
-    stage = _ZOnlyStageAdapter(session.stage(stage_cfg))
+    xyz_stage = session.stage(stage_cfg)
+    stage = _ZOnlyStageAdapter(xyz_stage)
     provider = session.frame(request["frameProvider"], timeout_ms)
     controller = AutofocusController(stage, provider)
     resolved_params: dict[str, Any] = {}
     try:
         roi = ROI(**payload["roi"])
-        if "zStartUm" in params and "zEndUm" in params:
-            resolved_params = {
-                "zStartUm": params["zStartUm"],
-                "zEndUm": params["zEndUm"],
-                "pointCount": params.get("pointCount"),
-                "minPoints": params.get("minPoints", 5),
-                "maxPoints": params.get("maxPoints", 10),
-                "targetSpacingUm": params.get("targetSpacingUm", 5.0),
-                "stageTimeoutMs": params.get("stageTimeoutMs", 3000),
-                "frameTimeoutMs": params.get("frameTimeoutMs", 500),
-                "settleMs": params.get("settleMs", 100),
-                "framesPerZ": params.get("framesPerZ", 1),
-                "targetToleranceUm": params.get("targetToleranceUm", 5.0),
-                "finalToleranceUm": params.get("finalToleranceUm", 5.0),
-                "finalApproachOffsetUm": params.get("finalApproachOffsetUm", 3.0),
-                "interpolatePeak": params.get("interpolatePeak", True),
-                "finalVerificationFramesPerZ": params.get(
-                    "finalVerificationFramesPerZ", 1
-                ),
-                "metricName": params.get("metricName", "labspec_spot_compactness"),
-            }
-            result = controller.run_fixed_range(
-                roi,
-                FixedRangeAutofocusParams(
-                    z_start_um=resolved_params["zStartUm"],
-                    z_end_um=resolved_params["zEndUm"],
-                    point_count=resolved_params["pointCount"],
-                    min_points=resolved_params["minPoints"],
-                    max_points=resolved_params["maxPoints"],
-                    target_spacing_um=resolved_params["targetSpacingUm"],
-                    stage_timeout_ms=resolved_params["stageTimeoutMs"],
-                    frame_timeout_ms=resolved_params["frameTimeoutMs"],
-                    settle_ms=resolved_params["settleMs"],
-                    frames_per_z=resolved_params["framesPerZ"],
-                    target_tolerance_um=resolved_params["targetToleranceUm"],
-                    final_tolerance_um=resolved_params["finalToleranceUm"],
-                    final_approach_offset_um=resolved_params["finalApproachOffsetUm"],
-                    interpolate_peak=resolved_params["interpolatePeak"],
-                    final_verification_frames_per_z=resolved_params[
-                        "finalVerificationFramesPerZ"
-                    ],
-                    metric_name=resolved_params["metricName"],
-                ),
+        if "zStartUm" not in params or "zEndUm" not in params:
+            return _fail(
+                "autofocus_invalid_params",
+                "Fixed-range autofocus requires zStartUm and zEndUm.",
+                retry_safe=False,
+                safe_to_resume=True,
             )
-        else:
-            resolved_params = {
-                "zMinUm": params.get("zMinUm", z_range[0]),
-                "zMaxUm": params.get("zMaxUm", z_range[1]),
-                "coarseRangeUm": params.get("coarseRangeUm", 80.0),
-                "coarseStepUm": params.get("coarseStepUm", 10.0),
-                "fineRangeUm": params.get("fineRangeUm", 15.0),
-                "fineStepUm": params.get("fineStepUm", 2.0),
-            }
-            result = controller.run_single(
-                roi,
-                AutofocusParams(
-                    z_min_um=resolved_params["zMinUm"],
-                    z_max_um=resolved_params["zMaxUm"],
-                    coarse_range_um=resolved_params["coarseRangeUm"],
-                    coarse_step_um=resolved_params["coarseStepUm"],
-                    fine_range_um=resolved_params["fineRangeUm"],
-                    fine_step_um=resolved_params["fineStepUm"],
-                ),
-            )
+        effective_point_count = int(params.get("pointCount", 10))
+        if effective_point_count != 10:
+            effective_point_count = 10
+        effective_spacing_um = abs(float(params["zStartUm"]) - float(params["zEndUm"])) / float(effective_point_count - 1)
+        resolved_params = {
+            "zStartUm": params["zStartUm"],
+            "zEndUm": params["zEndUm"],
+            "effectivePointCount": effective_point_count,
+            "effectiveSpacingUm": effective_spacing_um,
+            "stageTimeoutMs": params.get("stageTimeoutMs", 30000),
+            "frameTimeoutMs": params.get("frameTimeoutMs", 10000),
+            "settleMs": params.get("settleMs", 100),
+            "warmupFramesPerZ": params.get("warmupFramesPerZ", 1),
+            "scoreFramesPerZ": params.get("framesPerZ", 1),
+            "capturedFramesPerSample": params.get("warmupFramesPerZ", 1) + params.get("framesPerZ", 1),
+            "targetToleranceUm": params.get("targetToleranceUm", 5.0),
+            "finalToleranceUm": params.get("finalToleranceUm", 5.0),
+            "finalApproachOffsetUm": params.get("finalApproachOffsetUm", 3.0),
+            "interpolatePeak": params.get("interpolatePeak", True),
+            "finalVerificationFramesPerZ": params.get("finalVerificationFramesPerZ", 1),
+            "metricName": params.get("metricName", "labspec_spot_compactness"),
+        }
+        result = controller.run_fixed_range(
+            roi,
+            FixedRangeAutofocusParams(
+                z_start_um=resolved_params["zStartUm"],
+                z_end_um=resolved_params["zEndUm"],
+                point_count=resolved_params["effectivePointCount"],
+                stage_timeout_ms=resolved_params["stageTimeoutMs"],
+                frame_timeout_ms=resolved_params["frameTimeoutMs"],
+                settle_ms=resolved_params["settleMs"],
+                frames_per_z=resolved_params["scoreFramesPerZ"],
+                warmup_frames_per_z=resolved_params["warmupFramesPerZ"],
+                target_tolerance_um=resolved_params["targetToleranceUm"],
+                final_tolerance_um=resolved_params["finalToleranceUm"],
+                final_approach_offset_um=resolved_params["finalApproachOffsetUm"],
+                interpolate_peak=resolved_params["interpolatePeak"],
+                final_verification_frames_per_z=resolved_params["finalVerificationFramesPerZ"],
+                metric_name=resolved_params["metricName"],
+            ),
+        )
     finally:
         session.disable_stage_axes()
     response_payload = {
@@ -410,18 +424,18 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         "message": result.message,
         "roi": {"x": roi.x, "y": roi.y, "width": roi.width, "height": roi.height},
         "params": resolved_params,
+        "stageMoveCommands": _stage_move_commands(xyz_stage),
+        "stageSettleDiagnostics": _stage_settle_diagnostics(xyz_stage),
     }
     if result.coarse is not None:
         response_payload["scanPoints"] = [
-            {
-                "zUm": point.z_um,
-                "score": point.score,
-                "saturationRatio": point.saturation_ratio,
-            }
+            {"zUm": point.z_um, "score": point.score, "saturationRatio": point.saturation_ratio}
             for point in result.coarse.points
         ]
     if str(result.status.value) == "ok":
         return _success("Autofocus completed.", response_payload)
+    if str(result.status.value) == "stage_error":
+        _trace("autofocus_stage_error", response_payload)
     return _fail(
         f"autofocus_{result.status.value}",
         result.message or str(result.status.value),
@@ -432,20 +446,12 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
 
 
 def _handle_spectrum(request: dict, payload: dict) -> dict:
-    from mapping.labspec import (
-        LabSpecFileBridgeRamanAcquirer,
-        LabSpecWorkerAcquisitionConfig,
-    )
+    from mapping.labspec import LabSpecFileBridgeRamanAcquirer, LabSpecWorkerAcquisitionConfig
 
     spectrometer_cfg = request["spectrometer"]
     acquisition = payload["acquisition"]
-    output_dir = payload.get("outputDir") or str(
-        Path(spectrometer_cfg["config"]["bridgeDir"]) / "spectra"
-    )
-    output_path = (
-        Path(output_dir)
-        / f"{payload['pointId']}.{acquisition.get('saveFormat') or 'txt'}"
-    )
+    output_dir = payload.get("outputDir") or str(Path(spectrometer_cfg["config"]["bridgeDir"]) / "spectra")
+    output_path = Path(output_dir) / f"{payload['pointId']}.{acquisition.get('saveFormat') or 'txt'}"
     config = LabSpecWorkerAcquisitionConfig(
         bridge_dir=spectrometer_cfg["config"]["bridgeDir"],
         integration_time_s=acquisition["integrationTimeMs"] / 1000.0,
@@ -524,16 +530,26 @@ def main() -> int:
             request_id = request.get("requestId", "")
             action = request.get("action")
             if action == "shutdown":
-                emit(
-                    {
-                        "requestId": request_id,
-                        **_success("Raman runtime daemon shut down."),
-                    }
-                )
+                emit({"requestId": request_id, **_success("Raman runtime daemon shut down.")})
                 break
             try:
+                _trace("action_start", {"requestId": request_id, "action": action})
                 result = handle(session, request)
+                _trace("action_done", {"requestId": request_id, "action": action, "ok": result.get("ok")})
             except Exception as exc:
+                stage_commands = _stage_move_commands(session._stage)
+                settle_diagnostics = _stage_settle_diagnostics(session._stage)
+                _trace(
+                    "action_exception",
+                    {
+                        "requestId": request_id,
+                        "action": action,
+                        "exceptionType": type(exc).__name__,
+                        "message": str(exc),
+                        "stageMoveCommands": stage_commands,
+                        "stageSettleDiagnostics": settle_diagnostics,
+                    },
+                )
                 result = _fail(
                     "python_runtime_error",
                     str(exc),
@@ -541,6 +557,8 @@ def main() -> int:
                         "action": action,
                         "exceptionType": type(exc).__name__,
                         "traceback": traceback.format_exc(),
+                        "stageMoveCommands": stage_commands,
+                        "stageSettleDiagnostics": settle_diagnostics,
                     },
                 )
             emit({"requestId": request_id, **result})

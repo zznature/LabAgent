@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from autofocus.models import FixedRangeAutofocusParams, FrameProvider, FocusStrategy, ROI, ScoredZPoint, ZStage
+from autofocus.models import FixedRangeAutofocusParams, Frame, FrameProvider, FocusStrategy, ROI, ScoredZPoint, ZStage
 
 
 ProgressCallback = Callable[[ScoredZPoint], None]
@@ -60,21 +60,24 @@ class FixedRangeScanner:
             time.sleep(self.params.settle_ms / 1000.0)
 
         after_ts = time.monotonic()
-        scores: list[float] = []
         effective_frames_per_z = self.params.frames_per_z if frames_per_z is None else frames_per_z
-        for _ in range(effective_frames_per_z):
-            frame = self.frames.wait_for_next(
-                after_ts=after_ts,
-                timeout_ms=self.params.frame_timeout_ms,
-            )
-            after_ts = frame.timestamp
+        captured = self._capture_frames(
+            count=self.params.warmup_frames_per_z + effective_frames_per_z,
+            after_ts=after_ts,
+        )
+        scoring_frames = captured[self.params.warmup_frames_per_z :]
+        scored_frames: list[tuple[Frame, float]] = []
+        for frame in scoring_frames:
             frame_roi = self._fit_roi_to_image(roi, frame.image.shape[:2])
-            scores.append(self.strategy.score(frame.image, frame_roi))
+            scored_frames.append((frame, self.strategy.score(frame.image, frame_roi)))
+        scores = [score for _, score in scored_frames]
+        score = float(statistics.median(scores))
+        self._discard_non_representative_frames(captured, scored_frames, score)
 
         return ScoredZPoint(
             target_z_um=float(target_z_um),
             actual_z_um=float(actual_z_um),
-            score=float(statistics.median(scores)),
+            score=score,
         )
 
     def move_to_z(self, z_um: float) -> float:
@@ -94,11 +97,43 @@ class FixedRangeScanner:
         return [float(z) for z in np.linspace(z_hi, z_lo, point_count)]
 
     def _point_count(self, range_um: float) -> int:
-        if self.params.point_count is not None:
-            return int(self.params.point_count)
-        intervals = max(1, int(np.ceil(range_um / self.params.target_spacing_um)))
-        dynamic_count = intervals + 1
-        return max(self.params.min_points, min(self.params.max_points, dynamic_count))
+        return int(self.params.point_count)
+
+    def _capture_frames(self, count: int, after_ts: float) -> list[Frame]:
+        batch_waiter = getattr(self.frames, "wait_for_batch", None)
+        if callable(batch_waiter):
+            return list(batch_waiter(count=count, after_ts=after_ts, timeout_ms=self.params.frame_timeout_ms))
+
+        frames: list[Frame] = []
+        current_after_ts = after_ts
+        for _ in range(count):
+            frame = self.frames.wait_for_next(
+                after_ts=current_after_ts,
+                timeout_ms=self.params.frame_timeout_ms,
+            )
+            frames.append(frame)
+            current_after_ts = frame.timestamp
+        return frames
+
+    def _discard_non_representative_frames(
+        self,
+        captured: list[Frame],
+        scored_frames: list[tuple[Frame, float]],
+        median_score: float,
+    ) -> None:
+        if not captured or not scored_frames:
+            return
+        representative_frame = min(scored_frames, key=lambda item: abs(item[1] - median_score))[0]
+        discard_paths = [
+            frame.path
+            for frame in captured
+            if frame.path is not None and frame.path != representative_frame.path
+        ]
+        if not discard_paths:
+            return
+        discard = getattr(self.frames, "discard_frames", None)
+        if callable(discard):
+            discard(discard_paths)
 
     def _set_stage_tolerance(self, tolerance_um: float) -> None:
         setter = getattr(self.stage, "set_target_tolerance_um", None)
