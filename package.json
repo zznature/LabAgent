@@ -10,13 +10,13 @@
 		"smoke:mac": "node deploy/smoke-mac.mjs"
 	},
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "0.79.0",
+		"@earendil-works/pi-coding-agent": "0.80.3",
 		"typebox": "1.1.38"
 	},
 	"devDependencies": {
 		"@types/node": "24.12.4",
 		"typescript": "5.9.3",
-		"vitest": "3.2.4"
+		"vitest": "3.2.7"
 	},
 	"engines": {
 		"node": ">=22.19.0"
