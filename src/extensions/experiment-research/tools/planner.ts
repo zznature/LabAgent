@@ -6,49 +6,13 @@ import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import { getRamanLiveRuntime, getRamanPythonRuntimeConfigInfo, validateRuntimeAnchorState } from "../runtime/raman/index.ts";
 import { saveExperimentIntent } from "../store/index.ts";
+import {
+	ProcedureSpecParamsSchema,
+	type ExecutionMode,
+	type ProcedureSpecParams,
+} from "./params.ts";
 
 const EmptyParamsSchema = Type.Object({}, { additionalProperties: false });
-
-const ExecutionModeSchema = Type.Union([
-	Type.Literal("simulation"),
-	Type.Literal("live-supervised"),
-]);
-
-const ProcedureSpecInputSchema = Type.Object(
-	{
-		procedureSpecId: Type.String(),
-		experimentId: Type.String(),
-		intentId: Type.String(),
-		procedureId: Type.Union([
-			Type.Literal("raman_single_point_probe"),
-			Type.Literal("raman_parameter_search"),
-			Type.Literal("raman_grid_mapping"),
-		]),
-		procedureVersion: Type.String(),
-		resources: Type.Array(
-			Type.Object(
-				{
-					resourceId: Type.String(),
-					role: Type.String(),
-				},
-				{ additionalProperties: false },
-			),
-		),
-		limits: Type.Record(Type.String(), Type.Unknown()),
-		plan: Type.Record(Type.String(), Type.Unknown()),
-		stoppingRules: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		domain: Type.Record(Type.String(), Type.Unknown()),
-	},
-	{ additionalProperties: true },
-);
-
-const ProcedureSpecParamsSchema = Type.Object(
-	{
-		spec: ProcedureSpecInputSchema,
-		executionMode: Type.Optional(ExecutionModeSchema),
-	},
-	{ additionalProperties: false },
-);
 
 const ProcedureSpecTemplateParamsSchema = Type.Object(
 	{
@@ -91,10 +55,8 @@ interface PlannerToolDetails {
 	stateAfter: Record<string, unknown>;
 }
 
-type ProcedureSpecParams = Static<typeof ProcedureSpecParamsSchema>;
 type ProcedureSpecTemplateParams = Static<typeof ProcedureSpecTemplateParamsSchema>;
 type ExperimentIntentParams = Static<typeof ExperimentIntentParamsSchema>;
-type ExecutionMode = Static<typeof ExecutionModeSchema>;
 
 function success(summary: string, stateAfter: Record<string, unknown>): { content: [{ type: "text"; text: string }]; details: PlannerToolDetails } {
 	return {

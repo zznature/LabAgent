@@ -1,6 +1,5 @@
-import { Type, type Static } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ProcedureSpec, RunState } from "../schemas/index.ts";
+import type { RunState } from "../schemas/index.ts";
 import { ProcedureSpecValidator, formatValidationErrors } from "../schemas/index.ts";
 import {
 	abortRun,
@@ -9,113 +8,20 @@ import {
 	startLiveRamanRun,
 	startSimulationRun,
 } from "../kernel/run-controller.ts";
+import { approveAndFreezeProcedureSpec, RunAdmissionError } from "../kernel/run-admission.ts";
 import { getRamanLiveRuntime } from "../runtime/raman/index.ts";
 import {
-	approveProcedureProposal,
 	createProcedureProposal,
-	findProcedureProposal,
-	hashProcedureSpec,
 } from "../store/index.ts";
-
-const ProcedureSpecInputSchema = Type.Object(
-	{
-		procedureSpecId: Type.String(),
-		experimentId: Type.String(),
-		intentId: Type.String(),
-		procedureId: Type.Union([
-			Type.Literal("raman_single_point_probe"),
-			Type.Literal("raman_parameter_search"),
-			Type.Literal("raman_grid_mapping"),
-		]),
-		procedureVersion: Type.String(),
-		resources: Type.Array(
-			Type.Object(
-				{
-					resourceId: Type.String(),
-					role: Type.String(),
-				},
-				{ additionalProperties: false },
-			),
-		),
-		limits: Type.Record(Type.String(), Type.Unknown()),
-		plan: Type.Record(Type.String(), Type.Unknown()),
-		stoppingRules: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		domain: Type.Record(Type.String(), Type.Unknown()),
-	},
-	{ additionalProperties: true },
-);
-
-const SimulationControlsSchema = Type.Object(
-	{
-		perUnitDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
-		autofocusLowConfidenceAtUnit: Type.Optional(Type.Integer({ minimum: 0 })),
-		autofocusLowConfidenceAtUnits: Type.Optional(Type.Array(Type.Integer({ minimum: 0 }))),
-		spectrumTimeoutAtUnit: Type.Optional(Type.Integer({ minimum: 0 })),
-		spectrumTimeoutAtUnits: Type.Optional(Type.Array(Type.Integer({ minimum: 0 }))),
-		operatorPauseAtUnit: Type.Optional(Type.Integer({ minimum: 0 })),
-		parameterSearchObservations: Type.Optional(
-			Type.Array(
-				Type.Object(
-					{
-						autofocusConfidence: Type.Number({ minimum: 0, maximum: 1 }),
-						saturated: Type.Boolean(),
-						snr: Type.Number({ minimum: 0 }),
-						targetPeakBaselineRatio: Type.Number({ minimum: 0 }),
-					},
-					{ additionalProperties: false },
-				),
-			),
-		),
-	},
-	{ additionalProperties: false },
-);
-
-const ExecutionModeSchema = Type.Union([
-	Type.Literal("simulation"),
-	Type.Literal("live-supervised"),
-]);
-
-const AdmissionSchema = Type.Object(
-	{
-		preflightReady: Type.Boolean(),
-		controlAvailable: Type.Boolean(),
-	},
-	{ additionalProperties: false },
-);
-
-const RunProcedureParamsSchema = Type.Object(
-	{
-		spec: ProcedureSpecInputSchema,
-		simulation: Type.Optional(SimulationControlsSchema),
-		executionMode: Type.Optional(ExecutionModeSchema),
-		admission: Type.Optional(AdmissionSchema),
-	},
-	{ additionalProperties: false },
-);
-
-const RunIdParamsSchema = Type.Object(
-	{
-		runId: Type.String({ minLength: 1 }),
-	},
-	{ additionalProperties: false },
-);
-
-type RunProcedureParams = Static<typeof RunProcedureParamsSchema>;
-type RunIdParams = Static<typeof RunIdParamsSchema>;
-
-const ProposalIdParamsSchema = Type.Object(
-	{
-		proposalId: Type.String({ minLength: 1 }),
-		spec: ProcedureSpecInputSchema,
-		simulation: Type.Optional(SimulationControlsSchema),
-		executionMode: Type.Optional(ExecutionModeSchema),
-		admission: Type.Optional(AdmissionSchema),
-	},
-	{ additionalProperties: false },
-);
-
-type ProposalIdParams = Static<typeof ProposalIdParamsSchema>;
-type ExecutionMode = Static<typeof ExecutionModeSchema>;
+import {
+	ProposalIdParamsSchema,
+	RunIdParamsSchema,
+	RunProcedureParamsSchema,
+	type ExecutionMode,
+	type ProposalIdParams,
+	type RunIdParams,
+	type RunProcedureParams,
+} from "./params.ts";
 
 interface RuntimeToolDetails {
 	status: "success" | "warning" | "error";
@@ -233,31 +139,6 @@ function resolveExecutionMode(params: { executionMode?: ExecutionMode }): Execut
 	return params.executionMode ?? "simulation";
 }
 
-function missingAdmissionError(
-	mode: ExecutionMode,
-	admission: ProposalIdParams["admission"],
-): { content: [{ type: "text"; text: string }]; details: RuntimeToolDetails } | undefined {
-	if (mode !== "live-supervised") {
-		return undefined;
-	}
-
-	if (!admission?.preflightReady) {
-		return error("Live supervised execution requires preflightReady=true before approval and start.", "preflight_not_ready", {
-			executionMode: mode,
-			admission,
-		});
-	}
-
-	if (!admission.controlAvailable) {
-		return error("Live supervised execution requires controlAvailable=true before approval and start.", "control_not_available", {
-			executionMode: mode,
-			admission,
-		});
-	}
-
-	return undefined;
-}
-
 export const runProcedureTool = {
 	name: "run_procedure",
 	label: "Run Procedure",
@@ -294,7 +175,7 @@ export const proposeRunTool = {
 				"invalid_procedure_spec",
 			);
 		}
-		const proposal = createProcedureProposal(ctx.cwd, params.spec as ProcedureSpec);
+		const proposal = createProcedureProposal(ctx.cwd, params.spec);
 		return {
 			content: [{ type: "text", text: `Run proposal ${proposal.proposalId} created.` }],
 			details: {
@@ -326,42 +207,31 @@ export const approveAndStartRunTool = {
 	parameters: ProposalIdParamsSchema,
 	executionMode: "sequential",
 	async execute(_toolCallId, params: ProposalIdParams, _signal, _onUpdate, ctx) {
-		const proposal = findProcedureProposal(ctx.cwd, params.proposalId);
-		if (!proposal) {
-			return error(`Proposal ${params.proposalId} was not found.`, "proposal_not_found");
-		}
-		if (proposal.status !== "proposed") {
-			return error(`Proposal ${params.proposalId} is already approved.`, "proposal_not_pending");
-		}
-		const requestedHash = hashProcedureSpec(params.spec as ProcedureSpec);
-		if (requestedHash !== proposal.specHash) {
-			return error(
-				`Proposal ${params.proposalId} no longer matches the provided ProcedureSpec. Approval rejected.`,
-				"proposal_spec_mismatch",
-			);
-		}
-
 		const mode = resolveExecutionMode(params);
-		const admissionError = missingAdmissionError(mode, params.admission);
-		if (admissionError) {
-			return admissionError;
-		}
-
 		if (mode === "live-supervised" && !getRamanLiveRuntime(ctx.cwd)) {
 			return error("No live Raman runtime is registered for this workspace.", "live_runtime_unavailable", {
 				executionMode: mode,
 			});
 		}
 
-		const approvedProposal = approveProcedureProposal(ctx.cwd, proposal);
 		try {
+			const admitted = approveAndFreezeProcedureSpec({
+				cwd: ctx.cwd,
+				proposalId: params.proposalId,
+				spec: params.spec,
+				mode,
+				admission: params.admission,
+			});
 			const runState =
 				mode === "live-supervised"
-					? startLiveRamanRun(ctx.cwd, proposal.spec, approvedProposal)
-					: startSimulationRun(ctx.cwd, proposal.spec, params.simulation, approvedProposal);
+					? startLiveRamanRun(ctx.cwd, admitted.frozenSpec)
+					: startSimulationRun(ctx.cwd, admitted.frozenSpec, params.simulation);
 			const modeLabel = mode === "live-supervised" ? "live supervised" : "simulation";
-			return success(`${modeLabel} run ${runState.runId} started from approved proposal ${proposal.proposalId}.`, runState);
+			return success(`${modeLabel} run ${runState.runId} started from approved proposal ${admitted.approvedProposal.proposalId}.`, runState);
 		} catch (cause) {
+			if (cause instanceof RunAdmissionError) {
+				return error(cause.message, cause.code, cause.stateAfter);
+			}
 			const message = cause instanceof Error ? cause.message : String(cause);
 			const errorCode =
 				mode === "live-supervised"

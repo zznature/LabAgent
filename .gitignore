@@ -57,6 +57,7 @@ out.html
 .claude/
 .opencode/
 .codegraph/
+skills-lock.json
 .mcp.json
 opencode.jsonc
 CLAUDE.md
