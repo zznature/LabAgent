@@ -92,6 +92,7 @@ ExperimentIntent
 - limits
 - plan
 - stopping rules
+- retry policy
 - typed domain params
 
 它不应该表达：
@@ -102,6 +103,41 @@ ExperimentIntent
 - 任意 `for / while / if`
 
 kernel 关心的不是 `ProcedureSpec` 的文案，而是它能否被稳定展开成有限、明确的执行单元。
+
+### 4.1 实验失败重试策略
+
+实验失败重试属于 `ProcedureSpec` 的协议语义，由 kernel / execution scheduler 确定性执行。它不属于 agent 运行时推理，也不属于 runtime / driver 的局部脚本状态。
+
+MVP 仅支持 point-level Raman mapping 的失败重试，策略名固定为：
+
+```ts
+retryPolicy: {
+  mode: "immediate_then_final"
+  maxImmediateRetriesPerPoint: 1
+  maxFinalRetriesPerPoint: 1
+  finalRetryOrder: "failure_order"
+  retryableFailureReasons: {
+    execution: ["timeout"]
+    quality: ["low_focus_confidence"]
+  }
+}
+```
+
+语义规则：
+
+- `execution` failure 表示执行流程失败，例如采集超时。
+- `quality` failure 表示动作完成但数据质量不达标，例如聚焦置信度低。
+- scheduler 先执行主扫描；每个点遇到可重试失败时，最多立即重试 `maxImmediateRetriesPerPoint` 次。
+- 只有已经用完 immediate retry 后仍失败、且最后一次失败仍属于策略表的点，才进入 final retry queue。
+- final retry queue 在所有正常点位完成后按失败发生顺序执行，最多重试 `maxFinalRetriesPerPoint` 次。
+- 每次 attempt 都必须进入 run history；成功 attempt 决定该点最终成功，失败 attempt 不被覆盖。
+
+MVP 策略表只启用：
+
+- `execution.timeout`
+- `quality.low_focus_confidence`
+
+后续可以扩展更多质量失败原因，例如 low signal-to-noise、saturation、missing peak 或 cosmic ray artifact，但不能把 retry 判断写成散落在 agent prompt 或 driver callback 里的临时逻辑。
 
 ## 5. `ExecutionUnit` 为什么是 kernel 核心对象
 

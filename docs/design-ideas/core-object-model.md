@@ -99,6 +99,7 @@
 - `limits`
 - `plan`
 - `stoppingRules`
+- `retryPolicy?`
 - `outputPlan?`
 
 **不应包含**
@@ -141,6 +142,7 @@
 - `pauseReason?`
 - `abortReason?`
 - `errorState?`
+- `pointAttempts?`
 - `artifactRefs`
 - `startedAt`
 - `updatedAt`
@@ -312,6 +314,16 @@ type ProcedureSpec = {
     maxUnits?: number
     stopOnError?: boolean
   }
+  retryPolicy?: {
+    mode: "immediate_then_final"
+    maxImmediateRetriesPerPoint: number
+    maxFinalRetriesPerPoint: number
+    finalRetryOrder: "failure_order"
+    retryableFailureReasons: {
+      execution: ["timeout"]
+      quality: ["low_focus_confidence"]
+    }
+  }
 }
 
 type SemanticStep =
@@ -351,6 +363,18 @@ type RunState = {
   status: "queued" | "running" | "paused" | "aborted" | "failed" | "completed"
   progress?: { completedUnits: number; totalUnits?: number; unitKind?: string }
   currentUnit?: { unitId: string; index: number }
+  pointAttempts?: Array<{
+    pointUnitId: string
+    attemptId: string
+    attemptIndex: number
+    phase: "initial" | "immediate_retry" | "final_retry"
+    status: "succeeded" | "failed"
+    failureType?: "execution" | "quality"
+    failureReason?: "timeout" | "low_focus_confidence"
+    finalForPoint?: boolean
+    artifactIds?: string[]
+    timestamp: string
+  }>
   heartbeatAt?: string
   artifactRefs: string[]
 }

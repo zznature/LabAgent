@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
 	ExecutionUnit,
+	PointAttemptRecord,
 	ProcedureSpec,
 	RunState,
 	RuntimeError,
@@ -24,6 +25,11 @@ import { executeLinearRun, executeMappingRun, executeParameterSearchRun } from "
 type ExecutionMode = "simulation" | "live-supervised";
 export type ManagedUnitResult = SimulationUnitResult | LiveRamanUnitResult;
 
+export interface UnitAttemptContext {
+	attemptIndex: number;
+	phase: PointAttemptRecord["phase"];
+}
+
 export interface ActiveRun {
 	runId: string;
 	cwd: string;
@@ -40,17 +46,24 @@ export interface RunExecutionContext {
 	activeRun: ActiveRun;
 	start(): void;
 	abortAt(unit: ExecutionUnit): void;
-	markUnitStarted(unit: ExecutionUnit): RunState;
+	markUnitStarted(unit: ExecutionUnit, attempt?: UnitAttemptContext): RunState;
 	executeUnit(unit: ExecutionUnit, options?: LiveRamanUnitOptions): Promise<ManagedUnitResult>;
 	pause(unit: ExecutionUnit, reason: string, resultArtifacts: RunState["artifactRefs"]): void;
 	fail(unit: ExecutionUnit, failure: RuntimeError, resultArtifacts: RunState["artifactRefs"]): void;
 	complete(): void;
-	completeUnit(unit: ExecutionUnit, resultArtifacts: RunState["artifactRefs"], additionalPayload?: Record<string, unknown>): void;
+	completeUnit(
+		unit: ExecutionUnit,
+		resultArtifacts: RunState["artifactRefs"],
+		additionalPayload?: Record<string, unknown>,
+		attempt?: UnitAttemptContext,
+	): void;
 	recordUnitFailureAndContinue(
 		unit: ExecutionUnit,
 		failure: RuntimeError,
 		resultArtifacts: RunState["artifactRefs"],
+		attempt?: UnitAttemptContext,
 	): void;
+	recordPointAttempt(record: Omit<PointAttemptRecord, "timestamp">): void;
 }
 
 const activeRuns = new Map<string, ActiveRun>();
@@ -109,6 +122,7 @@ function createBaseRunState(runId: string, spec: ProcedureSpec, units: Execution
 			unitKind: units[0]?.unitKind ?? "point",
 		},
 		artifactRefs: [],
+		pointAttempts: [],
 		startedAt: now,
 		updatedAt: now,
 	};
@@ -163,14 +177,22 @@ function appendRunStartedEvent(activeRun: ActiveRun): void {
 	});
 }
 
-function appendUnitStartedEvent(activeRun: ActiveRun, unit: ExecutionUnit): void {
+function attemptEventSuffix(attempt?: UnitAttemptContext): string {
+	return attempt ? `${attempt.phase}-${attempt.attemptIndex}` : "initial";
+}
+
+function attemptPayload(attempt?: UnitAttemptContext): Record<string, unknown> {
+	return attempt ? { attemptIndex: attempt.attemptIndex, phase: attempt.phase } : {};
+}
+
+function appendUnitStartedEvent(activeRun: ActiveRun, unit: ExecutionUnit, attempt?: UnitAttemptContext): void {
 	appendEvent(activeRun.cwd, {
-		eventId: `${activeRun.runId}-unit-start-${unit.index}`,
+		eventId: `${activeRun.runId}-unit-start-${unit.index}-${attemptEventSuffix(attempt)}`,
 		runId: activeRun.runId,
 		experimentId: activeRun.spec.experimentId,
 		eventType: "unit_started",
 		timestamp: timestamp(),
-		payload: { unitId: unit.unitId, index: unit.index },
+		payload: { unitId: unit.unitId, index: unit.index, ...attemptPayload(attempt) },
 	});
 }
 
@@ -179,9 +201,10 @@ function appendUnitCompletedEvent(
 	unit: ExecutionUnit,
 	artifacts: RunState["artifactRefs"],
 	additionalPayload: Record<string, unknown> = {},
+	attempt?: UnitAttemptContext,
 ): void {
 	appendEvent(activeRun.cwd, {
-		eventId: `${activeRun.runId}-unit-complete-${unit.index}`,
+		eventId: `${activeRun.runId}-unit-complete-${unit.index}-${attemptEventSuffix(attempt)}`,
 		runId: activeRun.runId,
 		experimentId: activeRun.spec.experimentId,
 		eventType: "unit_completed",
@@ -190,14 +213,21 @@ function appendUnitCompletedEvent(
 			unitId: unit.unitId,
 			index: unit.index,
 			artifacts: artifacts.map((artifact) => artifact.artifactId),
+			...attemptPayload(attempt),
 			...additionalPayload,
 		},
 	});
 }
 
-function appendUnitFailedEvent(activeRun: ActiveRun, unit: ExecutionUnit, failure: RuntimeError, artifacts: RunState["artifactRefs"]): void {
+function appendUnitFailedEvent(
+	activeRun: ActiveRun,
+	unit: ExecutionUnit,
+	failure: RuntimeError,
+	artifacts: RunState["artifactRefs"],
+	attempt?: UnitAttemptContext,
+): void {
 	appendEvent(activeRun.cwd, {
-		eventId: `${activeRun.runId}-failed-${unit.index}`,
+		eventId: `${activeRun.runId}-failed-${unit.index}-${attemptEventSuffix(attempt)}`,
 		runId: activeRun.runId,
 		experimentId: activeRun.spec.experimentId,
 		eventType: "unit_failed",
@@ -209,6 +239,7 @@ function appendUnitFailedEvent(activeRun: ActiveRun, unit: ExecutionUnit, failur
 			positionRef: unit.positionRef,
 			point: unit.point,
 			actions: unit.actions,
+			...attemptPayload(attempt),
 			errorCode: failure.errorCode,
 			message: failure.message,
 			retrySafe: failure.retrySafe,
@@ -292,6 +323,7 @@ function applyCompletedProgress(
 	unit: ExecutionUnit,
 	resultArtifacts: RunState["artifactRefs"],
 	additionalPayload: Record<string, unknown> = {},
+	attempt?: UnitAttemptContext,
 ): void {
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
@@ -305,7 +337,7 @@ function applyCompletedProgress(
 		heartbeatAt: timestamp(),
 		updatedAt: timestamp(),
 	}));
-	appendUnitCompletedEvent(activeRun, unit, resultArtifacts, additionalPayload);
+	appendUnitCompletedEvent(activeRun, unit, resultArtifacts, additionalPayload, attempt);
 }
 
 function applySkippedFailureProgress(
@@ -313,6 +345,7 @@ function applySkippedFailureProgress(
 	unit: ExecutionUnit,
 	failure: RuntimeError,
 	resultArtifacts: RunState["artifactRefs"],
+	attempt?: UnitAttemptContext,
 ): void {
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
@@ -326,7 +359,7 @@ function applySkippedFailureProgress(
 		heartbeatAt: timestamp(),
 		updatedAt: timestamp(),
 	}));
-	appendUnitFailedEvent(activeRun, unit, failure, resultArtifacts);
+	appendUnitFailedEvent(activeRun, unit, failure, resultArtifacts, attempt);
 }
 
 function singlePointOptions(activeRun: ActiveRun): LiveRamanUnitOptions | undefined {
@@ -371,8 +404,8 @@ function abortActiveRun(activeRun: ActiveRun, unit: ExecutionUnit): void {
 	activeRuns.delete(activeRun.runId);
 }
 
-function markActiveUnitStarted(activeRun: ActiveRun, unit: ExecutionUnit): RunState {
-	appendUnitStartedEvent(activeRun, unit);
+function markActiveUnitStarted(activeRun: ActiveRun, unit: ExecutionUnit, attempt?: UnitAttemptContext): RunState {
+	appendUnitStartedEvent(activeRun, unit, attempt);
 	return updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
@@ -391,8 +424,8 @@ function createRunExecutionContext(activeRun: ActiveRun): RunExecutionContext {
 		abortAt(unit) {
 			abortActiveRun(activeRun, unit);
 		},
-		markUnitStarted(unit) {
-			return markActiveUnitStarted(activeRun, unit);
+		markUnitStarted(unit, attempt) {
+			return markActiveUnitStarted(activeRun, unit, attempt);
 		},
 		executeUnit(unit, options) {
 			const currentState = readRunStateSnapshot(activeRun.cwd, activeRun.runId);
@@ -410,11 +443,21 @@ function createRunExecutionContext(activeRun: ActiveRun): RunExecutionContext {
 		complete() {
 			completeActiveRun(activeRun);
 		},
-		completeUnit(unit, resultArtifacts, additionalPayload = {}) {
-			applyCompletedProgress(activeRun, unit, resultArtifacts, additionalPayload);
+		completeUnit(unit, resultArtifacts, additionalPayload = {}, attempt) {
+			applyCompletedProgress(activeRun, unit, resultArtifacts, additionalPayload, attempt);
 		},
-		recordUnitFailureAndContinue(unit, failure, resultArtifacts) {
-			applySkippedFailureProgress(activeRun, unit, failure, resultArtifacts);
+		recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt) {
+			applySkippedFailureProgress(activeRun, unit, failure, resultArtifacts, attempt);
+		},
+		recordPointAttempt(record) {
+			updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
+				...current,
+				pointAttempts: (current.pointAttempts ?? []).concat({
+					...record,
+					timestamp: timestamp(),
+				}),
+				updatedAt: timestamp(),
+			}));
 		},
 	};
 }

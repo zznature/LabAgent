@@ -285,12 +285,28 @@ describe("experiment research simulation runtime", () => {
 		const context = { cwd } as ExtensionContext;
 
 		const autofocusRunId = await proposeAndStart(extension, createProcedureSpec(2), context, {
-			autofocusLowConfidenceAtUnit: 0,
+			autofocusLowConfidenceFailuresBeforeSuccessByUnit: { "0": 1 },
 			perUnitDelayMs: 5,
 		});
 		const autofocusState = await pollUntilTerminal(extension, autofocusRunId, context, ["completed"]);
 		expect(autofocusState.status).toBe("completed");
 		expect(autofocusState.errorState).toBeUndefined();
+		expect(autofocusState.pointAttempts).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					pointUnitId: "proc-spec-2:unit:0000",
+					phase: "initial",
+					status: "failed",
+					failureType: "quality",
+					failureReason: "low_focus_confidence",
+				}),
+				expect.objectContaining({
+					pointUnitId: "proc-spec-2:unit:0000",
+					phase: "immediate_retry",
+					status: "succeeded",
+				}),
+			]),
+		);
 
 		const spectrumRunId = await proposeAndStart(extension, createProcedureSpec(2), context, {
 			spectrumTimeoutAtUnit: 1,
@@ -383,12 +399,27 @@ describe("experiment research simulation runtime", () => {
 		};
 		const resilientRunId = await proposeAndStart(extension, resilientSpec, context, {
 			perUnitDelayMs: 5,
-			autofocusLowConfidenceAtUnits: [1],
+			autofocusLowConfidenceFailuresBeforeSuccessByUnit: { "1": 1 },
 		});
 		const resilientState = await pollUntilTerminal(extension, resilientRunId, context, ["completed"]);
 		expect(resilientState.status).toBe("completed");
 		expect((resilientState.progress as Record<string, unknown>).completedUnits).toBe(4);
 		expect((resilientState.progress as Record<string, unknown>).failedUnits).toBe(0);
+		expect(resilientState.pointAttempts).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					pointUnitId: "proc-map-resilient:unit:0001",
+					phase: "initial",
+					status: "failed",
+					failureReason: "low_focus_confidence",
+				}),
+				expect.objectContaining({
+					pointUnitId: "proc-map-resilient:unit:0001",
+					phase: "immediate_retry",
+					status: "succeeded",
+				}),
+			]),
+		);
 
 		const failingSpec = {
 			...createProcedureSpec(4),
@@ -408,6 +439,27 @@ describe("experiment research simulation runtime", () => {
 		expect((failingState.progress as Record<string, unknown>).failedUnits).toBe(2);
 		expect((failingState.errorState as Record<string, unknown>).errorCode).toBe(
 			"mapping_consecutive_failures_limit_reached",
+		);
+		const failingAttempts = failingState.pointAttempts as Record<string, unknown>[];
+		expect(failingAttempts).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					pointUnitId: "proc-map-failing:unit:0001",
+					phase: "final_retry",
+					status: "failed",
+					failureType: "execution",
+					failureReason: "timeout",
+					finalForPoint: true,
+				}),
+				expect.objectContaining({
+					pointUnitId: "proc-map-failing:unit:0002",
+					phase: "final_retry",
+					status: "failed",
+					failureType: "execution",
+					failureReason: "timeout",
+					finalForPoint: true,
+				}),
+			]),
 		);
 	});
 

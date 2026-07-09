@@ -9,10 +9,13 @@ export interface SimulationControls {
 	perUnitDelayMs?: number;
 	autofocusLowConfidenceAtUnit?: number;
 	autofocusLowConfidenceAtUnits?: number[];
+	autofocusLowConfidenceFailuresBeforeSuccessByUnit?: Record<string, number>;
 	spectrumTimeoutAtUnit?: number;
 	spectrumTimeoutAtUnits?: number[];
+	spectrumTimeoutFailuresBeforeSuccessByUnit?: Record<string, number>;
 	operatorPauseAtUnit?: number;
 	parameterSearchObservations?: RamanObservationMetrics[];
+	attemptCountsByUnit?: Record<string, number>;
 }
 
 export interface SimulationUnitSuccess {
@@ -107,6 +110,19 @@ function includesUnit(units: number[] | undefined, unitIndex: number): boolean {
 	return units?.includes(unitIndex) ?? false;
 }
 
+function nextAttemptCount(controls: SimulationControls, unitIndex: number): number {
+	const key = String(unitIndex);
+	controls.attemptCountsByUnit = controls.attemptCountsByUnit ?? {};
+	const attemptCount = controls.attemptCountsByUnit[key] ?? 0;
+	controls.attemptCountsByUnit[key] = attemptCount + 1;
+	return attemptCount;
+}
+
+function failsBeforeSuccess(config: Record<string, number> | undefined, unitIndex: number, attemptCount: number): boolean {
+	const failureBudget = config?.[String(unitIndex)];
+	return failureBudget !== undefined && attemptCount < failureBudget;
+}
+
 export async function runSimulationUnit(
 	cwd: string,
 	runId: string,
@@ -115,6 +131,7 @@ export async function runSimulationUnit(
 	currentState: RunState,
 ): Promise<SimulationUnitResult> {
 	await sleep(controls.perUnitDelayMs ?? DEFAULT_PER_UNIT_DELAY_MS);
+	const attemptCount = nextAttemptCount(controls, unit.index);
 
 	if (controls.operatorPauseAtUnit === unit.index) {
 		return {
@@ -126,7 +143,8 @@ export async function runSimulationUnit(
 
 	if (
 		controls.autofocusLowConfidenceAtUnit === unit.index ||
-		includesUnit(controls.autofocusLowConfidenceAtUnits, unit.index)
+		includesUnit(controls.autofocusLowConfidenceAtUnits, unit.index) ||
+		failsBeforeSuccess(controls.autofocusLowConfidenceFailuresBeforeSuccessByUnit, unit.index, attemptCount)
 	) {
 		return {
 			status: "completed",
@@ -140,7 +158,11 @@ export async function runSimulationUnit(
 		};
 	}
 
-	if (controls.spectrumTimeoutAtUnit === unit.index || includesUnit(controls.spectrumTimeoutAtUnits, unit.index)) {
+	if (
+		controls.spectrumTimeoutAtUnit === unit.index ||
+		includesUnit(controls.spectrumTimeoutAtUnits, unit.index) ||
+		failsBeforeSuccess(controls.spectrumTimeoutFailuresBeforeSuccessByUnit, unit.index, attemptCount)
+	) {
 		return {
 			status: "failed",
 			error: createRuntimeError("spectrum_timeout", `Simulated spectrum timeout at unit ${unit.index}.`, false),

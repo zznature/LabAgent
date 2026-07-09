@@ -47,6 +47,8 @@ function serializeRunState(runState: RunState): Record<string, unknown> {
 		pauseReason: runState.pauseReason,
 		abortReason: runState.abortReason,
 		errorState: runState.errorState,
+		qualityState: runState.qualityState,
+		pointAttempts: runState.pointAttempts,
 		startedAt: runState.startedAt,
 		updatedAt: runState.updatedAt,
 		endedAt: runState.endedAt,

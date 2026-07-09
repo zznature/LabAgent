@@ -3,12 +3,19 @@ import type {
 	RamanAcquisition,
 	RamanEvaluationDecision,
 	RamanObservationMetrics,
+	RetryFailureReason,
+	RetryFailureType,
 	RunState,
 	RuntimeError,
 } from "../schemas/index.ts";
-import { evaluateRamanGoodEnough, createSearchEnvelopeFromParameterSearch } from "../planner/evaluate-good-enough.ts";
+import {
+	DEFAULT_RAMAN_EVALUATION_CONFIG,
+	createSearchEnvelopeFromParameterSearch,
+	evaluateRamanGoodEnough,
+} from "../planner/evaluate-good-enough.ts";
 import type { LiveRamanUnitOptions } from "../runtime/raman/index.ts";
-import type { ManagedUnitResult, RunExecutionContext } from "./run-controller.ts";
+import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "../schemas/index.ts";
+import type { ManagedUnitResult, RunExecutionContext, UnitAttemptContext } from "./run-controller.ts";
 
 type UnitOptionsProvider = (unit: ExecutionUnit) => LiveRamanUnitOptions | undefined;
 
@@ -17,12 +24,113 @@ interface ParameterSearchAttemptPlan {
 	acquisition: RamanAcquisition;
 }
 
+interface ClassifiedFailure {
+	failure: RuntimeError;
+	failureType: RetryFailureType;
+	failureReason: RetryFailureReason;
+	artifacts: RunState["artifactRefs"];
+}
+
+interface FinalRetryQueueItem {
+	unit: ExecutionUnit;
+	nextAttemptIndex: number;
+}
+
 function artifactRefsForResult(result: ManagedUnitResult): RunState["artifactRefs"] {
 	return result.artifactRefs;
 }
 
 function errorForResult(result: Extract<ManagedUnitResult, { status: "failed" }>): RuntimeError {
 	return result.error;
+}
+
+function retryPolicyForContext(context: RunExecutionContext): RetryPolicy {
+	return context.activeRun.spec.retryPolicy ?? DEFAULT_RETRY_POLICY;
+}
+
+function classifyRuntimeFailure(failure: RuntimeError, artifacts: RunState["artifactRefs"]): ClassifiedFailure | undefined {
+	if (failure.errorCode.includes("timeout")) {
+		return {
+			failure,
+			failureType: "execution",
+			failureReason: "timeout",
+			artifacts,
+		};
+	}
+	if (failure.retrySafe && (failure.errorCode === "autofocus_low_confidence" || failure.errorCode === "low_focus_confidence")) {
+		return {
+			failure,
+			failureType: "quality",
+			failureReason: "low_focus_confidence",
+			artifacts,
+		};
+	}
+	return undefined;
+}
+
+function classifyQualityFailure(result: ManagedUnitResult, artifacts: RunState["artifactRefs"]): ClassifiedFailure | undefined {
+	const metrics = getObservationMetrics(result);
+	if (!metrics || metrics.autofocusConfidence >= DEFAULT_RAMAN_EVALUATION_CONFIG.autofocusConfidenceMin) {
+		return undefined;
+	}
+	return {
+		failure: {
+			errorCode: "autofocus_low_confidence",
+			message: `Autofocus confidence ${metrics.autofocusConfidence} is below threshold ${DEFAULT_RAMAN_EVALUATION_CONFIG.autofocusConfidenceMin}.`,
+			retrySafe: true,
+			needsOperator: false,
+			safeToResume: true,
+			scope: "unit",
+			payload: {
+				confidence: metrics.autofocusConfidence,
+				threshold: DEFAULT_RAMAN_EVALUATION_CONFIG.autofocusConfidenceMin,
+			},
+		},
+		failureType: "quality",
+		failureReason: "low_focus_confidence",
+		artifacts,
+	};
+}
+
+function classifyMappingFailure(result: ManagedUnitResult, artifacts: RunState["artifactRefs"]): ClassifiedFailure | undefined {
+	if (result.status === "failed") {
+		return classifyRuntimeFailure(errorForResult(result), artifacts);
+	}
+	return classifyQualityFailure(result, artifacts);
+}
+
+function retryPolicyAllows(policy: RetryPolicy, failure: ClassifiedFailure): boolean {
+	if (failure.failureType === "execution") {
+		return failure.failureReason === "timeout" && policy.retryableFailureReasons.execution.includes(failure.failureReason);
+	}
+	return failure.failureReason === "low_focus_confidence" && policy.retryableFailureReasons.quality.includes(failure.failureReason);
+}
+
+function artifactIds(artifacts: RunState["artifactRefs"]): string[] {
+	return artifacts.map((artifact) => artifact.artifactId);
+}
+
+function recordAttempt(
+	context: RunExecutionContext,
+	unit: ExecutionUnit,
+	attempt: UnitAttemptContext,
+	status: "succeeded" | "failed",
+	artifacts: RunState["artifactRefs"],
+	failure?: ClassifiedFailure,
+	finalForPoint?: boolean,
+): void {
+	context.recordPointAttempt({
+		pointUnitId: unit.unitId,
+		attemptId: `${unit.unitId}:${attempt.phase}:${attempt.attemptIndex}`,
+		attemptIndex: attempt.attemptIndex,
+		phase: attempt.phase,
+		status,
+		failureType: failure?.failureType,
+		failureReason: failure?.failureReason,
+		errorCode: failure?.failure.errorCode,
+		finalForPoint,
+		artifactIds: artifactIds(artifacts),
+	});
 }
 
 function getObservationMetrics(result: ManagedUnitResult): RamanObservationMetrics | undefined {
@@ -273,48 +381,144 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 
 export async function executeMappingRun(context: RunExecutionContext, failureLimit: number): Promise<void> {
 	const { activeRun } = context;
+	const retryPolicy = retryPolicyForContext(context);
+	const finalRetryQueue: FinalRetryQueueItem[] = [];
 	let consecutiveMappingFailures = 0;
 
-	for (const unit of activeRun.units) {
+	async function runMappingAttempt(
+		unit: ExecutionUnit,
+		attempt: UnitAttemptContext,
+		finalAttemptExhausted = true,
+	): Promise<"succeeded" | "queued_final_retry" | "failed" | "run_failed" | "paused" | "aborted"> {
 		if (activeRun.abortRequested) {
 			context.abortAt(unit);
-			return;
+			return "aborted";
 		}
 
-		context.markUnitStarted(unit);
+		context.markUnitStarted(unit, attempt);
 		const result = await context.executeUnit(unit);
 		const resultArtifacts = artifactRefsForResult(result);
 
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
-			return;
+			return "paused";
 		}
 
-		if (result.status === "failed") {
-			const failure = errorForResult(result);
-			if (activeRun.spec.stoppingRules?.stopOnError === false) {
-				context.recordUnitFailureAndContinue(unit, failure, resultArtifacts);
-				consecutiveMappingFailures += 1;
-				if (consecutiveMappingFailures >= failureLimit) {
-					context.fail(unit, {
-						errorCode: "mapping_consecutive_failures_limit_reached",
-						message: `Mapping stopped after ${consecutiveMappingFailures} consecutive point failures.`,
-						retrySafe: false,
-						needsOperator: true,
-						safeToResume: false,
-						scope: "run",
-					}, []);
+		const classifiedFailure = classifyMappingFailure(result, resultArtifacts);
+		if (!classifiedFailure) {
+			if (result.status === "failed") {
+				const failure = errorForResult(result);
+				recordAttempt(context, unit, attempt, "failed", resultArtifacts, undefined, true);
+				if (activeRun.spec.stoppingRules?.stopOnError === false) {
+					context.recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt);
+					consecutiveMappingFailures += 1;
+					if (consecutiveMappingFailures >= failureLimit) {
+						context.fail(unit, {
+							errorCode: "mapping_consecutive_failures_limit_reached",
+							message: `Mapping stopped after ${consecutiveMappingFailures} consecutive point failures.`,
+							retrySafe: false,
+							needsOperator: true,
+							safeToResume: false,
+							scope: "run",
+						}, []);
+						return "run_failed";
+					}
+					return "failed";
+				}
+
+				context.fail(unit, failure, resultArtifacts);
+				return "run_failed";
+			}
+			consecutiveMappingFailures = 0;
+			recordAttempt(context, unit, attempt, "succeeded", resultArtifacts, undefined, true);
+			context.completeUnit(unit, resultArtifacts, {}, attempt);
+			return "succeeded";
+		}
+
+		const retryableByPolicy = retryPolicyAllows(retryPolicy, classifiedFailure);
+		const immediateRetriesAvailable =
+			attempt.phase !== "final_retry" && attempt.attemptIndex < retryPolicy.maxImmediateRetriesPerPoint;
+		if (retryableByPolicy && immediateRetriesAvailable) {
+			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false);
+			return runMappingAttempt(unit, {
+				phase: "immediate_retry",
+				attemptIndex: attempt.attemptIndex + 1,
+			});
+		}
+
+		if (attempt.phase === "final_retry" && retryableByPolicy && !finalAttemptExhausted) {
+			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false);
+			return "failed";
+		}
+
+		const finalRetriesAvailable =
+			attempt.phase !== "final_retry" &&
+			retryableByPolicy &&
+			retryPolicy.maxFinalRetriesPerPoint > 0;
+		if (finalRetriesAvailable) {
+			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false);
+			finalRetryQueue.push({
+				unit,
+				nextAttemptIndex: attempt.attemptIndex + 1,
+			});
+			return "queued_final_retry";
+		}
+
+		recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, true);
+		if (activeRun.spec.stoppingRules?.stopOnError === false) {
+			context.recordUnitFailureAndContinue(unit, classifiedFailure.failure, resultArtifacts, attempt);
+			consecutiveMappingFailures += 1;
+			if (consecutiveMappingFailures >= failureLimit) {
+				context.fail(unit, {
+					errorCode: "mapping_consecutive_failures_limit_reached",
+					message: `Mapping stopped after ${consecutiveMappingFailures} consecutive point failures.`,
+					retrySafe: false,
+					needsOperator: true,
+					safeToResume: false,
+					scope: "run",
+				}, []);
+				return "run_failed";
+			}
+			return "failed";
+		}
+
+		context.fail(unit, classifiedFailure.failure, resultArtifacts);
+		return "run_failed";
+	}
+
+	for (const unit of activeRun.units) {
+		const outcome = await runMappingAttempt(unit, { phase: "initial", attemptIndex: 0 });
+		if (outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
+			return;
+		}
+		if (outcome === "failed" && activeRun.spec.stoppingRules?.stopOnError !== false) {
+			return;
+		}
+	}
+
+	for (const item of finalRetryQueue) {
+		for (let offset = 0; offset < retryPolicy.maxFinalRetriesPerPoint; offset++) {
+			const finalAttemptExhausted = offset + 1 >= retryPolicy.maxFinalRetriesPerPoint;
+			const outcome = await runMappingAttempt(item.unit, {
+				phase: "final_retry",
+				attemptIndex: item.nextAttemptIndex + offset,
+			}, finalAttemptExhausted);
+			if (outcome === "succeeded" || outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
+				if (outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
 					return;
 				}
+				break;
+			}
+			if (outcome === "failed" && !finalAttemptExhausted) {
 				continue;
 			}
-
-			context.fail(unit, failure, resultArtifacts);
-			return;
+			if (outcome === "failed") {
+				if (activeRun.spec.stoppingRules?.stopOnError !== false) {
+					return;
+				}
+				break;
+			}
 		}
-
-		consecutiveMappingFailures = 0;
-		context.completeUnit(unit, resultArtifacts);
 	}
 
 	context.complete();

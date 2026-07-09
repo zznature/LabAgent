@@ -1,7 +1,7 @@
 # Development Rules
 
 Goal: Develop experimental research agents based on pi-agent. Intend to build first auto-research demo on Raman experiments.
-Status: Build Minimum Viable Product: develop the extension `src/extensions/experiment-research` to adapt pi-agent for in-lab applications.
+MVP Status: develop the extension `src/extensions/experiment-research` to adapt pi-agent for in-lab applications.
 
 Implementation should always follow `docs/design-ideas/core-ideas.md`, which is user-authored design guidelines.
 - When implementation may go beyond the design, ask user to improve it.
@@ -37,8 +37,6 @@ Every non-trivial response must contain two sections:
 - **No inline imports** (`await import()`, `import("pkg").Type`, dynamic type imports). Top-level imports only.
 - Never remove or downgrade code to fix type errors from outdated deps; upgrade the dep instead.
 - Always ask before removing functionality or code that appears intentional.
-- Do not preserve backward compatibility unless the user asks for it.
-- Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS` so they stay configurable.
 
 ## Commands
 
