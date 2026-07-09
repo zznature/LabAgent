@@ -39,10 +39,23 @@ export const SimulationControlsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const TemplateApplicationSchema = Type.Object(
+	{
+		templateId: Type.String({ minLength: 1 }),
+		templateVersion: Type.String({ minLength: 1 }),
+		matchReason: Type.Optional(Type.String({ minLength: 1 })),
+		inheritedFields: Type.Array(Type.String({ minLength: 1 })),
+		overriddenFields: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+		notes: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+	},
+	{ additionalProperties: false },
+);
+
 export const ProcedureSpecParamsSchema = Type.Object(
 	{
 		spec: ProcedureSpecSchema,
 		executionMode: Type.Optional(ExecutionModeSchema),
+		templateApplication: Type.Optional(TemplateApplicationSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -53,6 +66,7 @@ export const RunProcedureParamsSchema = Type.Object(
 		simulation: Type.Optional(SimulationControlsSchema),
 		executionMode: Type.Optional(ExecutionModeSchema),
 		admission: Type.Optional(AdmissionSchema),
+		templateApplication: Type.Optional(TemplateApplicationSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -77,6 +91,7 @@ export const RunIdParamsSchema = Type.Object(
 
 export type ExecutionMode = Static<typeof ExecutionModeSchema>;
 export type Admission = Static<typeof AdmissionSchema>;
+export type TemplateApplication = Static<typeof TemplateApplicationSchema>;
 export type ProcedureSpecParams = Static<typeof ProcedureSpecParamsSchema>;
 export type RunProcedureParams = Static<typeof RunProcedureParamsSchema>;
 export type ProposalIdParams = Static<typeof ProposalIdParamsSchema>;

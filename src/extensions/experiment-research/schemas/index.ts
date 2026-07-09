@@ -40,6 +40,13 @@ export {
 	type RamanDomain,
 } from "./procedure-spec.ts";
 export {
+	ExperimentProcedureTemplateSchema,
+	ExperimentProcedureTemplateValidator,
+	type ExperimentProcedureTemplate,
+	type ExperimentProcedureTemplateDefaults,
+	type ExperimentProcedureTemplateMatch,
+} from "./experiment-procedure-template.ts";
+export {
 	ExecutionUnitSchema,
 	ExecutionUnitValidator,
 	ExecutionUnitKindSchema,

@@ -20,6 +20,13 @@ export {
 	type StoredIntentRef,
 } from "./intent-store.ts";
 export {
+	findExperimentProcedureTemplate,
+	listExperimentProcedureTemplates,
+	readExperimentProcedureTemplate,
+	type TemplateMatchInput,
+	type TemplateMatchResult,
+} from "./experiment-template-store.ts";
+export {
 	listProcedureSpecs,
 	readProcedureSpec,
 	saveFrozenProcedureSpec,
@@ -43,9 +50,12 @@ export {
 } from "./run-store.ts";
 export {
 	experimentRoot,
+	experimentProcedureTemplatePath,
+	experimentProcedureTemplatesRoot,
 	experimentsRoot,
 	intentPath,
 	intentsRoot,
+	labConfigRoot,
 	procedureSpecPath,
 	procedureSpecsRoot,
 	recordsRoot,

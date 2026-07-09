@@ -402,6 +402,43 @@ docs freeze
 
 `Implement planner-side bounded run proposal flow for Raman single-point, parameter-search, and mapping procedures.`
 
+## Phase 6.5: Add Planner-Side Experiment Procedure Templates
+
+### Objective
+
+为 Raman planner 增加 workspace-local 实验方案模板，让 agent 起草 `ProcedureSpec` 时可以参考同类样品、同类实验和同类 procedure 的推荐默认参数。
+
+### Scope
+
+- template schema
+- workspace template store
+- template matching planner tool
+- proposal preview provenance
+
+### Checklist
+
+- [x] 定义 `ExperimentProcedureTemplate`
+- [x] 模板位置固定为 `lab-config/templates/*.json`
+- [x] 模板只保存可继承参数，不保存 `procedureSpecId` / `experimentId` / `intentId` / 历史点位坐标
+- [x] 匹配优先级：
+  - [x] `sampleId` 精确匹配
+  - [x] `sampleClass` 匹配
+  - [x] intent keyword / tag 匹配
+  - [x] `procedureId` 默认模板
+- [x] 模板默认值只作为推荐，不作为强制约束
+- [x] template provenance 只进入 validate / preflight / propose details，不进入 `ProcedureSpec`
+- [x] 匹配失败时要求 planner 回到自主规划并向用户确认关键假设
+
+### Exit Criteria
+
+- agent 能在规划前查找 workspace 模板。
+- 匹配模板时，proposal details 能说明 `templateId`、`templateVersion`、继承字段和覆盖字段。
+- 未匹配模板时，planner 有明确 fallback 提示。
+
+### Suggested Codex Goal
+
+`Add planner-side experiment procedure templates for Raman defaults without changing the executable ProcedureSpec schema.`
+
 ## Phase 7: Encode Explicit "Good Enough" Rules
 
 ### Objective

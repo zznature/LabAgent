@@ -14,6 +14,7 @@ $PiRepo = if ($env:PI_REPO) { (Resolve-Path $env:PI_REPO).Path } elseif (Test-Pa
 
 New-Item -ItemType Directory -Force -Path (Join-Path $WorkspaceRoot ".pi") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $WorkspaceRoot "lab-config") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $WorkspaceRoot "lab-config/templates") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $WorkspaceRoot "lab-records") | Out-Null
 
 function Render-Template {
@@ -61,6 +62,17 @@ if (-not (Test-Path $UserPrompts)) {
 	Copy-Item `
 		-Path (Join-Path $TemplateRoot "lab-config/user-prompts.md") `
 		-Destination $UserPrompts
+}
+
+$TemplateSourceRoot = Join-Path $TemplateRoot "lab-config/templates"
+$TemplateDestinationRoot = Join-Path $WorkspaceRoot "lab-config/templates"
+if (Test-Path $TemplateSourceRoot) {
+	Get-ChildItem -Path $TemplateSourceRoot -File -Filter "*.json" | ForEach-Object {
+		$destination = Join-Path $TemplateDestinationRoot $_.Name
+		if (-not (Test-Path $destination)) {
+			Copy-Item -Path $_.FullName -Destination $destination
+		}
+	}
 }
 
 # Refresh the deployed Raman Python driver copy from product source.

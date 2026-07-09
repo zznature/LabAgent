@@ -1,0 +1,85 @@
+{
+  "templateId": "YBCO_xy_grid_same_params",
+  "templateVersion": "1.0.0",
+  "procedureId": "raman_grid_mapping",
+  "label": "YBCO XY grid mapping with shared Raman parameters",
+  "description": "Recommended Raman defaults derived from a 7x7 XY grid mapping history; new plans must provide their own experiment ids and point geometry.",
+  "match": {
+    "sampleClasses": ["YBCO"],
+    "intentKeywords": ["xy grid", "grid mapping", "mapping", "same params"],
+    "intentTags": ["xy_grid", "mapping"],
+    "defaultForProcedure": true
+  },
+  "defaults": {
+    "resources": [
+      {
+        "resourceId": "stage-main",
+        "role": "stage"
+      },
+      {
+        "resourceId": "frame-main",
+        "role": "frame_provider"
+      },
+      {
+        "resourceId": "spectrometer-main",
+        "role": "spectrometer"
+      }
+    ],
+    "limits": {
+      "maxLaserPowerPercent": 25
+    },
+    "planPerPoint": [
+      {
+        "kind": "move_to_point"
+      },
+      {
+        "kind": "autofocus"
+      },
+      {
+        "kind": "acquire_spectrum"
+      }
+    ],
+    "stoppingRules": {
+      "maxRuntimeMinutes": 220,
+      "maxUnits": 49,
+      "stopOnError": false,
+      "maxConsecutiveFailures": 49
+    },
+    "domain": {
+      "raman": {
+        "autofocus": {
+          "enabled": true,
+          "roi": {
+            "x": 491,
+            "y": 352,
+            "width": 225,
+            "height": 225
+          },
+          "params": {
+            "zStartUm": 1634.117,
+            "zEndUm": 1714.117,
+            "pointCount": 10,
+            "framesPerZ": 1,
+            "warmupFramesPerZ": 1,
+            "finalVerificationFramesPerZ": 1
+          }
+        },
+        "acquisition": {
+          "integrationTimeMs": 180000,
+          "laserPowerPercent": 25,
+          "accumulations": 1,
+          "timeoutMs": 210000,
+          "saveFormat": "txt"
+        }
+      }
+    }
+  },
+  "source": {
+    "kind": "derived_from_history",
+    "ref": "assets/experiment_data/exp_xy_grid_7x7_20260708/procedure-specs/spec_xy_grid_7x7_same_params_20260708_v1.json"
+  },
+  "notes": [
+    "Historical point coordinates are intentionally excluded.",
+    "Template defaults are recommendations and may be overridden with an explanation."
+  ]
+}

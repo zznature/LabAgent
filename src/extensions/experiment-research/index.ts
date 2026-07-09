@@ -11,6 +11,7 @@ import {
 	ramanStageMoveRelativeTool,
 } from "./tools/operator.ts";
 import {
+	findExperimentProcedureTemplateTool,
 	getLabCapabilitiesTool,
 	getLabStateTool,
 	getProcedureSpecTemplateTool,
@@ -33,6 +34,7 @@ const PLANNER_TOOL_NAMES = [
 	"get_lab_capabilities",
 	"get_lab_state",
 	"record_experiment_intent",
+	"find_experiment_procedure_template",
 	"get_procedure_spec_template",
 	"validate_procedure_spec",
 	"run_preflight",
@@ -68,6 +70,7 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(getLabCapabilitiesTool);
 	pi.registerTool(getLabStateTool);
 	pi.registerTool(recordExperimentIntentTool);
+	pi.registerTool(findExperimentProcedureTemplateTool);
 	pi.registerTool(getProcedureSpecTemplateTool);
 	pi.registerTool(validateProcedureSpecTool);
 	pi.registerTool(runPreflightTool);

@@ -191,6 +191,20 @@ export const proposeRunTool = {
 					status: proposal.status,
 					procedureSpecId: proposal.procedureSpecId,
 					supportedExecutionModes: ["simulation", "live-supervised"],
+					templateApplication: params.templateApplication
+						? {
+							applied: true,
+							templateId: params.templateApplication.templateId,
+							templateVersion: params.templateApplication.templateVersion,
+							matchReason: params.templateApplication.matchReason,
+							inheritedFields: params.templateApplication.inheritedFields,
+							overriddenFields: params.templateApplication.overriddenFields ?? [],
+							notes: params.templateApplication.notes ?? [],
+						}
+						: {
+							applied: false,
+							note: "No ExperimentProcedureTemplate metadata was supplied.",
+						},
 				},
 			},
 		};

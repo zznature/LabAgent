@@ -4,6 +4,14 @@ export function recordsRoot(cwd: string): string {
 	return join(cwd, "lab-records");
 }
 
+export function labConfigRoot(cwd: string): string {
+	return join(cwd, "lab-config");
+}
+
+export function experimentProcedureTemplatesRoot(cwd: string): string {
+	return join(labConfigRoot(cwd), "templates");
+}
+
 export function experimentsRoot(cwd: string): string {
 	return join(recordsRoot(cwd), "experiments");
 }
@@ -34,6 +42,10 @@ export function intentPath(cwd: string, experimentId: string, intentId: string):
 
 export function procedureSpecPath(cwd: string, experimentId: string, procedureSpecId: string): string {
 	return join(procedureSpecsRoot(cwd, experimentId), `${procedureSpecId}.json`);
+}
+
+export function experimentProcedureTemplatePath(cwd: string, templateId: string): string {
+	return join(experimentProcedureTemplatesRoot(cwd), `${templateId}.json`);
 }
 
 export function runStatePath(cwd: string, runId: string): string {

@@ -52,6 +52,7 @@ describe("experiment research rebuild skeleton", () => {
 		expect(extension.tools.has("get_lab_capabilities")).toBe(true);
 		expect(extension.tools.has("get_lab_state")).toBe(true);
 		expect(extension.tools.has("record_experiment_intent")).toBe(true);
+		expect(extension.tools.has("find_experiment_procedure_template")).toBe(true);
 		expect(extension.tools.has("get_procedure_spec_template")).toBe(true);
 		expect(extension.tools.has("validate_procedure_spec")).toBe(true);
 		expect(extension.tools.has("run_preflight")).toBe(true);
@@ -72,6 +73,7 @@ describe("experiment research rebuild skeleton", () => {
 				"get_lab_capabilities",
 				"get_lab_state",
 				"record_experiment_intent",
+				"find_experiment_procedure_template",
 				"get_procedure_spec_template",
 				"validate_procedure_spec",
 				"run_preflight",
@@ -100,6 +102,7 @@ describe("experiment research rebuild skeleton", () => {
 		expect(promptResult.systemPrompt).toContain("raman_get_hardware_status");
 		expect(promptResult.systemPrompt).toContain("Raman hardware");
 		expect(promptResult.systemPrompt).toContain("record_experiment_intent");
+		expect(promptResult.systemPrompt).toContain("find_experiment_procedure_template");
 		expect(promptResult.systemPrompt).toContain("get_procedure_spec_template");
 		expect(promptResult.systemPrompt).toContain("summarize_run");
 		expect(promptResult.systemPrompt).toContain("propose_run followed by approve_and_start_run");

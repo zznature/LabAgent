@@ -5,11 +5,12 @@ import { ExperimentIntentValidator, ProcedureSpecValidator, formatValidationErro
 import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import { getRamanLiveRuntime, getRamanPythonRuntimeConfigInfo, validateRuntimeAnchorState } from "../runtime/raman/index.ts";
-import { saveExperimentIntent } from "../store/index.ts";
+import { findExperimentProcedureTemplate, listExperimentProcedureTemplates, saveExperimentIntent } from "../store/index.ts";
 import {
 	ProcedureSpecParamsSchema,
 	type ExecutionMode,
 	type ProcedureSpecParams,
+	type TemplateApplication,
 } from "./params.ts";
 
 const EmptyParamsSchema = Type.Object({}, { additionalProperties: false });
@@ -21,6 +22,21 @@ const ProcedureSpecTemplateParamsSchema = Type.Object(
 			Type.Literal("raman_parameter_search"),
 			Type.Literal("raman_grid_mapping"),
 		]),
+	},
+	{ additionalProperties: false },
+);
+
+const ExperimentProcedureTemplateMatchParamsSchema = Type.Object(
+	{
+		procedureId: Type.Union([
+			Type.Literal("raman_single_point_probe"),
+			Type.Literal("raman_parameter_search"),
+			Type.Literal("raman_grid_mapping"),
+		]),
+		sampleId: Type.Optional(Type.String({ minLength: 1 })),
+		sampleClass: Type.Optional(Type.String({ minLength: 1 })),
+		intentText: Type.Optional(Type.String({ minLength: 1 })),
+		intentTags: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
 	},
 	{ additionalProperties: false },
 );
@@ -56,6 +72,7 @@ interface PlannerToolDetails {
 }
 
 type ProcedureSpecTemplateParams = Static<typeof ProcedureSpecTemplateParamsSchema>;
+type ExperimentProcedureTemplateMatchParams = Static<typeof ExperimentProcedureTemplateMatchParamsSchema>;
 type ExperimentIntentParams = Static<typeof ExperimentIntentParamsSchema>;
 
 function success(summary: string, stateAfter: Record<string, unknown>): { content: [{ type: "text"; text: string }]; details: PlannerToolDetails } {
@@ -107,7 +124,25 @@ function validateProcedureSpec(spec: ProcedureSpec): { valid: boolean; issues: s
 	return { valid: true, issues: [] };
 }
 
-function previewState(spec: ProcedureSpec): Record<string, unknown> {
+function templateApplicationState(templateApplication: TemplateApplication | undefined): Record<string, unknown> {
+	if (!templateApplication) {
+		return {
+			applied: false,
+			note: "No ExperimentProcedureTemplate metadata was supplied; if no template matched, confirm planner assumptions with the user.",
+		};
+	}
+	return {
+		applied: true,
+		templateId: templateApplication.templateId,
+		templateVersion: templateApplication.templateVersion,
+		matchReason: templateApplication.matchReason,
+		inheritedFields: templateApplication.inheritedFields,
+		overriddenFields: templateApplication.overriddenFields ?? [],
+		notes: templateApplication.notes ?? [],
+	};
+}
+
+function previewState(spec: ProcedureSpec, templateApplication?: TemplateApplication): Record<string, unknown> {
 	const units = compileProcedureSpec(spec);
 	const preview = summarizeProcedureProposal(spec);
 	return {
@@ -121,6 +156,7 @@ function previewState(spec: ProcedureSpec): Record<string, unknown> {
 		requiresConfirmation: preview.requiresConfirmation,
 		risks: preview.risks,
 		limits: preview.limits,
+		templateApplication: templateApplicationState(templateApplication),
 	};
 }
 
@@ -264,6 +300,7 @@ async function buildPreflightState(
 	spec: ProcedureSpec,
 	cwd: string,
 	executionMode: ExecutionMode,
+	templateApplication?: TemplateApplication,
 ): Promise<Record<string, unknown>> {
 	const preview = summarizeProcedureProposal(spec);
 	const forbiddenRisks = preview.risks.filter((risk) => risk.level === "forbidden");
@@ -284,6 +321,7 @@ async function buildPreflightState(
 			requiresConfirmation: preview.requiresConfirmation,
 			risks: preview.risks,
 			limits: preview.limits,
+			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
 			requiredRolesPresent,
 			requestedModeSupported,
@@ -306,6 +344,7 @@ async function buildPreflightState(
 			requiresConfirmation: preview.requiresConfirmation,
 			risks: preview.risks,
 			limits: preview.limits,
+			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
 			requiredRolesPresent,
 			requestedModeSupported,
@@ -337,6 +376,7 @@ async function buildPreflightState(
 		requiresConfirmation: preview.requiresConfirmation,
 		risks: preview.risks,
 		limits: preview.limits,
+		templateApplication: templateApplicationState(templateApplication),
 		savePath: preview.savePath,
 		requiredRolesPresent,
 		requestedModeSupported,
@@ -376,6 +416,7 @@ export const getLabCapabilitiesTool = {
 				"get_lab_capabilities",
 				"get_lab_state",
 				"record_experiment_intent",
+				"find_experiment_procedure_template",
 				"get_procedure_spec_template",
 				"validate_procedure_spec",
 				"run_preflight",
@@ -441,6 +482,61 @@ export const recordExperimentIntentTool = {
 		}
 	},
 } satisfies ToolDefinition<typeof ExperimentIntentParamsSchema, PlannerToolDetails>;
+
+export const findExperimentProcedureTemplateTool = {
+	name: "find_experiment_procedure_template",
+	label: "Find Experiment Procedure Template",
+	description: "Find the best workspace-local experiment procedure template for a Raman planning request.",
+	promptSnippet: "Look up Raman experiment defaults from lab-config/templates before drafting a ProcedureSpec",
+	promptGuidelines: [
+		"Use this after record_experiment_intent and before manually drafting a Raman ProcedureSpec.",
+		"Treat the returned template defaults as recommendations, not hard constraints.",
+		"If no template matches, draft independently and ask the user to confirm planning assumptions.",
+		"When a template is used, pass templateApplication metadata to validate_procedure_spec, run_preflight, and propose_run.",
+	],
+	parameters: ExperimentProcedureTemplateMatchParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, params: ExperimentProcedureTemplateMatchParams, _signal, _onUpdate, ctx) {
+		const result = findExperimentProcedureTemplate(ctx.cwd, params);
+		const catalog = listExperimentProcedureTemplates(ctx.cwd);
+		if (result.status === "fallback") {
+			return warning("No matching ExperimentProcedureTemplate found; planner should fall back to autonomous planning and confirm assumptions.", {
+				status: result.status,
+				procedureId: params.procedureId,
+				candidateCount: result.candidateCount,
+				invalidTemplates: result.invalidTemplates,
+				fallbackReason: result.fallbackReason,
+				availableTemplateIds: catalog.templates.map((template) => template.templateId),
+			});
+		}
+		const template = result.template;
+		if (!template) {
+			return error("ExperimentProcedureTemplate match result was missing its template.", "template_match_inconsistent", {
+				status: result.status,
+				procedureId: params.procedureId,
+			});
+		}
+		return success(`ExperimentProcedureTemplate ${template.templateId}@${template.templateVersion} matched.`, {
+			status: result.status,
+			procedureId: params.procedureId,
+			template,
+			matchReason: result.matchReason,
+			templateApplication: {
+				templateId: template.templateId,
+				templateVersion: template.templateVersion,
+				matchReason: result.matchReason,
+				inheritedFields: Object.keys(template.defaults),
+				overriddenFields: [],
+				notes: [
+					"Template defaults are recommendations; user-requested overrides are allowed but should be explained.",
+					"Do not copy experimentId, intentId, procedureSpecId, or historical point coordinates from a prior ProcedureSpec.",
+				],
+			},
+			candidateCount: result.candidateCount,
+			invalidTemplates: result.invalidTemplates,
+		});
+	},
+} satisfies ToolDefinition<typeof ExperimentProcedureTemplateMatchParamsSchema, PlannerToolDetails>;
 
 export const getProcedureSpecTemplateTool = {
 	name: "get_procedure_spec_template",
@@ -526,7 +622,7 @@ export const validateProcedureSpecTool = {
 			});
 		}
 
-		return success("ProcedureSpec is valid for bounded planner proposal flow.", previewState(spec));
+		return success("ProcedureSpec is valid for bounded planner proposal flow.", previewState(spec, params.templateApplication));
 	},
 } satisfies ToolDefinition<typeof ProcedureSpecParamsSchema, PlannerToolDetails>;
 
@@ -551,7 +647,7 @@ export const runPreflightTool = {
 			});
 		}
 
-		const state = await buildPreflightState(spec, ctx.cwd, resolveExecutionMode(params));
+		const state = await buildPreflightState(spec, ctx.cwd, resolveExecutionMode(params), params.templateApplication);
 		if (state.requiredRolesPresent !== true) {
 			return error("ProcedureSpec preflight failed because required Raman resources are missing.", "preflight_missing_resources", state);
 		}
