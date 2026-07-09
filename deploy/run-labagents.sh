@@ -29,4 +29,4 @@ if [ ! -f "$WORKSPACE_ROOT/.pi/labagents-policy.json" ]; then
 fi
 
 cd "$WORKSPACE_ROOT"
-exec "$PI_BIN" --append-system-prompt "$APPEND_SYSTEM_PROMPT"
+PI_SKIP_VERSION_CHECK=1 exec "$PI_BIN" --append-system-prompt "$APPEND_SYSTEM_PROMPT"

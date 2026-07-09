@@ -14,6 +14,8 @@ export {
 	SemanticStepSchema,
 	ProcedureLimitsSchema,
 	StoppingRulesSchema,
+	RetryPolicySchema,
+	DEFAULT_RETRY_POLICY,
 	ProcedureDomainSchema,
 	RamanDomainSchema,
 	RamanAcquisitionSchema,
@@ -29,11 +31,21 @@ export {
 	type SemanticStep,
 	type ProcedureLimits,
 	type StoppingRules,
+	type RetryPolicy,
+	type RetryFailureType,
+	type RetryFailureReason,
 	type ProcedureDomain,
 	type RamanAcquisition,
 	type RamanParameterSearch,
 	type RamanDomain,
 } from "./procedure-spec.ts";
+export {
+	ExperimentProcedureTemplateSchema,
+	ExperimentProcedureTemplateValidator,
+	type ExperimentProcedureTemplate,
+	type ExperimentProcedureTemplateDefaults,
+	type ExperimentProcedureTemplateMatch,
+} from "./experiment-procedure-template.ts";
 export {
 	ExecutionUnitSchema,
 	ExecutionUnitValidator,
@@ -51,9 +63,11 @@ export {
 	RunStateValidator,
 	RunStatusSchema,
 	RunProgressSchema,
+	PointAttemptRecordSchema,
 	type RunState,
 	type RunStatus,
 	type RunProgress,
+	type PointAttemptRecord,
 } from "./run-state.ts";
 export {
 	ToolResultSchema,

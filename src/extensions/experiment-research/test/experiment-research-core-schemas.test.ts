@@ -61,6 +61,16 @@ describe("experiment research core schemas", () => {
 				maxUnits: 1,
 				stopOnError: true,
 			},
+			retryPolicy: {
+				mode: "immediate_then_final",
+				maxImmediateRetriesPerPoint: 1,
+				maxFinalRetriesPerPoint: 1,
+				finalRetryOrder: "failure_order",
+				retryableFailureReasons: {
+					execution: ["timeout"],
+					quality: ["low_focus_confidence"],
+				},
+			},
 			domain: {
 				raman: {
 					autofocus: {
@@ -254,6 +264,21 @@ describe("experiment research core schemas", () => {
 				safeToResume: true,
 				scope: "unit",
 			},
+			pointAttempts: [
+				{
+					pointUnitId: "unit-003",
+					attemptId: "unit-003:initial:0",
+					attemptIndex: 0,
+					phase: "initial",
+					status: "failed",
+					failureType: "quality",
+					failureReason: "low_focus_confidence",
+					errorCode: "autofocus_low_confidence",
+					finalForPoint: false,
+					artifactIds: ["artifact-001"],
+					timestamp: "2026-06-29T18:00:00.000Z",
+				},
+			],
 			artifactRefs: [
 				{
 					artifactId: "artifact-001",

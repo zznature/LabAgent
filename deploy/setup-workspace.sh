@@ -17,6 +17,7 @@ PI_REPO=${PI_REPO:-$(CDPATH= cd -- "$LABAGENTS_REPO/../pi" 2>/dev/null && pwd -P
 
 mkdir -p "$WORKSPACE_ROOT/.pi"
 mkdir -p "$WORKSPACE_ROOT/lab-config"
+mkdir -p "$WORKSPACE_ROOT/lab-config/templates"
 mkdir -p "$WORKSPACE_ROOT/lab-records"
 
 render_template() {
@@ -51,6 +52,16 @@ fi
 if [ ! -f "$WORKSPACE_ROOT/lab-config/user-prompts.md" ]; then
   cp "$TEMPLATE_ROOT/lab-config/user-prompts.md" \
     "$WORKSPACE_ROOT/lab-config/user-prompts.md"
+fi
+
+if [ -d "$TEMPLATE_ROOT/lab-config/templates" ]; then
+  for template_file in "$TEMPLATE_ROOT"/lab-config/templates/*.json; do
+    [ -f "$template_file" ] || continue
+    template_name=$(basename "$template_file")
+    if [ ! -f "$WORKSPACE_ROOT/lab-config/templates/$template_name" ]; then
+      cp "$template_file" "$WORKSPACE_ROOT/lab-config/templates/$template_name"
+    fi
+  done
 fi
 
 # Refresh the deployed Raman Python driver copy from product source.

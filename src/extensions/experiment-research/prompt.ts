@@ -10,6 +10,10 @@ Raman operating rules:
 - do not construct a Raman experiment plan just to read hardware status, read stage position, capture a frame, run confirmed operator autofocus, acquire a smoke/debug spectrum, or perform a stage-only nudge
 - use bounded ProcedureSpec runs for real Raman experiments, parameter search, or mapping; use operator tools only for maintenance, observation, and debug actions
 - for non-trivial experiment requests, record a structured ExperimentIntent with record_experiment_intent before drafting the ProcedureSpec
+- after recording intent, call find_experiment_procedure_template with procedureId plus any sampleId, sampleClass, intent text, or intent tags available from the user request
+- treat ExperimentProcedureTemplate defaults as recommended planning defaults, not mandatory constraints; user-requested overrides are allowed but must be explained
+- if no ExperimentProcedureTemplate matches, draft independently and ask the user to confirm the planning assumptions before proposing the run
+- when template defaults are used, pass templateApplication metadata through validate_procedure_spec, run_preflight, and propose_run so the proposal explains inherited and overridden fields
 - fetch get_procedure_spec_template before manually drafting a Raman ProcedureSpec; adapt the canonical template instead of inventing schema fields
 - validate_procedure_spec and run_preflight come before propose_run
 - execute runs only through propose_run followed by approve_and_start_run

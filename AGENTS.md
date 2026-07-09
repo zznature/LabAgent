@@ -1,7 +1,7 @@
 # Development Rules
 
-Goal: Develop experimental research agents based on pi-agent. Intend to build fist auto-research demo on Raman experiments.
-Build a Minimum Viable Product (MVP): develop the extension `.pi\extensions\experiment-research` to adapt pi-agent for in-lab applications.
+Goal: Develop experimental research agents based on pi-agent. Intend to build first auto-research demo on Raman experiments.
+MVP Status: develop the extension `src/extensions/experiment-research` to adapt pi-agent for in-lab applications.
 
 Implementation should always follow `docs/design-ideas/core-ideas.md`, which is user-authored design guidelines.
 - When implementation may go beyond the design, ask user to improve it.
@@ -32,16 +32,11 @@ Every non-trivial response must contain two sections:
 
 - When new function/feature is proposed, always ASK: Is it necessary? Can it be constructed from existing functions?
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.
-- No `any` unless absolutely necessary.
 - Inline single-line helpers that have only one call site.
 - Check node_modules for external API types; don't guess.
 - **No inline imports** (`await import()`, `import("pkg").Type`, dynamic type imports). Top-level imports only.
 - Never remove or downgrade code to fix type errors from outdated deps; upgrade the dep instead.
-- Use only erasable TypeScript syntax (Node strip-only mode) in code checked by the root config (`packages/*/src`, `packages/*/test`, `packages/coding-agent/examples`): no parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other constructs needing JS emit. Use explicit fields with constructor assignments.
 - Always ask before removing functionality or code that appears intentional.
-- Do not preserve backward compatibility unless the user asks for it.
-- Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS` so they stay configurable.
-- Never modify `packages/ai/src/models.generated.ts` directly; update `packages/ai/scripts/generate-models.ts` instead, then regenerate. Including the resulting `models.generated.ts` diff is always OK, even if regeneration includes unrelated upstream model metadata changes.
 
 ## Commands
 
@@ -58,7 +53,6 @@ Every non-trivial response must contain two sections:
 - Treat npm dep and lockfile changes as reviewed code. Direct external deps stay pinned to exact versions.
 - Hydrate/update locally with `npm install --ignore-scripts`; clean/CI-style with `npm ci --ignore-scripts`. Don't run lifecycle scripts unless the user asks.
 - If dep metadata changes, refresh `package-lock.json` with `npm install --package-lock-only --ignore-scripts`.
-- If `packages/coding-agent/npm-shrinkwrap.json` needs regen, run `node scripts/generate-coding-agent-shrinkwrap.mjs` (verify with `--check` or `npm run check`). New deps with lifecycle scripts require review and an explicit allowlist entry in that script; never add one silently.
 - Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`. Don't bypass unless the user wants the lockfile change committed.
 
 ## Git
@@ -67,5 +61,18 @@ Follow these rules for committing:
 
 - Stage explicit paths (`git add <path1> <path2>`); never `git add -A` / `git add .`.
 - Before committing, run `git status` and verify you are only staging your files.
-- `packages/ai/src/models.generated.ts` may always be included alongside your files.
 - Message format: `{feat,fix,docs}[(ai,tui,agent,coding-agent)]: <commit message> (optionally multiple lines)`. Message is informative and concise.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live in GitHub Issues; external PRs are not a triage request surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-label triage vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context domain documentation layout: root `CONTEXT.md` with ADRs under `docs/adr/`, both created lazily when needed. See `docs/agents/domain.md`.

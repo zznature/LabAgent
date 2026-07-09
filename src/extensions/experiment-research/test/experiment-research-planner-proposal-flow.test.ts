@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -95,6 +95,12 @@ function asRecord(value: unknown): Record<string, unknown> {
 	expect(value).toBeTypeOf("object");
 	expect(value).not.toBeNull();
 	return value as Record<string, unknown>;
+}
+
+function writeTemplate(cwd: string, fileName: string, template: Record<string, unknown>): void {
+	const root = join(cwd, "lab-config", "templates");
+	mkdirSync(root, { recursive: true });
+	writeFileSync(join(root, fileName), `${JSON.stringify(template, null, 2)}\n`, "utf8");
 }
 
 describe("experiment research planner proposal flow", () => {
@@ -234,6 +240,116 @@ describe("experiment research planner proposal flow", () => {
 		expect(template.procedureId).toBe("raman_grid_mapping");
 		expect(plan.kind).toBe("point_list");
 		expect(templateState.notes).toEqual(expect.arrayContaining([expect.stringContaining("Line scans should use point_list")]));
+	});
+
+	it("matches workspace experiment procedure templates and surfaces template application metadata", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		writeTemplate(cwd, "graphene-grid.json", {
+			templateId: "graphene-grid",
+			templateVersion: "1.0.0",
+			procedureId: "raman_grid_mapping",
+			label: "Graphene grid defaults",
+			match: {
+				sampleClasses: ["graphene"],
+				intentKeywords: ["grid mapping"],
+				defaultForProcedure: true,
+			},
+			defaults: {
+				resources: [
+					{ resourceId: "stage-main", role: "stage" },
+					{ resourceId: "frame-main", role: "frame_provider" },
+					{ resourceId: "spectrometer-main", role: "spectrometer" },
+				],
+				limits: { maxLaserPowerPercent: 25 },
+				planPerPoint: [{ kind: "move_to_point" }, { kind: "autofocus" }, { kind: "acquire_spectrum" }],
+				domain: {
+					raman: {
+						autofocus: {
+							enabled: true,
+							roi: { x: 491, y: 352, width: 225, height: 225 },
+						},
+						acquisition: {
+							integrationTimeMs: 180_000,
+							laserPowerPercent: 25,
+							accumulations: 1,
+						},
+					},
+				},
+			},
+		});
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+
+		const templateResult = await extension.tools
+			.get("find_experiment_procedure_template")
+			?.execute(
+				"find-template",
+				{ procedureId: "raman_grid_mapping", sampleClass: "graphene", intentText: "run grid mapping" },
+				undefined,
+				undefined,
+				context,
+			);
+		const templateDetails = asRecord(templateResult?.details);
+		const templateState = asRecord(templateDetails.stateAfter);
+		const templateApplication = asRecord(templateState.templateApplication);
+		expect(templateDetails.status).toBe("success");
+		expect(templateState.matchReason).toBe("sampleClass match");
+		expect(templateApplication.templateId).toBe("graphene-grid");
+		expect(templateApplication.inheritedFields).toEqual(expect.arrayContaining(["resources", "limits", "planPerPoint", "domain"]));
+
+		const proposal = buildProcedureProposal({
+			...commonBuilderInput(),
+			procedureId: "raman_grid_mapping",
+			grid: {
+				origin: { xUm: 1_000, yUm: 2_000 },
+				rows: 2,
+				cols: 2,
+				pitchXUm: 10,
+				pitchYUm: 10,
+			},
+		});
+		const validateResult = await extension.tools
+			.get("validate_procedure_spec")
+			?.execute("validate-template", { spec: proposal.spec, templateApplication }, undefined, undefined, context);
+		const validateDetails = asRecord(validateResult?.details);
+		const validateState = asRecord(validateDetails.stateAfter);
+		const validateTemplateApplication = asRecord(validateState.templateApplication);
+		expect(validateDetails.status).toBe("success");
+		expect(validateTemplateApplication.applied).toBe(true);
+		expect(validateTemplateApplication.templateId).toBe("graphene-grid");
+
+		const proposeResult = await extension.tools
+			.get("propose_run")
+			?.execute("propose-template", { spec: proposal.spec, templateApplication }, undefined, undefined, context);
+		const proposeDetails = asRecord(proposeResult?.details);
+		const proposeState = asRecord(proposeDetails.stateAfter);
+		const proposeTemplateApplication = asRecord(proposeState.templateApplication);
+		expect(proposeDetails.status).toBe("success");
+		expect(proposeTemplateApplication.applied).toBe(true);
+		expect(proposeTemplateApplication.templateVersion).toBe("1.0.0");
+	});
+
+	it("returns an explicit fallback when no workspace experiment procedure template matches", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+
+		const result = await extension.tools
+			.get("find_experiment_procedure_template")
+			?.execute(
+				"find-template-fallback",
+				{ procedureId: "raman_grid_mapping", sampleClass: "unknown-sample" },
+				undefined,
+				undefined,
+				context,
+			);
+		const details = asRecord(result?.details);
+		const state = asRecord(details.stateAfter);
+		expect(details.status).toBe("warning");
+		expect(state.status).toBe("fallback");
+		expect(state.fallbackReason).toEqual(expect.stringContaining("draft independently"));
 	});
 
 	it("surfaces forbidden preflight risks when the proposed laser power exceeds limits", async () => {

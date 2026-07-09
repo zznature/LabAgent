@@ -62,6 +62,43 @@ export const StoppingRulesSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const RetryPolicyModeSchema = Type.Literal("immediate_then_final");
+
+export const RetryFinalOrderSchema = Type.Literal("failure_order");
+
+export const RetryFailureTypeSchema = Type.Union([
+	Type.Literal("execution"),
+	Type.Literal("quality"),
+]);
+
+export const RetryExecutionFailureReasonSchema = Type.Literal("timeout");
+
+export const RetryQualityFailureReasonSchema = Type.Literal("low_focus_confidence");
+
+export const RetryFailureReasonSchema = Type.Union([
+	RetryExecutionFailureReasonSchema,
+	RetryQualityFailureReasonSchema,
+]);
+
+export const RetryableFailureReasonsSchema = Type.Object(
+	{
+		execution: Type.Array(RetryExecutionFailureReasonSchema, { minItems: 1 }),
+		quality: Type.Array(RetryQualityFailureReasonSchema, { minItems: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const RetryPolicySchema = Type.Object(
+	{
+		mode: RetryPolicyModeSchema,
+		maxImmediateRetriesPerPoint: Type.Integer({ minimum: 0 }),
+		maxFinalRetriesPerPoint: Type.Integer({ minimum: 0 }),
+		finalRetryOrder: RetryFinalOrderSchema,
+		retryableFailureReasons: RetryableFailureReasonsSchema,
+	},
+	{ additionalProperties: false },
+);
+
 export const RamanAutofocusSchema = Type.Object(
 	{
 		enabled: Type.Boolean(),
@@ -207,6 +244,7 @@ export const ProcedureSpecSchema = Type.Object(
 		limits: ProcedureLimitsSchema,
 		plan: ProcedurePlanSchema,
 		stoppingRules: Type.Optional(StoppingRulesSchema),
+		retryPolicy: Type.Optional(RetryPolicySchema),
 		domain: ProcedureDomainSchema,
 	},
 	{ additionalProperties: false },
@@ -217,6 +255,14 @@ export type Point = Static<typeof PointSchema>;
 export type SemanticStep = Static<typeof SemanticStepSchema>;
 export type ProcedureLimits = Static<typeof ProcedureLimitsSchema>;
 export type StoppingRules = Static<typeof StoppingRulesSchema>;
+export type RetryPolicyMode = Static<typeof RetryPolicyModeSchema>;
+export type RetryFinalOrder = Static<typeof RetryFinalOrderSchema>;
+export type RetryFailureType = Static<typeof RetryFailureTypeSchema>;
+export type RetryExecutionFailureReason = Static<typeof RetryExecutionFailureReasonSchema>;
+export type RetryQualityFailureReason = Static<typeof RetryQualityFailureReasonSchema>;
+export type RetryFailureReason = Static<typeof RetryFailureReasonSchema>;
+export type RetryableFailureReasons = Static<typeof RetryableFailureReasonsSchema>;
+export type RetryPolicy = Static<typeof RetryPolicySchema>;
 export type RamanAutofocus = Static<typeof RamanAutofocusSchema>;
 export type RamanAcquisition = Static<typeof RamanAcquisitionSchema>;
 export type RamanParameterSearch = Static<typeof RamanParameterSearchSchema>;
@@ -228,5 +274,16 @@ export type CurrentPositionPlan = Static<typeof CurrentPositionPlanSchema>;
 export type ProcedurePlan = Static<typeof ProcedurePlanSchema>;
 export type ProcedureId = Static<typeof ProcedureIdSchema>;
 export type ProcedureSpec = Static<typeof ProcedureSpecSchema>;
+
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+	mode: "immediate_then_final",
+	maxImmediateRetriesPerPoint: 1,
+	maxFinalRetriesPerPoint: 1,
+	finalRetryOrder: "failure_order",
+	retryableFailureReasons: {
+		execution: ["timeout"],
+		quality: ["low_focus_confidence"],
+	},
+};
 
 export const ProcedureSpecValidator = compileSchema(ProcedureSpecSchema);

@@ -99,6 +99,7 @@
 - `limits`
 - `plan`
 - `stoppingRules`
+- `retryPolicy?`
 - `outputPlan?`
 
 **不应包含**
@@ -141,6 +142,7 @@
 - `pauseReason?`
 - `abortReason?`
 - `errorState?`
+- `pointAttempts?`
 - `artifactRefs`
 - `startedAt`
 - `updatedAt`
@@ -151,6 +153,51 @@
 - 用户意图本体
 - 未归档的 LLM 推理
 - 新的实验规划建议
+
+## Planner-Side Parameter Templates
+
+`ExperimentProcedureTemplate` 是 planner 侧的参数先验，不属于 kernel 的核心执行输入，也不属于运行时真相。它回答的是：
+
+**对某类样品、某类实验和某个 procedure，agent 起草 `ProcedureSpec` 时可以参考哪些默认参数？**
+
+当前 MVP 只为 Raman 规划使用该对象，但命名不绑定 Raman。模板来自 workspace-local 配置：
+
+```text
+lab-config/templates/*.json
+```
+
+匹配优先级固定为：
+
+1. `sampleId` 精确匹配
+2. `sampleClass` 匹配
+3. intent keyword / tag 匹配
+4. `procedureId` 默认模板
+
+模板只保存可继承参数，例如：
+
+- `resources`
+- `limits`
+- `planPerPoint`
+- `stoppingRules`
+- `retryPolicy`
+- `domain`
+
+模板不保存、也不应复制：
+
+- `procedureSpecId`
+- `experimentId`
+- `intentId`
+- 历史实验的具体点位坐标
+- 审批状态、冻结状态或运行状态
+
+模板默认值是建议，不是强约束。planner 可以按用户要求覆盖模板参数，但 proposal preview/details 必须说明：
+
+- 使用的 `templateId`
+- 使用的 `templateVersion`
+- 继承了哪些字段
+- 覆盖了哪些字段
+
+如果没有模板匹配，planner 回到自主规划，并在提出 run 前向用户确认关键假设。`ProcedureSpec` schema 不因为模板而增加 provenance 字段；模板应用信息只出现在 planner / proposal details 中，避免污染 kernel 执行输入。
 
 ## Derived Runtime Object
 
@@ -312,6 +359,16 @@ type ProcedureSpec = {
     maxUnits?: number
     stopOnError?: boolean
   }
+  retryPolicy?: {
+    mode: "immediate_then_final"
+    maxImmediateRetriesPerPoint: number
+    maxFinalRetriesPerPoint: number
+    finalRetryOrder: "failure_order"
+    retryableFailureReasons: {
+      execution: ["timeout"]
+      quality: ["low_focus_confidence"]
+    }
+  }
 }
 
 type SemanticStep =
@@ -351,6 +408,18 @@ type RunState = {
   status: "queued" | "running" | "paused" | "aborted" | "failed" | "completed"
   progress?: { completedUnits: number; totalUnits?: number; unitKind?: string }
   currentUnit?: { unitId: string; index: number }
+  pointAttempts?: Array<{
+    pointUnitId: string
+    attemptId: string
+    attemptIndex: number
+    phase: "initial" | "immediate_retry" | "final_retry"
+    status: "succeeded" | "failed"
+    failureType?: "execution" | "quality"
+    failureReason?: "timeout" | "low_focus_confidence"
+    finalForPoint?: boolean
+    artifactIds?: string[]
+    timestamp: string
+  }>
   heartbeatAt?: string
   artifactRefs: string[]
 }

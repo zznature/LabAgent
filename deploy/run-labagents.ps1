@@ -24,6 +24,7 @@ if (-not (Test-Path (Join-Path $WorkspaceRoot ".pi/labagents-policy.json"))) {
 
 Push-Location $WorkspaceRoot
 try {
+	$env:PI_SKIP_VERSION_CHECK = "1"
 	& $PiBin --append-system-prompt $AppendSystemPrompt
 	exit $LASTEXITCODE
 } finally {
