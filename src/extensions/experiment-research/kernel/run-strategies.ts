@@ -44,10 +44,6 @@ function errorForResult(result: Extract<ManagedUnitResult, { status: "failed" }>
 	return result.error;
 }
 
-function retryPolicyForContext(context: RunExecutionContext): RetryPolicy {
-	return context.activeRun.spec.retryPolicy ?? DEFAULT_RETRY_POLICY;
-}
-
 function classifyRuntimeFailure(failure: RuntimeError, artifacts: RunState["artifactRefs"]): ClassifiedFailure | undefined {
 	if (failure.errorCode.includes("timeout")) {
 		return {
@@ -154,10 +150,6 @@ function interpolateNumber(minimum: number, maximum: number, index: number, tota
 	return minimum + (maximum - minimum) * (index / (total - 1));
 }
 
-function interpolateInteger(minimum: number, maximum: number, index: number, total: number): number {
-	return Math.round(interpolateNumber(minimum, maximum, index, total));
-}
-
 function deriveParameterSearchAcquisition(
 	context: RunExecutionContext,
 	attemptIndex: number,
@@ -178,12 +170,12 @@ function deriveParameterSearchAcquisition(
 		integrationTimeMs:
 			envelope.integrationTimeMs === undefined
 				? base.integrationTimeMs
-				: interpolateInteger(
+				: Math.round(interpolateNumber(
 						envelope.integrationTimeMs.min,
 						envelope.integrationTimeMs.max,
 						attemptIndex,
 						attemptCount,
-					),
+					)),
 		accumulations:
 			envelope.accumulations === undefined
 				? base.accumulations
@@ -220,10 +212,6 @@ function buildParameterSearchPlans(context: RunExecutionContext): ParameterSearc
 		unit,
 		acquisition: deriveParameterSearchAcquisition(context, index, units.length),
 	}));
-}
-
-function createDecisionPauseReason(attemptIndex: number, decision: RamanEvaluationDecision): string {
-	return `Parameter search attempt ${attemptIndex + 1} completed and explicit evaluation returned ${decision.decision}.`;
 }
 
 function evaluateParameterSearchResult(
@@ -371,7 +359,11 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 		}
 
 		if (decision.decision === "stop_and_request_user_decision") {
-			context.pause(unit, createDecisionPauseReason(attemptIndex, decision), []);
+			context.pause(
+				unit,
+				`Parameter search attempt ${attemptIndex + 1} completed and explicit evaluation returned ${decision.decision}.`,
+				[],
+			);
 			return;
 		}
 	}
@@ -381,7 +373,7 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 
 export async function executeMappingRun(context: RunExecutionContext, failureLimit: number): Promise<void> {
 	const { activeRun } = context;
-	const retryPolicy = retryPolicyForContext(context);
+	const retryPolicy = context.activeRun.spec.retryPolicy ?? DEFAULT_RETRY_POLICY;
 	const finalRetryQueue: FinalRetryQueueItem[] = [];
 	let consecutiveMappingFailures = 0;
 

@@ -165,10 +165,6 @@ function hasRequiredRamanRoles(spec: ProcedureSpec): boolean {
 	return roles.has("stage") && roles.has("frame_provider") && roles.has("spectrometer");
 }
 
-function resolveExecutionMode(params: ProcedureSpecParams): ExecutionMode {
-	return params.executionMode ?? "simulation";
-}
-
 function templateForProcedure(procedureId: ProcedureId): Record<string, unknown> {
 	const common = {
 		procedureSpecId: "replace-with-stable-procedure-spec-id",
@@ -647,7 +643,7 @@ export const runPreflightTool = {
 			});
 		}
 
-		const state = await buildPreflightState(spec, ctx.cwd, resolveExecutionMode(params), params.templateApplication);
+		const state = await buildPreflightState(spec, ctx.cwd, params.executionMode ?? "simulation", params.templateApplication);
 		if (state.requiredRolesPresent !== true) {
 			return error("ProcedureSpec preflight failed because required Raman resources are missing.", "preflight_missing_resources", state);
 		}

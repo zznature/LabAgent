@@ -17,7 +17,6 @@ import {
 	ProposalIdParamsSchema,
 	RunIdParamsSchema,
 	RunProcedureParamsSchema,
-	type ExecutionMode,
 	type ProposalIdParams,
 	type RunIdParams,
 	type RunProcedureParams,
@@ -137,10 +136,6 @@ function error(summary: string, errorCode: string, stateAfter: Record<string, un
 	};
 }
 
-function resolveExecutionMode(params: { executionMode?: ExecutionMode }): ExecutionMode {
-	return params.executionMode ?? "simulation";
-}
-
 export const runProcedureTool = {
 	name: "run_procedure",
 	label: "Run Procedure",
@@ -223,7 +218,7 @@ export const approveAndStartRunTool = {
 	parameters: ProposalIdParamsSchema,
 	executionMode: "sequential",
 	async execute(_toolCallId, params: ProposalIdParams, _signal, _onUpdate, ctx) {
-		const mode = resolveExecutionMode(params);
+		const mode = params.executionMode ?? "simulation";
 		if (mode === "live-supervised" && !getRamanLiveRuntime(ctx.cwd)) {
 			return error("No live Raman runtime is registered for this workspace.", "live_runtime_unavailable", {
 				executionMode: mode,

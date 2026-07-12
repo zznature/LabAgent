@@ -74,24 +74,12 @@ function timestamp(): string {
 	return new Date().toISOString();
 }
 
-function createSimulationRunId(): string {
-	return `sim-run-${randomUUID().slice(0, 8)}`;
-}
-
-function createLiveRunId(): string {
-	return `live-run-${randomUUID().slice(0, 8)}`;
-}
-
 function appendEvent(cwd: string, event: RunEvent): void {
 	appendRunEvent(cwd, event);
 }
 
 function isParameterSearchRun(spec: ProcedureSpec): boolean {
 	return spec.procedureId === "raman_parameter_search";
-}
-
-function isMappingRun(spec: ProcedureSpec): boolean {
-	return spec.procedureId === "raman_grid_mapping";
 }
 
 function maxUnitsForSpec(spec: ProcedureSpec, units: ExecutionUnit[]): number {
@@ -139,10 +127,6 @@ function updateRunState(cwd: string, runId: string, updater: (current: RunState)
 		throw new Error(`run not found: ${runId}`);
 	}
 	return setRunState(cwd, updater(current));
-}
-
-function runErrorCodeForMode(mode: ExecutionMode): string {
-	return mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error";
 }
 
 async function executeUnit(
@@ -472,7 +456,7 @@ async function executeManagedRun(activeRun: ActiveRun): Promise<void> {
 		return;
 	}
 
-	if (!isMappingRun(spec)) {
+	if (spec.procedureId !== "raman_grid_mapping") {
 		await executeLinearRun(
 			context,
 			() => spec.procedureId === "raman_single_point_probe" ? singlePointOptions(activeRun) : undefined,
@@ -490,7 +474,7 @@ function startRun(activeRun: ActiveRun): RunState {
 			...current,
 			status: "failed",
 			errorState: {
-				errorCode: runErrorCodeForMode(activeRun.mode),
+				errorCode: activeRun.mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error",
 				message: error instanceof Error ? error.message : String(error),
 				retrySafe: false,
 				needsOperator: true,
@@ -512,7 +496,7 @@ export function startSimulationRun(
 	controls: SimulationControls = {},
 ): RunState {
 	return startRun({
-		runId: createSimulationRunId(),
+		runId: `sim-run-${randomUUID().slice(0, 8)}`,
 		cwd,
 		spec,
 		units: limitedUnitsForSpec(spec, compileProcedureSpec(spec)),
@@ -533,7 +517,7 @@ export function startLiveRamanRun(
 	}
 
 	return startRun({
-		runId: createLiveRunId(),
+		runId: `live-run-${randomUUID().slice(0, 8)}`,
 		cwd,
 		spec,
 		units: limitedUnitsForSpec(spec, compileProcedureSpec(spec)),
