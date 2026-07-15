@@ -18,6 +18,7 @@ import {
 	failedActionResult,
 	type ActionResult,
 	type AutofocusRunSingleAction,
+	type FrameCaptureLaserOffAction,
 	type FrameCaptureLatestAction,
 	type SpectrometerAcquireSpectrumAction,
 	type StageGetPositionAction,
@@ -44,6 +45,7 @@ export interface RamanAutofocusRuntime {
 export interface RamanFrameRuntime {
 	resource: FrameProviderResource;
 	captureLatest(action: FrameCaptureLatestAction): Promise<ActionResult> | ActionResult;
+	captureLaserOff(action: FrameCaptureLaserOffAction): Promise<ActionResult> | ActionResult;
 }
 
 export interface RamanSpectrometerRuntime {

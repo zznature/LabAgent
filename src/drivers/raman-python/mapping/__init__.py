@@ -33,6 +33,10 @@ _EXPORTS = {
         "mapping.labspec",
         "create_labspec_start_video_request",
     ),
+    "create_labspec_laser_off_video_frame_request": (
+        "mapping.labspec",
+        "create_labspec_laser_off_video_frame_request",
+    ),
     "create_labspec_stop_video_request": (
         "mapping.labspec",
         "create_labspec_stop_video_request",
@@ -71,6 +75,7 @@ __all__ = [
     "RamanAcquirer",
     "LabSpecWorkerAcquisitionConfig",
     "create_labspec_shutdown_request",
+    "create_labspec_laser_off_video_frame_request",
     "create_labspec_start_video_request",
     "create_labspec_stop_video_request",
     "create_labspec_spectrum_request",

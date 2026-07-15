@@ -9,6 +9,7 @@ import {
 	type ActionError,
 	type ActionResult,
 	type AutofocusRunSingleAction,
+	type FrameCaptureLaserOffAction,
 	type FrameCaptureLatestAction,
 	type SpectrometerAcquireSpectrumAction,
 	type StageGetPositionAction,
@@ -95,7 +96,7 @@ interface LoadedRamanPythonRuntimeConfig {
 	config: RamanPythonRuntimeConfig;
 }
 
-type PythonActionKind = "preflight" | "stage_position" | "stage_move" | "frame_capture" | "autofocus" | "spectrum";
+type PythonActionKind = "preflight" | "stage_position" | "stage_move" | "frame_capture" | "frame_capture_laser_off" | "autofocus" | "spectrum";
 
 interface PythonRequestEnvelope {
 	requestId: string;
@@ -646,6 +647,10 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 			captureLatest: async (action: FrameCaptureLatestAction): Promise<ActionResult> => {
 				const response = await daemon.request("frame_capture", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000);
 				return createActionResult(response, response.ok ? asArtifact(response.payload.framePath, "frame", "LabSpec frame") : []);
+			},
+			captureLaserOff: async (action: FrameCaptureLaserOffAction): Promise<ActionResult> => {
+				const response = await daemon.request("frame_capture_laser_off", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000);
+				return createActionResult(response, response.ok ? asArtifact(response.payload.framePath, "frame", "LabSpec laser-off frame") : []);
 			},
 		},
 		spectrometer: {

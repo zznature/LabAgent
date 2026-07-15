@@ -161,6 +161,9 @@ function createNoHardwareRuntime(): RamanLiveRuntime {
 			captureLatest() {
 				return successActionResult("not used");
 			},
+			captureLaserOff() {
+				return successActionResult("not used");
+			},
 		},
 		spectrometer: {
 			resource: createRuntimeConfig(true).spectrometer as RamanLiveRuntime["spectrometer"]["resource"],

@@ -106,6 +106,15 @@ export const FrameCaptureLatestActionSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const FrameCaptureLaserOffActionSchema = Type.Object(
+	{
+		action: Type.Literal("frame.capture_laser_off"),
+		resourceId: Type.String({ minLength: 1 }),
+		timeoutMs: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const SpectrometerAcquireSpectrumActionSchema = Type.Object(
 	{
 		action: Type.Literal("spectrometer.acquire_spectrum"),
@@ -129,6 +138,7 @@ export const RamanRuntimeActionSchema = Type.Union([
 	StageMoveAbsoluteAndWaitActionSchema,
 	AutofocusRunSingleActionSchema,
 	FrameCaptureLatestActionSchema,
+	FrameCaptureLaserOffActionSchema,
 	SpectrometerAcquireSpectrumActionSchema,
 ]);
 
@@ -139,6 +149,7 @@ export type StageGetPositionAction = Static<typeof StageGetPositionActionSchema>
 export type StageMoveAbsoluteAndWaitAction = Static<typeof StageMoveAbsoluteAndWaitActionSchema>;
 export type AutofocusRunSingleAction = Static<typeof AutofocusRunSingleActionSchema>;
 export type FrameCaptureLatestAction = Static<typeof FrameCaptureLatestActionSchema>;
+export type FrameCaptureLaserOffAction = Static<typeof FrameCaptureLaserOffActionSchema>;
 export type SpectrometerAcquireSpectrumAction = Static<typeof SpectrometerAcquireSpectrumActionSchema>;
 export type RamanRuntimeAction = Static<typeof RamanRuntimeActionSchema>;
 
@@ -147,6 +158,7 @@ export const StageGetPositionActionValidator = compileSchema(StageGetPositionAct
 export const StageMoveAbsoluteAndWaitActionValidator = compileSchema(StageMoveAbsoluteAndWaitActionSchema);
 export const AutofocusRunSingleActionValidator = compileSchema(AutofocusRunSingleActionSchema);
 export const FrameCaptureLatestActionValidator = compileSchema(FrameCaptureLatestActionSchema);
+export const FrameCaptureLaserOffActionValidator = compileSchema(FrameCaptureLaserOffActionSchema);
 export const SpectrometerAcquireSpectrumActionValidator = compileSchema(SpectrometerAcquireSpectrumActionSchema);
 export const RamanRuntimeActionValidator = compileSchema(RamanRuntimeActionSchema);
 

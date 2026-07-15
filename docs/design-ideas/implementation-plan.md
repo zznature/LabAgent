@@ -615,6 +615,7 @@ docs freeze
 - read-only hardware status
 - read-only stage position
 - active frame capture
+- active laser-off frame capture
 - confirmed operator autofocus
 - confirmed low-power smoke spectrum
 - confirmed stage-only relative motion
@@ -628,10 +629,12 @@ docs freeze
   - [x] `raman_get_hardware_status`
   - [x] `raman_get_stage_position`
   - [x] `raman_capture_frame`
+  - [x] `raman_capture_laser_off_frame`
   - [x] `raman_run_autofocus`
   - [x] `raman_acquire_smoke_spectrum`
   - [x] `raman_stage_move_relative`
 - [x] active frame capture 不要求构造 Raman `ProcedureSpec`
+- [x] laser-off frame capture 通过独立 worker request `capture_frame_no_laser` 请求关闭/验证 laser 后保存帧
 - [x] operator autofocus 需要显式确认并受 Z range / minObjectiveClearanceUm 约束
 - [x] smoke spectrum 需要显式确认并受低功率 debug 上限约束
 - [x] stage-only relative move 不要求 frame provider / spectrometer 资源

@@ -9,6 +9,7 @@ from pathlib import Path
 from autofocus.exceptions import FrameTimeoutError
 from autofocus.models import Frame
 from mapping import (
+    create_labspec_laser_off_video_frame_request,
     create_labspec_shutdown_request,
     create_labspec_start_video_request,
     create_labspec_video_frame_request,
@@ -102,15 +103,27 @@ class LabSpecFileBridgeFrameProvider:
         return self._last_frame
 
     def wait_for_next(self, after_ts: float, timeout_ms: int) -> Frame:
+        return self._wait_for_next(after_ts, timeout_ms, laser_off=False)
+
+    def wait_for_next_laser_off(self, after_ts: float, timeout_ms: int) -> Frame:
+        return self._wait_for_next(after_ts, timeout_ms, laser_off=True)
+
+    def _wait_for_next(self, after_ts: float, timeout_ms: int, *, laser_off: bool) -> Frame:
         from PIL import Image
         import numpy as np
 
         deadline = time.monotonic() + timeout_ms / 1000.0
-        request = self._request_capture(timeout_ms)
+        request = self._request_capture(timeout_ms, laser_off=laser_off)
         _trace_bridge(
             self.bridge_dir,
             "capture_frame_request_created",
-            {"requestId": request.request_id, "requestPath": str(request.request_path), "resultPath": str(request.result_path), "outputPath": str(request.output_path)},
+            {
+                "requestId": request.request_id,
+                "requestPath": str(request.request_path),
+                "resultPath": str(request.result_path),
+                "outputPath": str(request.output_path),
+                "laserOff": laser_off,
+            },
         )
         requested_path = request.output_path
         if requested_path is None:
@@ -171,9 +184,10 @@ class LabSpecFileBridgeFrameProvider:
         except Exception:
             return str(source)
 
-    def _request_capture(self, timeout_ms: int):
-        request_id = f"cap_{time.monotonic_ns()}"
-        return create_labspec_video_frame_request(
+    def _request_capture(self, timeout_ms: int, *, laser_off: bool):
+        request_id = f"cap_laser_off_{time.monotonic_ns()}" if laser_off else f"cap_{time.monotonic_ns()}"
+        create_request = create_labspec_laser_off_video_frame_request if laser_off else create_labspec_video_frame_request
+        return create_request(
             bridge_dir=self.bridge_dir,
             request_id=request_id,
             image_format=self.image_format,

@@ -224,6 +224,13 @@ Optional config (in `raman-runtime.lab.json` / `raman-runtime.local.json`):
 }
 ```
 
+Frame capture uses the LabSpec worker queue under
+`<bridgeDir>/requests/*.ini`. `raman_capture_frame` writes an
+`action=capture_frame` request. `raman_capture_laser_off_frame` writes an
+`action=capture_frame_no_laser` request with `laser_state=off`,
+`laser_power_percent=0`, and `verify_laser_state=1`; the LabSpec worker must
+implement that action for the laser-off guarantee to be real.
+
 ## Tests
 
 Rebuild-specific tests live in:

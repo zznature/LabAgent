@@ -378,18 +378,21 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
     )
 
 
-def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict) -> dict:
+def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict, *, laser_off: bool = False) -> dict:
     frame_cfg = request["frameProvider"]
     bridge_dir = Path(frame_cfg["config"]["bridgeDir"])
     image_format = frame_cfg["config"]["imageFormat"]
     timeout_ms = int(payload["timeoutMs"])
-    _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
+    _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
     provider = session.frame(frame_cfg, timeout_ms)
-    _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
+    _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
     previous_artifact_dir = getattr(provider, "artifact_dir", None)
     provider.artifact_dir = None
     try:
-        frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
+        if laser_off:
+            frame = provider.wait_for_next_laser_off(after_ts=0.0, timeout_ms=timeout_ms)
+        else:
+            frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
     finally:
         provider.artifact_dir = previous_artifact_dir
     source_path = Path(frame.path) if getattr(frame, "path", None) else Path(latest_frame_path(bridge_dir, image_format))
@@ -406,6 +409,7 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
             "framePath": frame_path,
             "sourceFramePath": str(source_path),
             "pointArtifactDir": str(point_dir) if point_dir is not None else "",
+            "laserStateRequested": "off" if laser_off else "",
         },
     )
 
@@ -579,6 +583,8 @@ def handle(session: HardwareSession, request: dict) -> dict:
         return _handle_stage_move(session, request, payload)
     if action == "frame_capture":
         return _handle_frame_capture(session, request, payload)
+    if action == "frame_capture_laser_off":
+        return _handle_frame_capture(session, request, payload, laser_off=True)
     if action == "autofocus":
         return _handle_autofocus(session, request, payload)
     if action == "spectrum":
