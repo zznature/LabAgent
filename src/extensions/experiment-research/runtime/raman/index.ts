@@ -32,6 +32,7 @@ export {
 	StageMoveAbsoluteAndWaitActionSchema,
 	AutofocusRunSingleActionSchema,
 	FrameCaptureLatestActionSchema,
+	FrameCaptureLaserOffActionSchema,
 	SpectrometerAcquireSpectrumActionSchema,
 	RamanRuntimeActionSchema,
 	ActionResultValidator,
@@ -39,6 +40,7 @@ export {
 	StageMoveAbsoluteAndWaitActionValidator,
 	AutofocusRunSingleActionValidator,
 	FrameCaptureLatestActionValidator,
+	FrameCaptureLaserOffActionValidator,
 	SpectrometerAcquireSpectrumActionValidator,
 	RamanRuntimeActionValidator,
 	successActionResult,
@@ -51,6 +53,7 @@ export {
 	type StageMoveAbsoluteAndWaitAction,
 	type AutofocusRunSingleAction,
 	type FrameCaptureLatestAction,
+	type FrameCaptureLaserOffAction,
 	type SpectrometerAcquireSpectrumAction,
 	type RamanRuntimeAction,
 } from "./actions.ts";

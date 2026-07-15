@@ -77,7 +77,7 @@ const DEFAULT_SMOKE_SPECTRUM_LASER_POWER_PERCENT = 0.1;
 const DEFAULT_SMOKE_SPECTRUM_ACCUMULATIONS = 1;
 const DEFAULT_SMOKE_SPECTRUM_TIMEOUT_MS = 10_000;
 const MAX_SMOKE_SPECTRUM_LASER_POWER_PERCENT = 0.1;
-const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 30_000;
+const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
 const DEFAULT_AUTOFOCUS_MIN_OBJECTIVE_CLEARANCE_UM = 200;
 const DEFAULT_AUTOFOCUS_ROI = { x: 100, y: 100, width: 64, height: 64 };
 
@@ -377,6 +377,48 @@ export const ramanCaptureFrameTool = {
 		}
 
 		const summary = framePath ? `Frame captured: ${framePath}.` : "Frame captured.";
+		return success(summary, stateAfter);
+	},
+} satisfies ToolDefinition<typeof EmptyParamsSchema, OperatorToolDetails>;
+
+export const ramanCaptureLaserOffFrameTool = {
+	name: "raman_capture_laser_off_frame",
+	label: "Raman Capture Laser-Off Frame",
+	description: "Ask the LabSpec worker to disable laser output, then capture the current microscope/frame-provider image.",
+	promptSnippet: "Capture a microscope/sample image after requesting laser-off state through the LabSpec worker",
+	promptGuidelines: [
+		"Use this when the operator explicitly asks for a no-laser or laser-off sample image.",
+		"Do not use this for Raman spectrum acquisition; it only captures a frame.",
+		"Report whether the runtime requested laser off and return the frame artifact/path.",
+	],
+	parameters: EmptyParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		const runtime = getRamanLiveRuntime(ctx.cwd);
+		if (!runtime) {
+			return runtimeUnavailableState();
+		}
+
+		const frameResult = await runtime.frame.captureLaserOff({
+			action: "frame.capture_laser_off",
+			resourceId: runtime.frame.resource.resourceId,
+			timeoutMs: 10_000,
+		});
+		const payload = isRecord(frameResult.payload) ? frameResult.payload : {};
+		const framePath = readString(payload, "framePath");
+		const stateAfter: Record<string, unknown> = {
+			frameProviderResourceId: runtime.frame.resource.resourceId,
+			actionStatus: frameResult.status,
+			laserStateRequested: readString(payload, "laserStateRequested") ?? "off",
+			payload,
+			artifactRefs: frameResult.artifacts,
+		};
+
+		if (frameResult.status !== "success") {
+			return error(frameResult.summary, frameResult.errorCode ?? "frame_capture_laser_off_failed", stateAfter, frameResult.retrySafe);
+		}
+
+		const summary = framePath ? `Laser-off frame captured: ${framePath}.` : "Laser-off frame captured.";
 		return success(summary, stateAfter);
 	},
 } satisfies ToolDefinition<typeof EmptyParamsSchema, OperatorToolDetails>;

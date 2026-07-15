@@ -163,6 +163,24 @@ function createOperatorRuntime(position: MutablePosition, options: { autofocusZB
 					],
 				);
 			},
+			captureLaserOff() {
+				return successActionResult(
+					"Laser-off frame captured.",
+					{
+						framePath: "D:\\RamanLab\\SpecBridge\\frames\\frame_laser_off_1.tif",
+						shape: [512, 512],
+						laserStateRequested: "off",
+					},
+					[
+						{
+							artifactId: "frame-laser-off",
+							kind: "frame",
+							path: "D:/RamanLab/SpecBridge/frames/frame_laser_off_1.tif",
+							label: "LabSpec laser-off frame",
+						},
+					],
+				);
+			},
 		},
 		spectrometer: {
 			resource: {
@@ -304,6 +322,33 @@ describe("experiment research operator tools", () => {
 		]);
 	});
 
+	it("captures a laser-off microscope frame through the registered runtime", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		registerRamanLiveRuntime(cwd, createOperatorRuntime({ xUm: 100, yUm: 200, zUm: 300 }));
+		const context = { cwd } as ExtensionContext;
+
+		const frameResult = await extension.tools
+			.get("raman_capture_laser_off_frame")
+			?.execute("frame-laser-off", {}, undefined, undefined, context);
+		const frameDetails = asRecord(frameResult?.details);
+		const frameState = asRecord(frameDetails.stateAfter);
+
+		expect(frameDetails.status).toBe("success");
+		expect(asRecord(frameResult).content).toEqual([
+			{ type: "text", text: "Laser-off frame captured: D:\\RamanLab\\SpecBridge\\frames\\frame_laser_off_1.tif." },
+		]);
+		expect(frameState.laserStateRequested).toBe("off");
+		expect(frameState.artifactRefs).toEqual([
+			{
+				artifactId: "frame-laser-off",
+				kind: "frame",
+				path: "D:/RamanLab/SpecBridge/frames/frame_laser_off_1.tif",
+				label: "LabSpec laser-off frame",
+			},
+		]);
+	});
+
 	it("requires confirmation for autofocus and rejects an unsafe autofocus result", async () => {
 		const cwd = createTempCwd();
 		const extension = loadExperimentExtension();
@@ -323,6 +368,7 @@ describe("experiment research operator tools", () => {
 		expect(asRecord(proposalState.roi)).toEqual({ x: 100, y: 100, width: 64, height: 64 });
 		expect(asRecord(proposalState.params).zStartUm).toBe(260);
 		expect(asRecord(proposalState.params).zEndUm).toBe(340);
+		expect(proposalState.timeoutMs).toBe(150_000);
 
 		const autofocusResult = await extension.tools
 			.get("raman_run_autofocus")

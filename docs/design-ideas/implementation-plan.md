@@ -469,7 +469,7 @@ docs freeze
   - [x] max attempts
   - [x] forbidden expansions
 - [x] 阈值与默认值来自 config schema，而非硬编码：
-  - [x] confidence / SNR / peak-baseline 阈值有 config 默认值
+  - [x] confidence / SNR / peak-baseline 阈值有 config 默认值；当前 autofocus confidence 默认阈值为 0.15
   - [x] 默认值可被实验模板覆盖（research-style：pin config、可复现）
   - [x] 默认阈值「由谁配置」按 Open issues 处理
 
@@ -615,6 +615,7 @@ docs freeze
 - read-only hardware status
 - read-only stage position
 - active frame capture
+- active laser-off frame capture
 - confirmed operator autofocus
 - confirmed low-power smoke spectrum
 - confirmed stage-only relative motion
@@ -628,10 +629,12 @@ docs freeze
   - [x] `raman_get_hardware_status`
   - [x] `raman_get_stage_position`
   - [x] `raman_capture_frame`
+  - [x] `raman_capture_laser_off_frame`
   - [x] `raman_run_autofocus`
   - [x] `raman_acquire_smoke_spectrum`
   - [x] `raman_stage_move_relative`
 - [x] active frame capture 不要求构造 Raman `ProcedureSpec`
+- [x] laser-off frame capture 通过独立 worker request `capture_frame_no_laser` 请求关闭/验证 laser 后保存帧
 - [x] operator autofocus 需要显式确认并受 Z range / minObjectiveClearanceUm 约束
 - [x] smoke spectrum 需要显式确认并受低功率 debug 上限约束
 - [x] stage-only relative move 不要求 frame provider / spectrometer 资源

@@ -25,6 +25,7 @@ describe("experiment research good-enough Raman rules", () => {
 		};
 
 		expect(RamanEvaluationConfigValidator.Check(DEFAULT_RAMAN_EVALUATION_CONFIG)).toBe(true);
+		expect(DEFAULT_RAMAN_EVALUATION_CONFIG.autofocusConfidenceMin).toBe(0.15);
 		expect(RamanEvaluationMetricsValidator.Check(metrics)).toBe(true);
 	});
 

@@ -19,8 +19,10 @@ reference-only and must not be imported here.
 from __future__ import annotations
 
 import json
+import shutil
 import statistics
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -123,6 +125,18 @@ def latest_frame_path(bridge_dir: Path, image_format: str) -> str:
     return ""
 
 
+def _archive_copy(source: Path, target: Path) -> str:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return str(target)
+
+
+def _safe_coord(value: float | None) -> str:
+    if value is None:
+        return "nan"
+    return f"{float(value):.3f}"
+
+
 def parse_spectrum_metrics(
     output_path: str | None,
     saturation_intensity: float | None = None,
@@ -179,6 +193,10 @@ class HardwareSession:
     def __init__(self) -> None:
         self._stage: Any | None = None
         self._frame: Any | None = None
+        self._run_artifact_dir: Path | None = None
+        self._point_artifact_dir: Path | None = None
+        self._point_index = -1
+        self._point_frame_count = 0
 
     def stage(self, stage_cfg: dict) -> Any:
         from stage.mc_newton_xyz_stage import MCNewtonXYZStageController
@@ -211,6 +229,33 @@ class HardwareSession:
             _trace("frame_provider_connect_ok", {"bridgeDir": str(bridge_dir)})
             self._frame = provider
         return self._frame
+
+    def begin_point(self, bridge_dir: Path, position: dict[str, float]) -> Path:
+        if self._run_artifact_dir is None:
+            self._run_artifact_dir = bridge_dir / "mapping-point-folders" / time.strftime("run_%Y%m%d_%H%M%S")
+        self._point_index += 1
+        self._point_frame_count = 0
+        point_name = (
+            f"unit-{self._point_index:04d}_"
+            f"x-{_safe_coord(position.get('xUm'))}_"
+            f"y-{_safe_coord(position.get('yUm'))}"
+        )
+        self._point_artifact_dir = self._run_artifact_dir / point_name
+        self._point_artifact_dir.mkdir(parents=True, exist_ok=True)
+        (self._point_artifact_dir / "position.json").write_text(json.dumps(position, indent=2), encoding="utf-8")
+        _trace("point_artifact_dir_ready", {"pointDir": str(self._point_artifact_dir), "position": position})
+        return self._point_artifact_dir
+
+    def current_point_dir(self) -> Path | None:
+        return self._point_artifact_dir
+
+    def next_capture_name(self) -> str:
+        self._point_frame_count += 1
+        if self._point_frame_count == 1:
+            return "pre_focus_0001"
+        if self._point_frame_count == 2:
+            return "post_focus_0001"
+        return f"capture_{self._point_frame_count - 2:04d}"
 
     def disable_stage_axes(self) -> None:
         if self._stage is not None:
@@ -307,6 +352,10 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
             timeout_ms=int(payload["timeoutMs"]),
         )
         position = stage.get_position_um()
+        session.begin_point(
+            Path(request["frameProvider"]["config"]["bridgeDir"]),
+            {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um},
+        )
     except Exception as exc:
         error_payload = _stage_error_payload(stage, {"target": target, "exceptionType": type(exc).__name__})
         _trace("stage_move_error", error_payload)
@@ -329,22 +378,38 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
     )
 
 
-def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict) -> dict:
+def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict, *, laser_off: bool = False) -> dict:
     frame_cfg = request["frameProvider"]
     bridge_dir = Path(frame_cfg["config"]["bridgeDir"])
     image_format = frame_cfg["config"]["imageFormat"]
     timeout_ms = int(payload["timeoutMs"])
-    _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
+    _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
     provider = session.frame(frame_cfg, timeout_ms)
-    _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
-    frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
+    _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
+    previous_artifact_dir = getattr(provider, "artifact_dir", None)
+    provider.artifact_dir = None
+    try:
+        if laser_off:
+            frame = provider.wait_for_next_laser_off(after_ts=0.0, timeout_ms=timeout_ms)
+        else:
+            frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
+    finally:
+        provider.artifact_dir = previous_artifact_dir
+    source_path = Path(frame.path) if getattr(frame, "path", None) else Path(latest_frame_path(bridge_dir, image_format))
+    frame_path = str(source_path)
+    point_dir = session.current_point_dir()
+    if point_dir is not None and source_path.exists():
+        frame_path = _archive_copy(source_path, point_dir / f"{session.next_capture_name()}.{image_format}")
     return _success(
         "Frame captured through LabSpec bridge.",
         {
             "timestamp": frame.timestamp,
             "seq": frame.seq,
             "shape": list(frame.image.shape),
-            "framePath": latest_frame_path(bridge_dir, image_format),
+            "framePath": frame_path,
+            "sourceFramePath": str(source_path),
+            "pointArtifactDir": str(point_dir) if point_dir is not None else "",
+            "laserStateRequested": "off" if laser_off else "",
         },
     )
 
@@ -359,6 +424,9 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     xyz_stage = session.stage(stage_cfg)
     stage = _ZOnlyStageAdapter(xyz_stage)
     provider = session.frame(request["frameProvider"], timeout_ms)
+    point_dir = session.current_point_dir()
+    previous_artifact_dir = getattr(provider, "artifact_dir", None)
+    provider.artifact_dir = point_dir
     controller = AutofocusController(stage, provider)
     resolved_params: dict[str, Any] = {}
     try:
@@ -412,6 +480,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
             ),
         )
     finally:
+        provider.artifact_dir = previous_artifact_dir
         session.disable_stage_axes()
     response_payload = {
         "status": str(result.status.value),
@@ -427,6 +496,16 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         "stageMoveCommands": _stage_move_commands(xyz_stage),
         "stageSettleDiagnostics": _stage_settle_diagnostics(xyz_stage),
     }
+    if point_dir is not None:
+        response_payload["pointArtifactDir"] = str(point_dir)
+        response_payload["autofocusResultPath"] = str(point_dir / "autofocus_result_0001.json")
+        try:
+            (point_dir / "autofocus_result_0001.json").write_text(
+                json.dumps(response_payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
     if result.coarse is not None:
         response_payload["scanPoints"] = [
             {"zUm": point.z_um, "score": point.score, "saturationRatio": point.saturation_ratio}
@@ -445,12 +524,13 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     )
 
 
-def _handle_spectrum(request: dict, payload: dict) -> dict:
+def _handle_spectrum(session: HardwareSession, request: dict, payload: dict) -> dict:
     from mapping.labspec import LabSpecFileBridgeRamanAcquirer, LabSpecWorkerAcquisitionConfig
 
     spectrometer_cfg = request["spectrometer"]
     acquisition = payload["acquisition"]
-    output_dir = payload.get("outputDir") or str(Path(spectrometer_cfg["config"]["bridgeDir"]) / "spectra")
+    point_dir = session.current_point_dir()
+    output_dir = str(point_dir) if point_dir is not None else payload.get("outputDir") or str(Path(spectrometer_cfg["config"]["bridgeDir"]) / "spectra")
     output_path = Path(output_dir) / f"{payload['pointId']}.{acquisition.get('saveFormat') or 'txt'}"
     config = LabSpecWorkerAcquisitionConfig(
         bridge_dir=spectrometer_cfg["config"]["bridgeDir"],
@@ -503,10 +583,12 @@ def handle(session: HardwareSession, request: dict) -> dict:
         return _handle_stage_move(session, request, payload)
     if action == "frame_capture":
         return _handle_frame_capture(session, request, payload)
+    if action == "frame_capture_laser_off":
+        return _handle_frame_capture(session, request, payload, laser_off=True)
     if action == "autofocus":
         return _handle_autofocus(session, request, payload)
     if action == "spectrum":
-        return _handle_spectrum(request, payload)
+        return _handle_spectrum(session, request, payload)
     return _fail("unknown_python_action", f"Unsupported Python Raman action: {action}")
 
 

@@ -5,6 +5,7 @@ import { RAMAN_EXTENSION_PROMPT } from "./prompt.ts";
 import {
 	ramanAcquireSmokeSpectrumTool,
 	ramanCaptureFrameTool,
+	ramanCaptureLaserOffFrameTool,
 	ramanGetHardwareStatusTool,
 	ramanGetStagePositionTool,
 	ramanRunAutofocusTool,
@@ -47,6 +48,7 @@ const PLANNER_TOOL_NAMES = [
 	"raman_get_hardware_status",
 	"raman_get_stage_position",
 	"raman_capture_frame",
+	"raman_capture_laser_off_frame",
 	"raman_run_autofocus",
 	"raman_acquire_smoke_spectrum",
 	"raman_stage_move_relative",
@@ -77,6 +79,7 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(ramanGetHardwareStatusTool);
 	pi.registerTool(ramanGetStagePositionTool);
 	pi.registerTool(ramanCaptureFrameTool);
+	pi.registerTool(ramanCaptureLaserOffFrameTool);
 	pi.registerTool(ramanRunAutofocusTool);
 	pi.registerTool(ramanAcquireSmokeSpectrumTool);
 	pi.registerTool(ramanStageMoveRelativeTool);

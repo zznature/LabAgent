@@ -277,6 +277,9 @@ function createLiveRuntime(
 					],
 				);
 			},
+			captureLaserOff() {
+				return successActionResult("not used");
+			},
 		},
 		spectrometer: {
 			resource: {
