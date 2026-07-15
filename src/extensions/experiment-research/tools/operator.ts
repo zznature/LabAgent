@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { Type, type Static } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getRamanLiveRuntime, type ActionResult, type RamanLiveRuntime } from "../runtime/raman/index.ts";
+import { createRunRecords, type ArtifactDescriptor } from "../records/run-records.ts";
 
 const EmptyParamsSchema = Type.Object({}, { additionalProperties: false });
 
@@ -174,6 +176,49 @@ function positionFromActionResult(result: ActionResult): StagePosition | undefin
 function readString(record: Record<string, unknown>, key: string): string | undefined {
 	const value = record[key];
 	return typeof value === "string" ? value : undefined;
+}
+
+function operatorMediaType(path: string): string {
+	const extension = path.split(".").pop()?.toLowerCase();
+	if (extension === "json") return "application/json";
+	if (extension === "csv") return "text/csv";
+	if (extension === "txt") return "text/plain";
+	if (extension === "png") return "image/png";
+	if (extension === "webp") return "image/webp";
+	if (extension === "tif" || extension === "tiff") return "image/tiff";
+	return "application/octet-stream";
+}
+
+function recordOperatorArtifacts(
+	cwd: string,
+	operationKind: string,
+	actionId: string,
+	result: ActionResult,
+): { operationId: string; artifacts: ArtifactDescriptor[] } {
+	const operationId = `operation-${randomUUID()}`;
+	const records = createRunRecords(cwd);
+	const startedAt = new Date().toISOString();
+	records.initializeOperatorOperation({ operationId, operationKind, startedAt });
+	const artifacts = result.artifacts.map((artifact, index) => {
+		const artifactId = `${artifact.artifactId}-${index}`.replace(/[^A-Za-z0-9._-]/gu, "-");
+		const rawFileName = artifact.path.split(/[\\/]/u).pop() || `${artifact.kind}.dat`;
+		const fileName = rawFileName.replace(/[^A-Za-z0-9._-]/gu, "-");
+		return records.publishArtifact({
+			artifactId,
+			scope: { kind: "operator", operationId, actionId },
+			layer: "source",
+			sourceArtifactIds: [],
+			createdAt: startedAt,
+			descriptorData: { kind: artifact.kind, label: artifact.label, metadata: artifact.metadata },
+			representations: [{
+				role: "source",
+				mediaType: operatorMediaType(artifact.path),
+				fileName,
+				sourcePath: artifact.path,
+			}],
+		});
+	});
+	return { operationId, artifacts };
 }
 
 function formatStagePosition(position: StagePosition): string {
@@ -363,6 +408,7 @@ export const ramanCaptureFrameTool = {
 			resourceId: runtime.frame.resource.resourceId,
 			timeoutMs: 10_000,
 		});
+		const operation = recordOperatorArtifacts(ctx.cwd, "raman_capture_frame", "action-frame", frameResult);
 		const payload = isRecord(frameResult.payload) ? frameResult.payload : {};
 		const framePath = readString(payload, "framePath");
 		const stateAfter: Record<string, unknown> = {
@@ -370,6 +416,8 @@ export const ramanCaptureFrameTool = {
 			actionStatus: frameResult.status,
 			payload,
 			artifactRefs: frameResult.artifacts,
+			operationId: operation.operationId,
+			artifactDescriptors: operation.artifacts,
 		};
 
 		if (frameResult.status !== "success") {
@@ -404,18 +452,31 @@ export const ramanCaptureLaserOffFrameTool = {
 			resourceId: runtime.frame.resource.resourceId,
 			timeoutMs: 10_000,
 		});
+		const operation = recordOperatorArtifacts(ctx.cwd, "raman_capture_laser_off_frame", "action-frame", frameResult);
 		const payload = isRecord(frameResult.payload) ? frameResult.payload : {};
 		const framePath = readString(payload, "framePath");
+		const laserStateVerified = readString(payload, "laserStateVerified");
 		const stateAfter: Record<string, unknown> = {
 			frameProviderResourceId: runtime.frame.resource.resourceId,
 			actionStatus: frameResult.status,
 			laserStateRequested: readString(payload, "laserStateRequested") ?? "off",
+			laserStateVerified: laserStateVerified ?? "unknown",
 			payload,
 			artifactRefs: frameResult.artifacts,
+			operationId: operation.operationId,
+			artifactDescriptors: operation.artifacts,
 		};
 
 		if (frameResult.status !== "success") {
 			return error(frameResult.summary, frameResult.errorCode ?? "frame_capture_laser_off_failed", stateAfter, frameResult.retrySafe);
+		}
+		if (laserStateVerified !== "off") {
+			return error(
+				"LabSpec returned a frame without verified laser-off evidence.",
+				"laser_state_not_verified",
+				{ ...stateAfter, errorCode: "laser_state_not_verified" },
+				false,
+			);
 		}
 
 		const summary = framePath ? `Laser-off frame captured: ${framePath}.` : "Laser-off frame captured.";
@@ -480,6 +541,7 @@ export const ramanAcquireSmokeSpectrumTool = {
 			acquisition,
 			timeoutMs,
 		});
+		const operation = recordOperatorArtifacts(ctx.cwd, "raman_acquire_smoke_spectrum", "action-spectrum", spectrumResult);
 		const payload = isRecord(spectrumResult.payload) ? spectrumResult.payload : {};
 		const outputPath = readString(payload, "outputPath");
 		const stateAfter: Record<string, unknown> = {
@@ -487,6 +549,8 @@ export const ramanAcquireSmokeSpectrumTool = {
 			actionStatus: spectrumResult.status,
 			payload,
 			artifactRefs: spectrumResult.artifacts,
+			operationId: operation.operationId,
+			artifactDescriptors: operation.artifacts,
 		};
 
 		if (spectrumResult.status !== "success") {
@@ -585,6 +649,7 @@ export const ramanRunAutofocusTool = {
 			params: autofocusParams,
 			timeoutMs,
 		});
+		const operation = recordOperatorArtifacts(ctx.cwd, "raman_run_autofocus", "action-autofocus", autofocusResult);
 		const payload = isRecord(autofocusResult.payload) ? autofocusResult.payload : {};
 		const zBestUm = readNumber(payload, "zBestUm");
 		const stateAfter: Record<string, unknown> = {
@@ -592,6 +657,8 @@ export const ramanRunAutofocusTool = {
 			actionStatus: autofocusResult.status,
 			payload,
 			artifactRefs: autofocusResult.artifacts,
+			operationId: operation.operationId,
+			artifactDescriptors: operation.artifacts,
 		};
 
 		if (autofocusResult.status !== "success") {

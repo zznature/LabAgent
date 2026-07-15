@@ -19,6 +19,13 @@ import type { ManagedUnitResult, RunExecutionContext, UnitAttemptContext } from 
 
 type UnitOptionsProvider = (unit: ExecutionUnit) => LiveRamanUnitOptions | undefined;
 
+function initialAttemptForUnit(context: RunExecutionContext, unit: ExecutionUnit): UnitAttemptContext {
+	return {
+		phase: "initial",
+		attemptIndex: context.activeRun.resumeAttemptIndexByUnit?.[unit.unitId] ?? 0,
+	};
+}
+
 interface ParameterSearchAttemptPlan {
 	unit: ExecutionUnit;
 	acquisition: RamanAcquisition;
@@ -296,8 +303,14 @@ export async function executeLinearRun(
 			return;
 		}
 
-		context.markUnitStarted(unit);
-		const result = await context.executeUnit(unit, unitOptions(unit));
+		const attempt = initialAttemptForUnit(context, unit);
+		context.markUnitStarted(unit, attempt);
+		const options = unitOptions(unit);
+		const result = await context.executeUnit(unit, {
+			...options,
+			attempt,
+			evaluation: options?.evaluation ? { ...options.evaluation, attemptIndex: attempt.attemptIndex } : undefined,
+		});
 		const resultArtifacts = artifactRefsForResult(result);
 
 		if (activeRun.pauseRequested || result.status === "paused") {
@@ -314,7 +327,7 @@ export async function executeLinearRun(
 			return;
 		}
 
-		context.completeUnit(unit, resultArtifacts);
+		context.completeUnit(unit, resultArtifacts, {}, attempt);
 	}
 
 	context.complete();
@@ -331,11 +344,15 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 			return;
 		}
 
-		context.markUnitStarted(unit);
+		const runtimeAttempt = initialAttemptForUnit(context, unit);
+		context.markUnitStarted(unit, runtimeAttempt);
 
 		const result = await context.executeUnit(
 			unit,
-			parameterSearchOptions(context, attemptIndex, attempt.acquisition, searchObservations),
+			{
+				...parameterSearchOptions(context, attemptIndex, attempt.acquisition, searchObservations),
+				attempt: runtimeAttempt,
+			},
 		);
 		const resultArtifacts = artifactRefsForResult(result);
 
@@ -371,7 +388,7 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 			decision: decision.decision,
 			attemptIndex,
 			acquisition: attempt.acquisition,
-		});
+		}, runtimeAttempt);
 		searchObservations.unshift(metrics);
 
 		if (decision.decision === "acceptable") {
@@ -507,7 +524,7 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 	}
 
 	for (const unit of activeRun.units) {
-		const outcome = await runMappingAttempt(unit, { phase: "initial", attemptIndex: 0 });
+		const outcome = await runMappingAttempt(unit, initialAttemptForUnit(context, unit));
 		if (outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
 			return;
 		}

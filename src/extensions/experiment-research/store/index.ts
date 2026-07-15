@@ -61,6 +61,8 @@ export {
 	recordsRoot,
 	runArtifactsPath,
 	runEventsPath,
+	runObservationEventsPath,
+	runObservationPath,
 	runRoot,
 	runsRoot,
 	runStatePath,

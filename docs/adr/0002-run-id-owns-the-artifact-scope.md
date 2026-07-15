@@ -1,0 +1,3 @@
+# Run ID owns the artifact scope
+
+Every formal artifact of a bounded run is archived under `lab-records/runs/<runId>/artifacts`. Python bridge and daemon directories are staging locations only. Pause, resume, and retry preserve the original `runId`, so their outputs remain in the same run artifact scope. Each retry or resumed re-execution creates an immutable execution attempt with its own identity and artifacts; a later attempt never overwrites an earlier attempt. The Kernel explicitly records the accepted attempt for each ExecutionUnit. Frontends must not infer the authoritative result from attempt order, timestamps, or file modification time.

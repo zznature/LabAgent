@@ -560,23 +560,33 @@ Raman 特有但很现实的一类维护操作是标定：
 
 ## 10. Artifact 策略
 
-Raman 接入时，必须明确哪些产物由 runtime 产出并登记。
+Raman artifact 的正式目录、descriptor、attempt scope、Source/Canonical 双层模型和前端读取
+interface 统一由 `run-observation-artifact-contract.md` 定义。本文只定义 Raman driver/runtime
+应提供哪些 source outputs 与 verified facts。
 
-MVP 最小必需产物应包括：
+Raman MVP 的 driver/source evidence 至少包括：
 
 - frame 原图
-- autofocus coarse/fine 曲线
+- autofocus scan frames / curve payload
 - spectrum 原始 txt
-- spectrum plot
 - LabSpec request/result 文件
 
 > `XY correction reference/current frame` artifacts remain future/reference only and are outside the MVP artifact baseline.
 
-这里的原则是：
+Runtime 再将 source evidence 规范化为四种 canonical profiles：
 
-- 产物可以由 runtime 生成
-- 但必须通过结构化 artifact ref 回流
-- 不能靠 message 文本告诉上层“文件大概在某个目录里”
+- `raman-frame`
+- `raman-spectrum`
+- `raman-autofocus`
+- `raman-evaluation`
+
+关键边界：
+
+- daemon/bridge 目录只作 staging；run action request 使用 `artifactContext = { runId, unitId, attemptId, actionId, stagingDir }`，但 daemon 不持久化这些 workflow IDs，也不能根据最近一次 stage move 推断正式 artifact scope
+- runtime 通过 Run Records Module 归档、校验并登记正式 artifacts
+- spectrum plot 由前端从 canonical spectrum JSON 绘制，不是权威 canonical result
+- requested laser state 不是 verified state；worker 未返回关闭验证证据时，不得把 laser-off frame 标为已验证 `off`
+- 不能靠 message 文本或裸 path 告诉上层“文件大概在某个目录里”
 
 ## 11. 错误模型
 

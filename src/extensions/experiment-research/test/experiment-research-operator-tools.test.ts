@@ -10,6 +10,7 @@ import {
 	type RamanLiveRuntime,
 } from "../runtime/raman/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createRunRecords } from "../records/run-records.ts";
 
 type CapturedHandler = (...args: unknown[]) => unknown;
 
@@ -170,6 +171,7 @@ function createOperatorRuntime(position: MutablePosition, options: { autofocusZB
 						framePath: "D:\\RamanLab\\SpecBridge\\frames\\frame_laser_off_1.tif",
 						shape: [512, 512],
 						laserStateRequested: "off",
+						laserStateVerified: "off",
 					},
 					[
 						{
@@ -312,6 +314,7 @@ describe("experiment research operator tools", () => {
 			{ type: "text", text: "Frame captured: D:\\RamanLab\\SpecBridge\\frames\\frame_1.tif." },
 		]);
 		expect(frameState.frameProviderResourceId).toBe("frame-main");
+		expect(frameState.operationId).toMatch(/^operation-[A-Za-z0-9-]+$/u);
 		expect(frameState.artifactRefs).toEqual([
 			{
 				artifactId: "frame-latest",
@@ -320,6 +323,11 @@ describe("experiment research operator tools", () => {
 				label: "LabSpec frame",
 			},
 		]);
+		const operationId = String(frameState.operationId);
+		const operatorArtifacts = createRunRecords(cwd).listOperatorArtifacts(operationId);
+		expect(operatorArtifacts).toHaveLength(1);
+		expect(operatorArtifacts[0]?.scope).toMatchObject({ kind: "operator", operationId });
+		expect(createRunRecords(cwd).listArtifacts("run-previous")).toEqual([]);
 	});
 
 	it("captures a laser-off microscope frame through the registered runtime", async () => {
@@ -339,6 +347,7 @@ describe("experiment research operator tools", () => {
 			{ type: "text", text: "Laser-off frame captured: D:\\RamanLab\\SpecBridge\\frames\\frame_laser_off_1.tif." },
 		]);
 		expect(frameState.laserStateRequested).toBe("off");
+		expect(frameState.laserStateVerified).toBe("off");
 		expect(frameState.artifactRefs).toEqual([
 			{
 				artifactId: "frame-laser-off",
@@ -347,6 +356,25 @@ describe("experiment research operator tools", () => {
 				label: "LabSpec laser-off frame",
 			},
 		]);
+	});
+
+	it("rejects a laser-off frame when the worker only echoes the requested state", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const runtime = createOperatorRuntime({ xUm: 100, yUm: 200, zUm: 300 });
+		runtime.frame.captureLaserOff = () => successActionResult("Frame captured.", {
+			framePath: "D:\\RamanLab\\SpecBridge\\frames\\unverified.tif",
+			laserStateRequested: "off",
+		});
+		registerRamanLiveRuntime(cwd, runtime);
+
+		const result = await extension.tools
+			.get("raman_capture_laser_off_frame")
+			?.execute("frame-laser-off-unverified", {}, undefined, undefined, { cwd } as ExtensionContext);
+		const details = asRecord(result?.details);
+
+		expect(details.status).toBe("error");
+		expect(asRecord(details.stateAfter).errorCode).toBe("laser_state_not_verified");
 	});
 
 	it("requires confirmation for autofocus and rejects an unsafe autofocus result", async () => {

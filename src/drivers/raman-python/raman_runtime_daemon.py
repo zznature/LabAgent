@@ -27,6 +27,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 # The vendor stage SDK and some bridge helpers print to stdout. That channel is
 # reserved for the JSON protocol, so route every accidental write to stderr and
 # keep a private handle for protocol responses.
@@ -131,24 +133,47 @@ def _archive_copy(source: Path, target: Path) -> str:
     return str(target)
 
 
-def _safe_coord(value: float | None) -> str:
-    if value is None:
-        return "nan"
-    return f"{float(value):.3f}"
+def _artifact_staging_dir(payload: dict) -> Path | None:
+    context = payload.get("artifactContext")
+    if not isinstance(context, dict):
+        return None
+    staging_dir = context.get("stagingDir")
+    if not isinstance(staging_dir, str) or not staging_dir:
+        return None
+    path = Path(staging_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def parse_spectrum_metrics(
-    output_path: str | None,
-    saturation_intensity: float | None = None,
-    target_min: float | None = None,
-    target_max: float | None = None,
-) -> dict:
-    empty = {"saturated": False, "snr": 0.0, "targetPeakBaselineRatio": 0.0}
+def _write_frame_canonical_staging(bridge_dir: Path, frame: Any) -> dict[str, Any]:
+    staging_dir = bridge_dir / "canonical-staging" / f"frame_{time.time_ns()}"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    image = Image.fromarray(frame.image)
+    display_path = staging_dir / "frame.png"
+    image.save(display_path, format="PNG")
+    thumbnail = image.copy()
+    if thumbnail.mode not in {"L", "RGB", "RGBA"}:
+        thumbnail = thumbnail.convert("L")
+    thumbnail.thumbnail((256, 256))
+    thumbnail_path = staging_dir / "thumbnail.webp"
+    thumbnail.save(thumbnail_path, format="WEBP", quality=80)
+    shape = list(frame.image.shape)
+    return {
+        "canonicalDisplayPath": str(display_path),
+        "canonicalThumbnailPath": str(thumbnail_path),
+        "width": int(shape[1]) if len(shape) >= 2 else 0,
+        "height": int(shape[0]) if len(shape) >= 2 else 0,
+        "bitDepth": int(frame.image.dtype.itemsize * 8),
+        "colorModel": "grayscale" if len(shape) == 2 else "rgb",
+    }
+
+
+def parse_spectrum_points(output_path: str | None) -> list[tuple[float, float]]:
     if not output_path:
-        return empty
+        return []
     path = Path(output_path)
     if not path.exists():
-        return empty
+        return []
     points: list[tuple[float, float]] = []
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         parts = line.replace(",", " ").split()
@@ -162,6 +187,17 @@ def parse_spectrum_metrics(
             points.append((values[0], values[1]))
         elif len(values) == 1:
             points.append((float(len(points)), values[0]))
+    return points
+
+
+def parse_spectrum_metrics(
+    output_path: str | None,
+    saturation_intensity: float | None = None,
+    target_min: float | None = None,
+    target_max: float | None = None,
+) -> dict:
+    empty = {"saturated": False, "snr": 0.0, "targetPeakBaselineRatio": 0.0}
+    points = parse_spectrum_points(output_path)
     if not points:
         return empty
     intensities = [point[1] for point in points]
@@ -193,10 +229,6 @@ class HardwareSession:
     def __init__(self) -> None:
         self._stage: Any | None = None
         self._frame: Any | None = None
-        self._run_artifact_dir: Path | None = None
-        self._point_artifact_dir: Path | None = None
-        self._point_index = -1
-        self._point_frame_count = 0
 
     def stage(self, stage_cfg: dict) -> Any:
         from stage.mc_newton_xyz_stage import MCNewtonXYZStageController
@@ -229,33 +261,6 @@ class HardwareSession:
             _trace("frame_provider_connect_ok", {"bridgeDir": str(bridge_dir)})
             self._frame = provider
         return self._frame
-
-    def begin_point(self, bridge_dir: Path, position: dict[str, float]) -> Path:
-        if self._run_artifact_dir is None:
-            self._run_artifact_dir = bridge_dir / "mapping-point-folders" / time.strftime("run_%Y%m%d_%H%M%S")
-        self._point_index += 1
-        self._point_frame_count = 0
-        point_name = (
-            f"unit-{self._point_index:04d}_"
-            f"x-{_safe_coord(position.get('xUm'))}_"
-            f"y-{_safe_coord(position.get('yUm'))}"
-        )
-        self._point_artifact_dir = self._run_artifact_dir / point_name
-        self._point_artifact_dir.mkdir(parents=True, exist_ok=True)
-        (self._point_artifact_dir / "position.json").write_text(json.dumps(position, indent=2), encoding="utf-8")
-        _trace("point_artifact_dir_ready", {"pointDir": str(self._point_artifact_dir), "position": position})
-        return self._point_artifact_dir
-
-    def current_point_dir(self) -> Path | None:
-        return self._point_artifact_dir
-
-    def next_capture_name(self) -> str:
-        self._point_frame_count += 1
-        if self._point_frame_count == 1:
-            return "pre_focus_0001"
-        if self._point_frame_count == 2:
-            return "post_focus_0001"
-        return f"capture_{self._point_frame_count - 2:04d}"
 
     def disable_stage_axes(self) -> None:
         if self._stage is not None:
@@ -352,10 +357,6 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
             timeout_ms=int(payload["timeoutMs"]),
         )
         position = stage.get_position_um()
-        session.begin_point(
-            Path(request["frameProvider"]["config"]["bridgeDir"]),
-            {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um},
-        )
     except Exception as exc:
         error_payload = _stage_error_payload(stage, {"target": target, "exceptionType": type(exc).__name__})
         _trace("stage_move_error", error_payload)
@@ -397,9 +398,25 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
         provider.artifact_dir = previous_artifact_dir
     source_path = Path(frame.path) if getattr(frame, "path", None) else Path(latest_frame_path(bridge_dir, image_format))
     frame_path = str(source_path)
-    point_dir = session.current_point_dir()
-    if point_dir is not None and source_path.exists():
-        frame_path = _archive_copy(source_path, point_dir / f"{session.next_capture_name()}.{image_format}")
+    action_dir = _artifact_staging_dir(payload)
+    if action_dir is not None and source_path.exists():
+        frame_path = _archive_copy(source_path, action_dir / f"source-frame.{image_format}")
+    laser_state_verified = str(getattr(frame, "metadata", {}).get("laserStateVerified", ""))
+    if laser_off and laser_state_verified != "off":
+        return _fail(
+            "laser_state_not_verified",
+            "LabSpec worker did not return verified laser-off evidence.",
+            retry_safe=False,
+            needs_operator=True,
+            safe_to_resume=False,
+            payload={
+                "framePath": frame_path,
+                "sourceFramePath": str(source_path),
+                "laserStateRequested": "off",
+                "laserStateVerified": laser_state_verified or "unknown",
+            },
+        )
+    canonical_frame = _write_frame_canonical_staging(bridge_dir, frame)
     return _success(
         "Frame captured through LabSpec bridge.",
         {
@@ -408,8 +425,10 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
             "shape": list(frame.image.shape),
             "framePath": frame_path,
             "sourceFramePath": str(source_path),
-            "pointArtifactDir": str(point_dir) if point_dir is not None else "",
+            "actionStagingDir": str(action_dir) if action_dir is not None else "",
             "laserStateRequested": "off" if laser_off else "",
+            "laserStateVerified": laser_state_verified or "unknown",
+            **canonical_frame,
         },
     )
 
@@ -424,9 +443,9 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     xyz_stage = session.stage(stage_cfg)
     stage = _ZOnlyStageAdapter(xyz_stage)
     provider = session.frame(request["frameProvider"], timeout_ms)
-    point_dir = session.current_point_dir()
+    action_dir = _artifact_staging_dir(payload)
     previous_artifact_dir = getattr(provider, "artifact_dir", None)
-    provider.artifact_dir = point_dir
+    provider.artifact_dir = action_dir
     controller = AutofocusController(stage, provider)
     resolved_params: dict[str, Any] = {}
     try:
@@ -496,11 +515,11 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         "stageMoveCommands": _stage_move_commands(xyz_stage),
         "stageSettleDiagnostics": _stage_settle_diagnostics(xyz_stage),
     }
-    if point_dir is not None:
-        response_payload["pointArtifactDir"] = str(point_dir)
-        response_payload["autofocusResultPath"] = str(point_dir / "autofocus_result_0001.json")
+    if action_dir is not None:
+        response_payload["actionStagingDir"] = str(action_dir)
+        response_payload["autofocusResultPath"] = str(action_dir / "autofocus-result.json")
         try:
-            (point_dir / "autofocus_result_0001.json").write_text(
+            (action_dir / "autofocus-result.json").write_text(
                 json.dumps(response_payload, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
@@ -529,8 +548,8 @@ def _handle_spectrum(session: HardwareSession, request: dict, payload: dict) -> 
 
     spectrometer_cfg = request["spectrometer"]
     acquisition = payload["acquisition"]
-    point_dir = session.current_point_dir()
-    output_dir = str(point_dir) if point_dir is not None else payload.get("outputDir") or str(Path(spectrometer_cfg["config"]["bridgeDir"]) / "spectra")
+    action_dir = _artifact_staging_dir(payload)
+    output_dir = str(action_dir) if action_dir is not None else payload.get("outputDir") or str(Path(spectrometer_cfg["config"]["bridgeDir"]) / "spectra")
     output_path = Path(output_dir) / f"{payload['pointId']}.{acquisition.get('saveFormat') or 'txt'}"
     config = LabSpecWorkerAcquisitionConfig(
         bridge_dir=spectrometer_cfg["config"]["bridgeDir"],
@@ -558,6 +577,19 @@ def _handle_spectrum(session: HardwareSession, request: dict, payload: dict) -> 
             payload.get("targetPeakMaxWavenumber"),
         )
     )
+    spectrum_points = parse_spectrum_points(result.output_path)
+    result_payload["canonicalSpectrum"] = {
+        "xAxis": {
+            "kind": payload.get("xAxisKind") or "unknown",
+            "unit": payload.get("xAxisUnit") or "unknown",
+            "values": [point[0] for point in spectrum_points],
+        },
+        "yAxis": {
+            "kind": "intensity",
+            "unit": payload.get("intensityUnit") or "unknown",
+            "values": [point[1] for point in spectrum_points],
+        },
+    }
     spectrum_plot_path = result.metadata.get("spectrum_plot_path", "")
     if spectrum_plot_path:
         result_payload["spectrumPlotPath"] = spectrum_plot_path

@@ -33,6 +33,17 @@ export const ActionResultSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const ArtifactStagingContextSchema = Type.Object(
+	{
+		runId: Type.String({ minLength: 1 }),
+		unitId: Type.String({ minLength: 1 }),
+		attemptId: Type.String({ minLength: 1 }),
+		actionId: Type.String({ minLength: 1 }),
+		stagingDir: Type.String({ minLength: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const StageMoveAbsoluteAndWaitActionSchema = Type.Object(
 	{
 		action: Type.Literal("stage.move_absolute_and_wait"),
@@ -46,6 +57,7 @@ export const StageMoveAbsoluteAndWaitActionSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		artifactContext: Type.Optional(ArtifactStagingContextSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -55,6 +67,7 @@ export const StageGetPositionActionSchema = Type.Object(
 		action: Type.Literal("stage.get_position"),
 		resourceId: Type.String({ minLength: 1 }),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		artifactContext: Type.Optional(ArtifactStagingContextSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -93,6 +106,7 @@ export const AutofocusRunSingleActionSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		artifactContext: Type.Optional(ArtifactStagingContextSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -102,6 +116,7 @@ export const FrameCaptureLatestActionSchema = Type.Object(
 		action: Type.Literal("frame.capture_latest"),
 		resourceId: Type.String({ minLength: 1 }),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		artifactContext: Type.Optional(ArtifactStagingContextSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -111,6 +126,7 @@ export const FrameCaptureLaserOffActionSchema = Type.Object(
 		action: Type.Literal("frame.capture_laser_off"),
 		resourceId: Type.String({ minLength: 1 }),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		artifactContext: Type.Optional(ArtifactStagingContextSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -129,6 +145,7 @@ export const SpectrometerAcquireSpectrumActionSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		artifactContext: Type.Optional(ArtifactStagingContextSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -145,6 +162,7 @@ export const RamanRuntimeActionSchema = Type.Union([
 export type ActionStatus = Static<typeof ActionStatusSchema>;
 export type ActionError = Static<typeof ActionErrorSchema>;
 export type ActionResult = Static<typeof ActionResultSchema>;
+export type ArtifactStagingContext = Static<typeof ArtifactStagingContextSchema>;
 export type StageGetPositionAction = Static<typeof StageGetPositionActionSchema>;
 export type StageMoveAbsoluteAndWaitAction = Static<typeof StageMoveAbsoluteAndWaitActionSchema>;
 export type AutofocusRunSingleAction = Static<typeof AutofocusRunSingleActionSchema>;

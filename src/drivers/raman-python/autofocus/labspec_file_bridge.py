@@ -140,7 +140,13 @@ class LabSpecFileBridgeFrameProvider:
                 self._seen_paths.add(result_frame_path)
                 self._seq += 1
                 archived_path = self._archive_frame(result_frame_path)
-                frame = Frame(image=image, timestamp=frame_ts, seq=self._seq, path=archived_path)
+                frame = Frame(
+                    image=image,
+                    timestamp=frame_ts,
+                    seq=self._seq,
+                    path=archived_path,
+                    metadata={"laserStateVerified": result.get("laser_state_verified", "").strip().lower()},
+                )
                 self._last_frame = frame
                 return frame
             time.sleep(0.05)

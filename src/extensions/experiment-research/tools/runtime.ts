@@ -5,6 +5,7 @@ import {
 	abortRun,
 	pauseRun,
 	pollRun,
+	resumeRun,
 	startLiveRamanRun,
 	startSimulationRun,
 } from "../kernel/run-controller.ts";
@@ -378,6 +379,24 @@ export const pauseRunTool = {
 			return success(`Pause requested for run ${params.runId}.`, runState);
 		} catch {
 			return error(`Run ${params.runId} is not active.`, "run_not_active");
+		}
+	},
+} satisfies ToolDefinition<typeof RunIdParamsSchema, RuntimeToolDetails>;
+
+export const resumeRunTool = {
+	name: "resume_run",
+	label: "Resume Run",
+	description: "Resume a paused bounded run with the same runId and new immutable attempts.",
+	promptSnippet: "Resume a paused bounded run without replacing its runId or previous attempt artifacts",
+	promptGuidelines: ["Resume only a paused run; accepted units are skipped and unfinished units receive new attempts."],
+	parameters: RunIdParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, params: RunIdParams, _signal, _onUpdate, ctx) {
+		try {
+			const runState = resumeRun(ctx.cwd, params.runId);
+			return success(`Run ${params.runId} resumed.`, runState);
+		} catch {
+			return error(`Run ${params.runId} is not paused or cannot be resumed.`, "run_not_paused");
 		}
 	},
 } satisfies ToolDefinition<typeof RunIdParamsSchema, RuntimeToolDetails>;

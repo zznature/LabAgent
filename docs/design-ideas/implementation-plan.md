@@ -18,6 +18,7 @@ docs freeze
 -> real supervised single-point Raman
 -> bounded parameter search
 -> bounded Raman mapping
+-> stable run observation + canonical artifacts
 ```
 
 ## Planning Principles
@@ -49,6 +50,8 @@ docs freeze
 - "good enough conditions" 使用显式规则。
 - parameter search 是 bounded 的。
 - mapping 是 bounded 的。
+- 前端可通过 Run Observation interface 读取 mapping progress、attempt 状态与 accepted results。
+- Source/Canonical Artifacts 使用固定 run/unit/attempt/artifact hierarchy 和 Raman canonical profiles。
 - 所有新的 effectful hardware run 都要求确认。
 - run 内不允许热改 spec。
 - 不允许无界自动搜索。
@@ -659,6 +662,51 @@ docs freeze
 ### Suggested Codex Goal
 
 `Add operator-facing Raman hardware status, position read, and confirmed stage relative move tools to the MVP rebuild.`
+
+## Phase 11: Stabilize Run Observation And Artifact Results
+
+### Objective
+
+把现有分散的 run observation 与 artifact 写入逻辑收敛到一个 Run Records Module，固定实验文件位置和格式，并为前端提供稳定读取 interface。
+
+权威技术方案见 `run-observation-artifact-contract.md`。该文档中的 Phase A-E 是本阶段的内部实施顺序。
+
+### Scope
+
+- Run Observation Snapshot + ordered events
+- unit / immutable attempt / accepted attempt
+- fixed run/unit/attempt/artifact hierarchy
+- Source + Canonical Artifact publication
+- Raman frame / spectrum / autofocus / evaluation profiles
+- mapping retry/resume artifact consistency
+- backend read Adapter
+- separate operator operation artifact scopes
+
+### Checklist
+
+- [x] Phase A：simulation Run Records Module vertical slice
+- [x] Phase B：atomic artifact publication、descriptor、index、SHA-256 与 interrupted recovery
+- [ ] Phase C：Raman single-point canonical profiles 与 verified laser/scientific-axis semantics（主体已实现；autofocus 的 pre-focus / accepted-focus canonical frame links 尚待 driver evidence 接入）
+- [x] Phase D：mapping retry/resume 在同一 runId 下保留 immutable attempts，并显式选择 accepted attempt
+- [x] Phase E：backend read Adapter 与独立 operator operation artifact scopes
+- [ ] 前端测试 consumer 不读取 filesystem、不解析文件名、不按 artifact count 推断 progress
+- [ ] 旧 `ArtifactRef` / `artifactPathPrefix` / runtime-local copy-and-index 写入点被替换，不长期叠兼容层
+
+当前 Phase 11 的 MVP 主读取面已切到 `RunRecordsReadAdapter`；legacy `RunState.artifactRefs`、
+`legacy-events.jsonl` 与 `artifacts.jsonl` 仍作为现有 agent tool/test 的过渡 projection 保留，
+不属于前端 observation API。删除该过渡 projection 是本阶段尚未完成的清理项，不能把它当作第二套前端事实源。
+
+### Exit Criteria
+
+- 前端只通过后端 interface 即可恢复 mapping grid、attempt 状态与 accepted results。
+- 同一 runId 的 retry/resume artifacts 不覆盖、不串 run、不串 operator operation。
+- 四种 Raman canonical profiles 使用固定 schema 与 representations。
+- 只有完成校验和原子发布的 artifacts 可以读取。
+- simulation、single point、mapping retry/resume 与 operator operation 验收场景全部通过。
+
+### Suggested Codex Goal
+
+`Implement the run observation and artifact contract as five verified vertical increments, starting with the simulation Run Records Module seam.`
 
 ## Open Issues
 

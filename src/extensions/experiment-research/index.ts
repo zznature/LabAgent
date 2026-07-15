@@ -26,10 +26,12 @@ import {
 	pauseRunTool,
 	pollRunTool,
 	proposeRunTool,
+	resumeRunTool,
 	runProcedureTool,
 	summarizeRunTool,
 } from "./tools/runtime.ts";
 import { registerConfiguredRamanPythonRuntime } from "./runtime/raman/index.ts";
+import { recoverWorkspaceInterruptedPublications } from "./records/run-records.ts";
 
 const PLANNER_TOOL_NAMES = [
 	"get_lab_capabilities",
@@ -44,6 +46,7 @@ const PLANNER_TOOL_NAMES = [
 	"poll_run",
 	"summarize_run",
 	"pause_run",
+	"resume_run",
 	"abort_run",
 	"raman_get_hardware_status",
 	"raman_get_stage_position",
@@ -89,10 +92,12 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(pollRunTool);
 	pi.registerTool(summarizeRunTool);
 	pi.registerTool(pauseRunTool);
+	pi.registerTool(resumeRunTool);
 	pi.registerTool(abortRunTool);
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx?.cwd) {
+			recoverWorkspaceInterruptedPublications(ctx.cwd);
 			registerConfiguredRamanPythonRuntime(ctx.cwd);
 		}
 		const activeTools = new Set(pi.getActiveTools());

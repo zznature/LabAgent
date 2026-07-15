@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ArtifactRef, ExecutionUnit, RamanObservationMetrics, RunState, RuntimeError } from "../schemas/index.ts";
 import { appendArtifactRecord } from "../store/artifact-store.ts";
-import { runRoot } from "../store/layout.ts";
+import { createRunRecords, type ArtifactDescriptor } from "../records/run-records.ts";
 
 export interface SimulationControls {
 	perUnitDelayMs?: number;
@@ -59,10 +59,33 @@ function toSafeFileStem(value: string): string {
 	return value.replace(/[:/\\]/gu, "-");
 }
 
-function persistArtifact(cwd: string, runId: string, artifact: ArtifactRef, content: string): void {
-	const absolutePath = join(runRoot(cwd, runId), artifact.path);
-	mkdirSync(dirname(absolutePath), { recursive: true });
-	writeFileSync(absolutePath, content, "utf-8");
+function descriptorPath(descriptor: ArtifactDescriptor): string {
+	const { scope } = descriptor;
+	if (scope.kind !== "run") {
+		throw new Error(`simulation artifacts require run scope: ${descriptor.artifactId}`);
+	}
+	return `artifacts/units/${scope.unitId}/attempts/${scope.attemptId}/${descriptor.artifactId}/${descriptor.representations[0]?.path ?? ""}`;
+}
+
+function persistArtifact(cwd: string, runId: string, unit: ExecutionUnit, attemptId: string, actionIndex: number, artifact: ArtifactRef, content: string): void {
+	const stagingPath = join(cwd, ".pi", "experiment-research", "simulation-staging", `${artifact.artifactId}.txt`);
+	mkdirSync(dirname(stagingPath), { recursive: true });
+	writeFileSync(stagingPath, content, "utf-8");
+	const descriptor = createRunRecords(cwd).publishArtifact({
+		artifactId: artifact.artifactId,
+		scope: {
+			kind: "run",
+			runId,
+			unitId: toSafeFileStem(unit.unitId),
+			attemptId,
+			actionId: `action-${String(actionIndex).padStart(4, "0")}`,
+		},
+		layer: "source",
+		sourceArtifactIds: [],
+		createdAt: new Date().toISOString(),
+		representations: [{ role: "source", mediaType: "text/plain", fileName: `${artifact.kind}.txt`, sourcePath: stagingPath }],
+	});
+	artifact.path = descriptorPath(descriptor);
 	appendArtifactRecord(cwd, {
 		runId,
 		recordedAt: new Date().toISOString(),
@@ -70,25 +93,30 @@ function persistArtifact(cwd: string, runId: string, artifact: ArtifactRef, cont
 	});
 }
 
-function createUnitArtifacts(cwd: string, runId: string, unit: ExecutionUnit, attemptIndex: number): ArtifactRef[] {
-	const attemptDirectory = `attempt-${String(attemptIndex).padStart(3, "0")}`;
-	const prefix = `${unit.artifactScope.artifactPathPrefix}/${attemptDirectory}/${toSafeFileStem(unit.unitId)}`.replace(/^records\//u, "");
+function createUnitArtifacts(
+	cwd: string,
+	runId: string,
+	unit: ExecutionUnit,
+	attemptIndex: number,
+	attemptPhase = "initial",
+): ArtifactRef[] {
+	const attemptId = `attempt-${String(attemptIndex).padStart(4, "0")}-${attemptPhase}`;
 	const artifacts: ArtifactRef[] = [];
 
-	for (const action of unit.actions) {
+	for (const [actionIndex, action] of unit.actions.entries()) {
 		if (action.kind === "capture_frame") {
-			const artifact = createArtifactRef(runId, `${prefix}-frame.txt`, "frame", "Simulated frame capture");
-			persistArtifact(cwd, runId, artifact, `simulated frame for ${unit.unitId}\n`);
+			const artifact = createArtifactRef(runId, "", "frame", "Simulated frame capture");
+			persistArtifact(cwd, runId, unit, attemptId, actionIndex, artifact, `simulated frame for ${unit.unitId}\n`);
 			artifacts.push(artifact);
 		}
 		if (action.kind === "autofocus") {
-			const artifact = createArtifactRef(runId, `${prefix}-autofocus.txt`, "autofocus", "Simulated autofocus trace");
-			persistArtifact(cwd, runId, artifact, `simulated autofocus trace for ${unit.unitId}\n`);
+			const artifact = createArtifactRef(runId, "", "autofocus", "Simulated autofocus trace");
+			persistArtifact(cwd, runId, unit, attemptId, actionIndex, artifact, `simulated autofocus trace for ${unit.unitId}\n`);
 			artifacts.push(artifact);
 		}
 		if (action.kind === "acquire_spectrum") {
-			const artifact = createArtifactRef(runId, `${prefix}-spectrum.txt`, "spectrum", "Simulated spectrum");
-			persistArtifact(cwd, runId, artifact, `simulated spectrum for ${unit.unitId}\n`);
+			const artifact = createArtifactRef(runId, "", "spectrum", "Simulated spectrum");
+			persistArtifact(cwd, runId, unit, attemptId, actionIndex, artifact, `simulated spectrum for ${unit.unitId}\n`);
 			artifacts.push(artifact);
 		}
 	}
@@ -130,6 +158,7 @@ export async function runSimulationUnit(
 	unit: ExecutionUnit,
 	controls: SimulationControls,
 	currentState: RunState,
+	attempt?: { attemptIndex: number; phase: "initial" | "immediate_retry" | "final_retry" },
 ): Promise<SimulationUnitResult> {
 	await sleep(controls.perUnitDelayMs ?? DEFAULT_PER_UNIT_DELAY_MS);
 	const attemptCount = nextAttemptCount(controls, unit.index);
@@ -149,7 +178,7 @@ export async function runSimulationUnit(
 	) {
 		return {
 			status: "completed",
-			artifactRefs: createUnitArtifacts(cwd, runId, unit, attemptCount),
+			artifactRefs: createUnitArtifacts(cwd, runId, unit, attemptCount, attempt?.phase),
 			observationMetrics: {
 				autofocusConfidence: 0.1,
 				saturated: false,
@@ -173,7 +202,7 @@ export async function runSimulationUnit(
 
 	return {
 		status: "completed",
-		artifactRefs: createUnitArtifacts(cwd, runId, unit, attemptCount),
+		artifactRefs: createUnitArtifacts(cwd, runId, unit, attemptCount, attempt?.phase),
 		observationMetrics: controls.parameterSearchObservations?.[unit.index],
 	};
 }

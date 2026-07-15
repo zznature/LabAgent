@@ -21,6 +21,7 @@ import {
 } from "../runtime/simulation-runtime.ts";
 import { compileProcedureSpec } from "./compile-units.ts";
 import { executeLinearRun, executeMappingRun, executeParameterSearchRun } from "./run-strategies.ts";
+import { createRunRecords } from "../records/run-records.ts";
 
 type ExecutionMode = "simulation" | "live-supervised";
 export type ManagedUnitResult = SimulationUnitResult | LiveRamanUnitResult;
@@ -40,6 +41,7 @@ export interface ActiveRun {
 	pauseRequested: boolean;
 	abortRequested: boolean;
 	deadlineAtMs?: number;
+	resumeAttemptIndexByUnit?: Record<string, number>;
 	promise: Promise<void>;
 }
 
@@ -70,11 +72,18 @@ export interface RunExecutionContext {
 }
 
 const activeRuns = new Map<string, ActiveRun>();
+const pausedRuns = new Map<string, ActiveRun>();
 
 const DEFAULT_MAPPING_MAX_CONSECUTIVE_FAILURES = 3;
 
 function timestamp(): string {
 	return new Date().toISOString();
+}
+
+function observationAttemptId(attempt?: UnitAttemptContext): string {
+	const attemptIndex = attempt?.attemptIndex ?? 0;
+	const phase = attempt?.phase ?? "initial";
+	return `attempt-${String(attemptIndex).padStart(4, "0")}-${phase}`;
 }
 
 function deadlineAtMs(spec: ProcedureSpec): number | undefined {
@@ -144,7 +153,7 @@ async function executeUnit(
 	options?: LiveRamanUnitOptions,
 ): Promise<ManagedUnitResult> {
 	if (activeRun.mode === "simulation") {
-		return runSimulationUnit(activeRun.cwd, activeRun.runId, unit, activeRun.controls ?? {}, currentState);
+		return runSimulationUnit(activeRun.cwd, activeRun.runId, unit, activeRun.controls ?? {}, currentState, options?.attempt);
 	}
 
 	const runtime = getRamanLiveRuntime(activeRun.cwd);
@@ -246,6 +255,19 @@ function appendUnitFailedEvent(
 }
 
 function pauseActiveRun(activeRun: ActiveRun, unit: ExecutionUnit, reason: string, resultArtifacts: RunState["artifactRefs"]): void {
+	const records = createRunRecords(activeRun.cwd);
+	const observation = records.readRun(activeRun.runId);
+	const observedUnit = observation?.units.find((candidate) => candidate.unitId === unit.unitId);
+	if (observedUnit?.activeAttemptId) {
+		records.applyRunChange(activeRun.runId, {
+			type: "attempt_failed",
+			unitId: unit.unitId,
+			attemptId: observedUnit.activeAttemptId,
+			willRetry: true,
+			timestamp: timestamp(),
+		});
+	}
+	records.applyRunChange(activeRun.runId, { type: "run_paused", timestamp: timestamp() });
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "paused",
@@ -266,6 +288,7 @@ function pauseActiveRun(activeRun: ActiveRun, unit: ExecutionUnit, reason: strin
 		},
 	});
 	activeRuns.delete(activeRun.runId);
+	pausedRuns.set(activeRun.runId, activeRun);
 }
 
 function failActiveRun(
@@ -274,6 +297,19 @@ function failActiveRun(
 	failure: RuntimeError,
 	resultArtifacts: RunState["artifactRefs"],
 ): void {
+	const records = createRunRecords(activeRun.cwd);
+	const observation = records.readRun(activeRun.runId);
+	const observedUnit = observation?.units.find((candidate) => candidate.unitId === unit.unitId);
+	if (observedUnit?.status === "running" && observedUnit.activeAttemptId) {
+		records.applyRunChange(activeRun.runId, {
+			type: "attempt_failed",
+			unitId: unit.unitId,
+			attemptId: observedUnit.activeAttemptId,
+			willRetry: false,
+			timestamp: timestamp(),
+		});
+	}
+	records.applyRunChange(activeRun.runId, { type: "run_failed", timestamp: timestamp() });
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "failed",
@@ -284,9 +320,11 @@ function failActiveRun(
 	}));
 	appendUnitFailedEvent(activeRun, unit, failure, resultArtifacts);
 	activeRuns.delete(activeRun.runId);
+	pausedRuns.delete(activeRun.runId);
 }
 
 function completeActiveRun(activeRun: ActiveRun): void {
+	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, { type: "run_completed", timestamp: timestamp() });
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "completed",
@@ -308,6 +346,7 @@ function completeActiveRun(activeRun: ActiveRun): void {
 		},
 	});
 	activeRuns.delete(activeRun.runId);
+	pausedRuns.delete(activeRun.runId);
 }
 
 function applyCompletedProgress(
@@ -317,9 +356,22 @@ function applyCompletedProgress(
 	additionalPayload: Record<string, unknown> = {},
 	attempt?: UnitAttemptContext,
 ): void {
+	const records = createRunRecords(activeRun.cwd);
+	const canonicalArtifactIds = resultArtifacts.flatMap((artifactRef) => {
+		const artifact = records.readArtifact(activeRun.runId, artifactRef.artifactId);
+		return artifact?.layer === "canonical" && artifact.status === "complete" ? [artifact.artifactId] : [];
+	});
+	records.applyRunChange(activeRun.runId, {
+		type: "attempt_accepted",
+		unitId: unit.unitId,
+		attemptId: observationAttemptId(attempt),
+		canonicalArtifactIds,
+		timestamp: timestamp(),
+	});
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
+		pauseReason: undefined,
 		progress: {
 			...current.progress,
 			completedUnits: current.progress.completedUnits + 1,
@@ -368,6 +420,7 @@ function singlePointOptions(activeRun: ActiveRun): LiveRamanUnitOptions | undefi
 }
 
 function startActiveRun(activeRun: ActiveRun): void {
+	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, { type: "run_started", timestamp: timestamp() });
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
@@ -378,6 +431,7 @@ function startActiveRun(activeRun: ActiveRun): void {
 }
 
 function abortActiveRun(activeRun: ActiveRun, unit: ExecutionUnit): void {
+	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, { type: "run_aborted", timestamp: timestamp() });
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "aborted",
@@ -394,10 +448,17 @@ function abortActiveRun(activeRun: ActiveRun, unit: ExecutionUnit): void {
 		payload: { unitId: unit.unitId, index: unit.index },
 	});
 	activeRuns.delete(activeRun.runId);
+	pausedRuns.delete(activeRun.runId);
 }
 
 function markActiveUnitStarted(activeRun: ActiveRun, unit: ExecutionUnit, attempt?: UnitAttemptContext): RunState {
 	appendUnitStartedEvent(activeRun, unit, attempt);
+	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, {
+		type: "attempt_started",
+		unitId: unit.unitId,
+		attemptId: observationAttemptId(attempt),
+		timestamp: timestamp(),
+	});
 	return updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
@@ -455,6 +516,15 @@ function createRunExecutionContext(activeRun: ActiveRun): RunExecutionContext {
 			applySkippedFailureProgress(activeRun, unit, failure, resultArtifacts, attempt);
 		},
 		recordPointAttempt(record, artifacts = []) {
+			if (record.status === "failed") {
+				createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, {
+					type: "attempt_failed",
+					unitId: record.pointUnitId,
+					attemptId: observationAttemptId({ attemptIndex: record.attemptIndex, phase: record.phase }),
+					willRetry: record.finalForPoint === false,
+					timestamp: timestamp(),
+				});
+			}
 			updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 				...current,
 				artifactRefs: current.artifactRefs.concat(artifacts),
@@ -490,8 +560,16 @@ async function executeManagedRun(activeRun: ActiveRun): Promise<void> {
 }
 
 function startRun(activeRun: ActiveRun): RunState {
+	createRunRecords(activeRun.cwd).initializeRun({
+		runId: activeRun.runId,
+		experimentId: activeRun.spec.experimentId,
+		procedureSpecId: activeRun.spec.procedureSpecId,
+		startedAt: timestamp(),
+		units: activeRun.units.map((unit) => ({ unitId: unit.unitId, index: unit.index, point: unit.point })),
+	});
 	const queuedState = setRunState(activeRun.cwd, createBaseRunState(activeRun.runId, activeRun.spec, activeRun.units));
 	activeRun.promise = executeManagedRun(activeRun).catch((error) => {
+		createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, { type: "run_failed", timestamp: timestamp() });
 		updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 			...current,
 			status: "failed",
@@ -509,6 +587,59 @@ function startRun(activeRun: ActiveRun): RunState {
 		activeRuns.delete(activeRun.runId);
 	});
 	activeRuns.set(activeRun.runId, activeRun);
+	pausedRuns.delete(activeRun.runId);
+	return queuedState;
+}
+
+export function resumeRun(cwd: string, runId: string): RunState {
+	const pausedRun = pausedRuns.get(runId);
+	const runState = readRunStateSnapshot(cwd, runId);
+	const records = createRunRecords(cwd);
+	records.recoverInterruptedPublications(runId);
+	const observation = records.readRun(runId);
+	if (!pausedRun || runState?.status !== "paused" || observation?.status !== "paused") {
+		throw new Error(`run not paused: ${runId}`);
+	}
+	const remainingUnits = pausedRun.units.filter((unit) =>
+		observation.units.find((candidate) => candidate.unitId === unit.unitId)?.status !== "succeeded",
+	);
+	const resumedRun: ActiveRun = {
+		...pausedRun,
+		units: remainingUnits,
+		pauseRequested: false,
+		abortRequested: false,
+		resumeAttemptIndexByUnit: Object.fromEntries(
+			observation.units.map((unit) => [unit.unitId, unit.attemptCount]),
+		),
+		promise: Promise.resolve(),
+	};
+	const queuedState = updateRunState(cwd, runId, (current) => ({
+		...current,
+		status: "queued",
+		pauseReason: undefined,
+		updatedAt: timestamp(),
+		endedAt: undefined,
+	}));
+	pausedRuns.delete(runId);
+	activeRuns.set(runId, resumedRun);
+	resumedRun.promise = executeManagedRun(resumedRun).catch((cause) => {
+		createRunRecords(cwd).applyRunChange(runId, { type: "run_failed", timestamp: timestamp() });
+		updateRunState(cwd, runId, (current) => ({
+			...current,
+			status: "failed",
+			errorState: {
+				errorCode: resumedRun.mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error",
+				message: cause instanceof Error ? cause.message : String(cause),
+				retrySafe: false,
+				needsOperator: true,
+				safeToResume: false,
+				scope: "run",
+			},
+			updatedAt: timestamp(),
+			endedAt: timestamp(),
+		}));
+		activeRuns.delete(runId);
+	});
 	return queuedState;
 }
 

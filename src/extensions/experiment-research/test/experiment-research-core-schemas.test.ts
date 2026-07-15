@@ -231,9 +231,6 @@ describe("experiment research core schemas", () => {
 				minObjectiveClearanceUm: 200,
 			},
 			resumeKey: "run-001/unit-001",
-			artifactScope: {
-				artifactPathPrefix: "runs/run-001/unit-001",
-			},
 		};
 
 		expect(ExecutionUnitValidator.Check(unit)).toBe(true);

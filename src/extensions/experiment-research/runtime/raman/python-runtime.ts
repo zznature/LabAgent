@@ -79,6 +79,9 @@ export interface RamanPythonRuntimeConfig {
 		saturationIntensity?: number;
 		targetPeakMinWavenumber?: number;
 		targetPeakMaxWavenumber?: number;
+		xAxisKind?: "raman_shift";
+		xAxisUnit?: "cm^-1";
+		intensityUnit?: string;
 	};
 	daemon?: {
 		idleShutdownMs?: number;
@@ -629,7 +632,7 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				createActionResult(await daemon.request("stage_position", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000)),
 			moveAbsoluteAndWait: async (action: StageMoveAbsoluteAndWaitAction): Promise<ActionResult> =>
 				createActionResult(
-					await daemon.request("stage_move", { target: action.target, timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000),
+					await daemon.request("stage_move", { target: action.target, timeoutMs: action.timeoutMs, artifactContext: action.artifactContext }, action.timeoutMs + 10_000),
 				),
 		},
 		autofocus: {
@@ -637,7 +640,7 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				createActionResult(
 					await daemon.request(
 						"autofocus",
-						{ roi: action.roi, params: action.params, timeoutMs: action.timeoutMs },
+						{ roi: action.roi, params: action.params, timeoutMs: action.timeoutMs, artifactContext: action.artifactContext },
 						action.timeoutMs + 10_000,
 					),
 				),
@@ -645,11 +648,11 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 		frame: {
 			resource: resolvedConfig.frameProvider,
 			captureLatest: async (action: FrameCaptureLatestAction): Promise<ActionResult> => {
-				const response = await daemon.request("frame_capture", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000);
+				const response = await daemon.request("frame_capture", { timeoutMs: action.timeoutMs, artifactContext: action.artifactContext }, action.timeoutMs + 10_000);
 				return createActionResult(response, response.ok ? asArtifact(response.payload.framePath, "frame", "LabSpec frame") : []);
 			},
 			captureLaserOff: async (action: FrameCaptureLaserOffAction): Promise<ActionResult> => {
-				const response = await daemon.request("frame_capture_laser_off", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000);
+				const response = await daemon.request("frame_capture_laser_off", { timeoutMs: action.timeoutMs, artifactContext: action.artifactContext }, action.timeoutMs + 10_000);
 				return createActionResult(response, response.ok ? asArtifact(response.payload.framePath, "frame", "LabSpec laser-off frame") : []);
 			},
 		},
@@ -667,6 +670,10 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 						saturationIntensity: resolvedConfig.spectrum?.saturationIntensity,
 						targetPeakMinWavenumber: resolvedConfig.spectrum?.targetPeakMinWavenumber,
 						targetPeakMaxWavenumber: resolvedConfig.spectrum?.targetPeakMaxWavenumber,
+						xAxisKind: resolvedConfig.spectrum?.xAxisKind,
+						xAxisUnit: resolvedConfig.spectrum?.xAxisUnit,
+						intensityUnit: resolvedConfig.spectrum?.intensityUnit,
+						artifactContext: action.artifactContext,
 					},
 					action.timeoutMs + 10_000,
 				);

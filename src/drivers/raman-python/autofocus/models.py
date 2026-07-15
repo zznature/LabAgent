@@ -3,7 +3,7 @@ Pure dataclasses and Protocol interfaces for the autofocus module.
 """
 
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, Literal, Optional
 from enum import Enum
 
@@ -53,6 +53,7 @@ class Frame:
     timestamp: float        # Seconds, monotonic clock
     seq: int                # Monotonically increasing frame index
     path: str | None = None # Source file path when the provider is file-backed.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

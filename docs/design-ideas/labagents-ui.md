@@ -193,8 +193,12 @@ Run: live_20260702_001 running  12/100 point
 
 但这仍然是两个来源：
 
-- run summary 来自 `pollRun()` / run store
+- run summary、mapping unit grid 与 canonical results 来自后端 Run Observation Contract
 - instrument status 来自 runtime snapshot
+
+前端不得直接扫描 `lab-records`、解析 artifact 文件名或用文件数量推断进度。完整 run
+观察模型、ordered event cursor 与 artifact representations 见
+`run-observation-artifact-contract.md`。
 
 ## 8. Raman MVP 状态来源
 

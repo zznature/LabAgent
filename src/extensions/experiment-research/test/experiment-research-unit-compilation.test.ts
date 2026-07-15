@@ -108,12 +108,12 @@ describe("experiment research unit compilation", () => {
 
 		expect(units).toHaveLength(6);
 		expect(units.map((unit) => unit.unitId)).toEqual([
-			"proc-spec-compile:unit:0000",
-			"proc-spec-compile:unit:0001",
-			"proc-spec-compile:unit:0002",
-			"proc-spec-compile:unit:0003",
-			"proc-spec-compile:unit:0004",
-			"proc-spec-compile:unit:0005",
+			"unit-0000",
+			"unit-0001",
+			"unit-0002",
+			"unit-0003",
+			"unit-0004",
+			"unit-0005",
 		]);
 		expect(units.map((unit) => unit.resumeKey)).toEqual([
 			"proc-spec-compile/unit/0000",
@@ -132,7 +132,7 @@ describe("experiment research unit compilation", () => {
 			{ row: 1, col: 0, xUm: 1000, yUm: 2010, zUm: 1500 },
 		]);
 		expect(units.every((unit) => unit.unitKind === "point")).toBe(true);
-		expect(units.every((unit) => unit.artifactScope.artifactPathPrefix.includes("proc-spec-compile"))).toBe(true);
+		expect(units.every((unit) => !("artifactScope" in unit))).toBe(true);
 		expect(units.every((unit) => ExecutionUnitValidator.Check(unit))).toBe(true);
 	});
 });

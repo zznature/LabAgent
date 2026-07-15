@@ -32,6 +32,26 @@ export function runsRoot(cwd: string): string {
 	return join(recordsRoot(cwd), "runs");
 }
 
+export function operatorOperationsRoot(cwd: string): string {
+	return join(recordsRoot(cwd), "operator-operations");
+}
+
+export function operatorOperationRoot(cwd: string, operationId: string): string {
+	return join(operatorOperationsRoot(cwd), operationId);
+}
+
+export function operatorOperationPath(cwd: string, operationId: string): string {
+	return join(operatorOperationRoot(cwd, operationId), "operation.json");
+}
+
+export function operatorArtifactIndexPath(cwd: string, operationId: string): string {
+	return join(operatorOperationRoot(cwd, operationId), "artifact-index.json");
+}
+
+export function operatorArtifactRoot(cwd: string, operationId: string, artifactId: string): string {
+	return join(operatorOperationRoot(cwd, operationId), "artifacts", artifactId);
+}
+
 export function runRoot(cwd: string, runId: string): string {
 	return join(runsRoot(cwd), runId);
 }
@@ -52,10 +72,32 @@ export function runStatePath(cwd: string, runId: string): string {
 	return join(runRoot(cwd, runId), "run-state.json");
 }
 
+export function runObservationPath(cwd: string, runId: string): string {
+	return join(runRoot(cwd, runId), "run-observation.json");
+}
+
 export function runEventsPath(cwd: string, runId: string): string {
+	return join(runRoot(cwd, runId), "legacy-events.jsonl");
+}
+
+export function runObservationEventsPath(cwd: string, runId: string): string {
 	return join(runRoot(cwd, runId), "events.jsonl");
 }
 
 export function runArtifactsPath(cwd: string, runId: string): string {
 	return join(runRoot(cwd, runId), "artifacts.jsonl");
+}
+
+export function runArtifactIndexPath(cwd: string, runId: string): string {
+	return join(runRoot(cwd, runId), "artifact-index.json");
+}
+
+export function runArtifactRoot(
+	cwd: string,
+	runId: string,
+	unitId: string,
+	attemptId: string,
+	artifactId: string,
+): string {
+	return join(runRoot(cwd, runId), "artifacts", "units", unitId, "attempts", attemptId, artifactId);
 }

@@ -10,6 +10,7 @@ import {
 	successActionResult,
 } from "../runtime/raman/index.ts";
 import { readArtifactRecords, readRunEvents } from "../store/index.ts";
+import { createRunRecords } from "../records/run-records.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 type CapturedHandler = (...args: unknown[]) => unknown;
@@ -178,6 +179,8 @@ function createLiveRuntime(
 	}
 	const autofocusCurvePath = artifactPath("autofocus-curve.json", "artifacts/live/autofocus-curve.json");
 	const framePath = artifactPath("frame.tif", "artifacts/live/frame.tif");
+	const canonicalDisplayPath = artifactPath("frame.png", "artifacts/live/frame.png");
+	const canonicalThumbnailPath = artifactPath("thumbnail.webp", "artifacts/live/thumbnail.webp");
 	const spectrumPath = artifactPath("spectrum.txt", "artifacts/live/spectrum.txt");
 	return {
 		preflight() {
@@ -266,6 +269,12 @@ function createLiveRuntime(
 					"Frame captured.",
 					{
 						framePath,
+						canonicalDisplayPath,
+						canonicalThumbnailPath,
+						width: 512,
+						height: 512,
+						bitDepth: 16,
+						colorModel: "grayscale",
 					},
 					[
 						{
@@ -308,6 +317,10 @@ function createLiveRuntime(
 					"Spectrum acquired.",
 					{
 						outputPath: spectrumPath,
+						canonicalSpectrum: {
+							xAxis: { kind: "raman_shift", unit: "cm^-1", values: [100, 200] },
+							yAxis: { kind: "intensity", unit: "counts", values: [12, 18] },
+						},
 						saturated: observation?.saturated ?? false,
 						snr: observation?.snr ?? 12,
 						targetPeakBaselineRatio: observation?.targetPeakBaselineRatio ?? 1.8,
@@ -390,7 +403,7 @@ describe("experiment research real supervised single-point runtime", () => {
 	it("surfaces live preflight readiness and control availability for single-point Raman runs", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
-		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true));
+		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts")));
 		const extension = loadExperimentExtension();
 		const context = { cwd } as ExtensionContext;
 		const spec = createSinglePointSpec();
@@ -412,7 +425,7 @@ describe("experiment research real supervised single-point runtime", () => {
 	it("executes a live supervised single-point run, records artifacts, and persists rule-based evaluation output", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
-		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true));
+		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts")));
 		const extension = loadExperimentExtension();
 		const context = { cwd } as ExtensionContext;
 		const spec = createSinglePointSpec();
@@ -444,6 +457,16 @@ describe("experiment research real supervised single-point runtime", () => {
 		const artifacts = readArtifactRecords(cwd, runId);
 		expect(artifacts.some((record) => record.artifact.kind === "raman-evaluation")).toBe(true);
 		expect(artifacts.some((record) => record.artifact.kind === "spectrum")).toBe(true);
+		const formalArtifacts = createRunRecords(cwd).listArtifacts(runId);
+		expect(formalArtifacts.length).toBeGreaterThan(0);
+		expect(formalArtifacts.map((artifact) => artifact.profile)).toEqual(
+			expect.arrayContaining(["raman-frame", "raman-autofocus", "raman-spectrum", "raman-evaluation"]),
+		);
+		const observationUnit = createRunRecords(cwd).readRun(runId)?.units[0];
+		const acceptedCanonicalIds = formalArtifacts
+			.filter((artifact) => artifact.layer === "canonical" && artifact.status === "complete")
+			.map((artifact) => artifact.artifactId);
+		expect(observationUnit?.canonicalArtifactIds).toEqual(acceptedCanonicalIds);
 
 		const events = readRunEvents(cwd, runId);
 		expect(events.map((event) => event.eventType)).toEqual(
@@ -482,8 +505,8 @@ describe("experiment research real supervised single-point runtime", () => {
 
 		expect(autofocusArtifacts.map((artifact) => artifact.path)).toEqual(
 			expect.arrayContaining([
-				expect.stringContaining("unit-0000/attempt-000-initial/autofocus.json"),
-				expect.stringContaining("unit-0000/attempt-001-immediate_retry/autofocus.json"),
+				expect.stringContaining("unit-0000/attempts/attempt-0000-initial/"),
+				expect.stringContaining("unit-0000/attempts/attempt-0001-immediate_retry/"),
 			]),
 		);
 		expect(new Set(autofocusArtifacts.map((artifact) => artifact.artifactId)).size).toBe(2);
@@ -492,8 +515,8 @@ describe("experiment research real supervised single-point runtime", () => {
 			.filter((artifact) => artifact.kind === "autofocus");
 		expect(driverAutofocusArtifacts.map((artifact) => artifact.path)).toEqual(
 			expect.arrayContaining([
-				expect.stringContaining("unit-0000/attempt-000-initial/action-01/autofocus-curve.json"),
-				expect.stringContaining("unit-0000/attempt-001-immediate_retry/action-01/autofocus-curve.json"),
+				expect.stringContaining("unit-0000/attempts/attempt-0000-initial/autofocus-curve-0-0-1/representations/autofocus-curve.json"),
+				expect.stringContaining("unit-0000/attempts/attempt-0001-immediate_retry/autofocus-curve-0-1-1/representations/autofocus-curve.json"),
 			]),
 		);
 		expect(
@@ -505,7 +528,7 @@ describe("experiment research real supervised single-point runtime", () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
 		const metrics = { stageMoveCalls: 0 };
-		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true, undefined, metrics));
+		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true, undefined, metrics, undefined, join(cwd, "driver-artifacts")));
 		const extension = loadExperimentExtension();
 		const context = { cwd } as ExtensionContext;
 		const spec = createSinglePointSpec({ currentPosition: true });
@@ -538,11 +561,18 @@ describe("experiment research real supervised single-point runtime", () => {
 		tempRoots.push(cwd);
 		registerRamanLiveRuntime(
 			cwd,
-			createLiveRuntime(true, true, [
-				{ saturated: false, snr: 12, targetPeakBaselineRatio: 1.8 },
-				{ saturated: false, snr: 13, targetPeakBaselineRatio: 1.9 },
-				{ saturated: true, snr: 1, targetPeakBaselineRatio: 0.2 },
-			]),
+			createLiveRuntime(
+				true,
+				true,
+				[
+					{ saturated: false, snr: 12, targetPeakBaselineRatio: 1.8 },
+					{ saturated: false, snr: 13, targetPeakBaselineRatio: 1.9 },
+					{ saturated: true, snr: 1, targetPeakBaselineRatio: 0.2 },
+				],
+				undefined,
+				undefined,
+				join(cwd, "driver-artifacts"),
+			),
 		);
 		const extension = loadExperimentExtension();
 		const context = { cwd } as ExtensionContext;

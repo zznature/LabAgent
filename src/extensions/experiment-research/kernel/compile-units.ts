@@ -11,16 +11,12 @@ function formatUnitIndex(index: number): string {
 	return String(index).padStart(4, "0");
 }
 
-function createUnitId(procedureSpecId: string, index: number): string {
-	return `${procedureSpecId}:unit:${formatUnitIndex(index)}`;
+function createUnitId(index: number): string {
+	return `unit-${formatUnitIndex(index)}`;
 }
 
 function createResumeKey(procedureSpecId: string, index: number): string {
 	return `${procedureSpecId}/unit/${formatUnitIndex(index)}`;
-}
-
-function createArtifactPrefix(procedureSpecId: string, index: number): string {
-	return `records/${procedureSpecId}/unit-${formatUnitIndex(index)}`;
 }
 
 function toExecutionPoint(point: Point, row?: number, col?: number): ExecutionUnitPoint {
@@ -35,7 +31,7 @@ function toExecutionPoint(point: Point, row?: number, col?: number): ExecutionUn
 
 function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): ExecutionUnit[] {
 	return plan.points.map((point, index) => ({
-		unitId: createUnitId(spec.procedureSpecId, index),
+		unitId: createUnitId(index),
 		index,
 		unitKind: "point",
 		positionRef: "absolute",
@@ -43,9 +39,6 @@ function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): Executio
 		actions: plan.perPoint,
 		limits: spec.limits,
 		resumeKey: createResumeKey(spec.procedureSpecId, index),
-		artifactScope: {
-			artifactPathPrefix: createArtifactPrefix(spec.procedureSpecId, index),
-		},
 	}));
 }
 
@@ -71,7 +64,7 @@ function buildGridPoints(plan: GridScanPlan): ExecutionUnitPoint[] {
 
 function buildGridScanUnits(spec: ProcedureSpec, plan: GridScanPlan): ExecutionUnit[] {
 	return buildGridPoints(plan).map((point, index) => ({
-		unitId: createUnitId(spec.procedureSpecId, index),
+		unitId: createUnitId(index),
 		index,
 		unitKind: "point",
 		positionRef: "absolute",
@@ -79,25 +72,19 @@ function buildGridScanUnits(spec: ProcedureSpec, plan: GridScanPlan): ExecutionU
 		actions: plan.perPoint,
 		limits: spec.limits,
 		resumeKey: createResumeKey(spec.procedureSpecId, index),
-		artifactScope: {
-			artifactPathPrefix: createArtifactPrefix(spec.procedureSpecId, index),
-		},
 	}));
 }
 
 function buildCurrentPositionUnit(spec: ProcedureSpec, plan: CurrentPositionPlan): ExecutionUnit[] {
 	return [
 		{
-			unitId: createUnitId(spec.procedureSpecId, 0),
+			unitId: createUnitId(0),
 			index: 0,
 			unitKind: "point",
 			positionRef: "current",
 			actions: plan.perPoint,
 			limits: spec.limits,
 			resumeKey: createResumeKey(spec.procedureSpecId, 0),
-			artifactScope: {
-				artifactPathPrefix: createArtifactPrefix(spec.procedureSpecId, 0),
-			},
 		},
 	];
 }

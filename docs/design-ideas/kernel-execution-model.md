@@ -12,6 +12,8 @@
   - 重点：kernel、`ExecutionUnit`、run lifecycle、runtime contract
 - `raman-hardware-adapter-contract.md`
   - 重点：Raman 这类真实硬件怎样注册、封装、映射为 runtime action / tool
+- `run-observation-artifact-contract.md`
+  - 重点：kernel/runtime 如何通过 Run Records Module 固定 progress、attempt、events 与 artifacts，并向后端提供读取 interface
 
 ## 1. 第一性原理
 
@@ -164,7 +166,10 @@ MVP 策略表只启用：
 - `point?`
 - `actions`
 - `resumeKey`
-- `artifactScope`
+
+`ExecutionUnit` 不再携带 `artifactPathPrefix` 或正式 artifact path。compiler 只产生 path-safe
+`unitId`；kernel 为每次执行分配 `attemptId`，Run Records Module 再从 run/unit/attempt/action
+identity 生成正式目录。
 
 ### 5.2 推荐粒度
 
@@ -201,7 +206,7 @@ MVP 阶段优先选择**point-level** 或 **step-sequence-level** unit。
    - `unitId`
    - `index`
    - coordinates
-   - artifact scope
+   - run/unit/attempt/action identity（正式路径由 Run Records Module 生成）
    - resume cursor
 
 5. **落地限制约束**
@@ -315,6 +320,10 @@ resume 只能发生在显式受支持的边界：
 
 否则就应该进入 `paused/recovering`，而不是假装可以无损继续。
 
+MVP 的 `resume_run` 保留原 `runId`，跳过已经具有 `acceptedAttemptId` 的 unit，并为未完成
+unit 分配新的 immutable attempt。旧 attempt 的 descriptor 与 representations 不覆盖；新结果只有在
+kernel 写入新的 `acceptedAttemptId` 后才成为正式采用结果。
+
 ## 9. `RunState` 应该怎样由 kernel 维护
 
 `RunState` 是 kernel 对运行真相的表达。
@@ -391,6 +400,11 @@ kernel 不只是“调一下 runtime 然后等结果”。
    - 长积分、扫描、等待稳定都要有心跳
 
 4. **kernel 消费摘要，不消费设备内部实现细节**
+
+具体持久化与观察 interface 统一由 `run-observation-artifact-contract.md` 定义。kernel 负责
+run/unit/attempt lifecycle 与 `acceptedAttemptId`；runtime 负责 canonical artifact 的科学语义；
+正式路径、descriptor、checksum、index、sequence 和原子发布集中在 Run Records Module，
+不再由 compiler、每个 runtime 或 Python daemon 分别拼接。
 
 ## 12. fake / mock 路径为什么属于 kernel 设计一部分
 

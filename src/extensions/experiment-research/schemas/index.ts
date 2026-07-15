@@ -51,12 +51,10 @@ export {
 	ExecutionUnitValidator,
 	ExecutionUnitKindSchema,
 	ExecutionUnitPositionRefSchema,
-	ArtifactScopeSchema,
 	type ExecutionUnit,
 	type ExecutionUnitKind,
 	type ExecutionUnitPoint,
 	type ExecutionUnitPositionRef,
-	type ArtifactScope,
 } from "./execution-unit.ts";
 export {
 	RunStateSchema,

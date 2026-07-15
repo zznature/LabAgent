@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
+import { createRunRecords } from "../records/run-records.ts";
 import { readArtifactRecords, readRunEvents } from "../store/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
@@ -209,6 +210,7 @@ describe("experiment research simulation runtime", () => {
 		expect(extension.tools.has("run_procedure")).toBe(true);
 		expect(extension.tools.has("poll_run")).toBe(true);
 		expect(extension.tools.has("pause_run")).toBe(true);
+		expect(extension.tools.has("resume_run")).toBe(true);
 		expect(extension.tools.has("abort_run")).toBe(true);
 
 		await sessionStart?.({ type: "session_start", sessionId: "test-session" }, {});
@@ -238,6 +240,12 @@ describe("experiment research simulation runtime", () => {
 		expect(terminalState.status).toBe("completed");
 		expect((terminalState.progress as Record<string, unknown>).completedUnits).toBe(2);
 		expect((terminalState.artifactRefs as unknown[]).length).toBeGreaterThan(0);
+		const records = createRunRecords(cwd);
+		const observation = records.readRun(runId);
+		expect(observation?.status).toBe("completed");
+		expect(observation?.units.map((unit) => unit.status)).toEqual(["succeeded", "succeeded"]);
+		expect(observation?.units.every((unit) => unit.acceptedAttemptId !== undefined)).toBe(true);
+		expect(records.listArtifacts(runId).length).toBeGreaterThan(0);
 
 		const pollResult = await extension.tools.get("poll_run")?.execute("poll-summary", { runId }, undefined, undefined, context);
 		const pollText = pollResult?.content[0]?.type === "text" ? pollResult.content[0].text : "";
@@ -273,6 +281,18 @@ describe("experiment research simulation runtime", () => {
 		await extension.tools.get("pause_run")?.execute("pause", { runId: pausedRunId }, undefined, undefined, context);
 		const pausedState = await pollUntilTerminal(extension, pausedRunId, context, ["paused"]);
 		expect(pausedState.status).toBe("paused");
+		const pausedObservation = createRunRecords(cwd).readRun(pausedRunId);
+		await extension.tools.get("resume_run")?.execute("resume", { runId: pausedRunId }, undefined, undefined, context);
+		const resumedState = await pollUntilTerminal(extension, pausedRunId, context, ["completed"]);
+		const resumedObservation = createRunRecords(cwd).readRun(pausedRunId);
+		expect(resumedState.runId).toBe(pausedRunId);
+		expect(resumedObservation?.status).toBe("completed");
+		expect(resumedObservation?.units.every((unit) => unit.acceptedAttemptId !== undefined)).toBe(true);
+		expect(resumedObservation?.units[0]?.attemptCount).toBeGreaterThan(pausedObservation?.units[0]?.attemptCount ?? 0);
+		const firstUnitAttempts = createRunRecords(cwd).listArtifacts(pausedRunId, { unitId: "unit-0000" })
+			.map((artifact) => artifact.scope.kind === "run" ? artifact.scope.attemptId : undefined);
+		expect(new Set(firstUnitAttempts)).toEqual(new Set(["attempt-0000-initial", "attempt-0001-initial"]));
+		expect(resumedObservation?.units[0]?.acceptedAttemptId).toBe("attempt-0001-initial");
 
 		const abortedRunId = await proposeAndStart(extension, createProcedureSpec(4), context, { perUnitDelayMs: 30 });
 		await extension.tools.get("abort_run")?.execute("abort", { runId: abortedRunId }, undefined, undefined, context);
@@ -296,14 +316,14 @@ describe("experiment research simulation runtime", () => {
 		expect(autofocusState.pointAttempts).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
-					pointUnitId: "proc-spec-2:unit:0000",
+					pointUnitId: "unit-0000",
 					phase: "initial",
 					status: "failed",
 					failureType: "quality",
 					failureReason: "low_focus_confidence",
 				}),
 				expect.objectContaining({
-					pointUnitId: "proc-spec-2:unit:0000",
+					pointUnitId: "unit-0000",
 					phase: "immediate_retry",
 					status: "succeeded",
 				}),
@@ -410,13 +430,13 @@ describe("experiment research simulation runtime", () => {
 		expect(resilientState.pointAttempts).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
-					pointUnitId: "proc-map-resilient:unit:0001",
+					pointUnitId: "unit-0001",
 					phase: "initial",
 					status: "failed",
 					failureReason: "low_focus_confidence",
 				}),
 				expect.objectContaining({
-					pointUnitId: "proc-map-resilient:unit:0001",
+					pointUnitId: "unit-0001",
 					phase: "immediate_retry",
 					status: "succeeded",
 				}),
@@ -437,8 +457,8 @@ describe("experiment research simulation runtime", () => {
 		const retryArtifactPaths = readArtifactRecords(cwd, resilientRunId)
 			.map((record) => record.artifact.path)
 			.filter((path) => path.includes("unit-0001"));
-		expect(retryArtifactPaths.some((path) => path.includes("unit-0001/attempt-000"))).toBe(true);
-		expect(retryArtifactPaths.some((path) => path.includes("unit-0001/attempt-001"))).toBe(true);
+		expect(retryArtifactPaths.some((path) => path.includes("unit-0001/attempts/attempt-0000-initial"))).toBe(true);
+		expect(retryArtifactPaths.some((path) => path.includes("unit-0001/attempts/attempt-0001-immediate_retry"))).toBe(true);
 
 		const failingSpec = {
 			...createProcedureSpec(4),
@@ -466,7 +486,7 @@ describe("experiment research simulation runtime", () => {
 		expect(failingAttempts).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
-					pointUnitId: "proc-map-failing:unit:0001",
+					pointUnitId: "unit-0001",
 					phase: "final_retry",
 					status: "failed",
 					failureType: "execution",
@@ -474,7 +494,7 @@ describe("experiment research simulation runtime", () => {
 					finalForPoint: true,
 				}),
 				expect.objectContaining({
-					pointUnitId: "proc-map-failing:unit:0002",
+					pointUnitId: "unit-0002",
 					phase: "final_retry",
 					status: "failed",
 					failureType: "execution",
