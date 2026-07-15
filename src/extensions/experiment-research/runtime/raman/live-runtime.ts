@@ -97,6 +97,7 @@ interface StagePosition {
 }
 
 const liveRuntimeRegistry = new Map<string, RamanLiveRuntime>();
+const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
 
 function toRuntimeError(actionResult: ActionResult, fallbackCode: string, scope: RuntimeError["scope"] = "unit"): RuntimeError {
 	return {
@@ -666,7 +667,7 @@ export async function runLiveRamanUnit(
 					frameProviderResourceId,
 					roi: spec.domain.raman.autofocus.roi,
 					params: autofocusParams,
-					timeoutMs: 30_000,
+					timeoutMs: DEFAULT_AUTOFOCUS_TIMEOUT_MS,
 				}),
 			);
 			const autofocusArtifact = persistAutofocusArtifact(cwd, runId, unit, autofocusResult);

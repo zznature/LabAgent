@@ -238,6 +238,9 @@ class FixedRangeAutofocusResult:
     final_verification: ScoredZPoint
     final_error_um: float
     points: list[ScoredZPoint]
+    selected: ScoredZPoint | None = None
+    prediction_verification: ScoredZPoint | None = None
+    selection_source: str = "sampled"
 
 
 @dataclass

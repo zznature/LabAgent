@@ -50,6 +50,9 @@ class LabSpecFileBridgeFrameProvider:
         self._last_frame: Frame | None = None
         self._seq = 0
         self._seen_paths: set[Path] = set()
+        self.artifact_dir: Path | None = None
+        self.artifact_prefix = "autofocus"
+        self._artifact_count = 0
 
     def connect(self) -> tuple[int, int]:
         self.bridge_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +126,8 @@ class LabSpecFileBridgeFrameProvider:
                 image = np.asarray(Image.open(result_frame_path))
                 self._seen_paths.add(result_frame_path)
                 self._seq += 1
-                frame = Frame(image=image, timestamp=frame_ts, seq=self._seq, path=str(result_frame_path))
+                archived_path = self._archive_frame(result_frame_path)
+                frame = Frame(image=image, timestamp=frame_ts, seq=self._seq, path=archived_path)
                 self._last_frame = frame
                 return frame
             time.sleep(0.05)
@@ -151,6 +155,21 @@ class LabSpecFileBridgeFrameProvider:
                     path.unlink()
             except OSError:
                 pass
+
+    def _archive_frame(self, source: Path) -> str:
+        if self.artifact_dir is None:
+            return str(source)
+        self._artifact_count += 1
+        target_dir = self.artifact_dir / "autofocus_frames"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"{self.artifact_prefix}_{self._artifact_count:04d}{source.suffix}"
+        try:
+            import shutil
+
+            shutil.copy2(source, target)
+            return str(target)
+        except Exception:
+            return str(source)
 
     def _request_capture(self, timeout_ms: int):
         request_id = f"cap_{time.monotonic_ns()}"

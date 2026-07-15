@@ -469,7 +469,7 @@ docs freeze
   - [x] max attempts
   - [x] forbidden expansions
 - [x] 阈值与默认值来自 config schema，而非硬编码：
-  - [x] confidence / SNR / peak-baseline 阈值有 config 默认值
+  - [x] confidence / SNR / peak-baseline 阈值有 config 默认值；当前 autofocus confidence 默认阈值为 0.15
   - [x] 默认值可被实验模板覆盖（research-style：pin config、可复现）
   - [x] 默认阈值「由谁配置」按 Open issues 处理
 

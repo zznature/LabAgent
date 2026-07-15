@@ -10,7 +10,7 @@ import type {
 } from "../schemas/index.ts";
 
 export const DEFAULT_RAMAN_EVALUATION_CONFIG: RamanEvaluationConfig = {
-	autofocusConfidenceMin: 0.7,
+	autofocusConfidenceMin: 0.15,
 	snrMin: 8,
 	targetPeakBaselineRatioMin: 1.25,
 	repeatWindowSize: 3,

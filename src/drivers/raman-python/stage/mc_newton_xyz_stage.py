@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -45,7 +46,7 @@ class MCNewtonXYZStageController:
         port: str,
         *,
         baudrate: int = 115200,
-        x_channel: int = 1,
+        x_channel: int = 6,
         y_channel: int = 2,
         z_channel: int = 3,
         read_timeout: float = 2.0,
@@ -54,6 +55,9 @@ class MCNewtonXYZStageController:
         idn_retries: int = 3,
         move_cmd_wait_ms: float = 30.0,
         channel_switch_wait_ms: float = 100.0,
+        position_read_interval_ms: float = 80.0,
+        position_read_samples: int = 5,
+        position_read_discard_initial: int = 1,
         disable_on_disconnect: bool = True,
         exclusive_channel: bool = True,
         x_target_tolerance_um: float = 5.0,
@@ -98,6 +102,9 @@ class MCNewtonXYZStageController:
             "z": int(z_channel),
         }
         self._channel_switch_wait_ms = float(channel_switch_wait_ms)
+        self._position_read_interval_ms = float(position_read_interval_ms)
+        self._position_read_samples = max(1, int(position_read_samples))
+        self._position_read_discard_initial = max(0, int(position_read_discard_initial))
         self._disable_on_disconnect = bool(disable_on_disconnect)
         self._exclusive_channel = bool(exclusive_channel)
         self._target_tolerances_um = {
@@ -108,8 +115,8 @@ class MCNewtonXYZStageController:
         self._stability_tolerance_um = float(stability_tolerance_um)
         self._cap_nf = int(cap_nf)
         self._axis_motion_profiles: dict[str, tuple[str, str, int, int]] = {
-            "x": ("mm", "slide", 30, 2000),
-            "y": ("mm", "slide", 30, 2000),
+            "x": ("mm", "slide", 30, 1000),
+            "y": ("mm", "slide", 30, 1000),
             "z": ("mm", "step", 30, 750),
         }
         self._configured_axis_profiles: dict[str, tuple[str, str, int, int]] = {}
@@ -195,7 +202,7 @@ class MCNewtonXYZStageController:
         self,
         *,
         voltage_v: int = 30,
-        frequency_hz: int = 2000,
+        frequency_hz: int = 1000,
         mode: str = "slide",
         units: str = "mm",
         z_voltage_v: int = 30,
@@ -204,8 +211,8 @@ class MCNewtonXYZStageController:
     ) -> None:
         if voltage_v > 30:
             raise ValueError("fast move profile voltage_v must not exceed 30 V.")
-        if frequency_hz > 2000:
-            raise ValueError("fast move profile frequency_hz must not exceed 2000 Hz.")
+        if frequency_hz > 1000:
+            raise ValueError("fast move profile frequency_hz must not exceed 1000 Hz.")
         if z_voltage_v > 30:
             raise ValueError("Z move profile z_voltage_v must not exceed 30 V.")
         if z_frequency_hz > 2000:
@@ -249,10 +256,7 @@ class MCNewtonXYZStageController:
     def get_axis_position_um(self, axis: str, *, preserve_enabled_channels: bool = False) -> float:
         _ = preserve_enabled_channels
         self._select_axis(axis, disable_others=True)
-        assert self._sdk is not None
-        status, position_mm = self._sdk_call(self._sdk.check_position)
-        self._require_status(status, f"check_position({axis})")
-        return float(position_mm) * 1000.0
+        return self._read_stable_axis_position_um(axis)
 
     def set_axis_target_tolerance_um(self, axis: str, tolerance_um: float) -> None:
         key = axis.lower()
@@ -486,6 +490,34 @@ class MCNewtonXYZStageController:
         target_mm = target_um / 1000.0
         self._send_move_target_mm(axis, target_mm, target_um)
         self._last_targets_um[axis.lower()] = target_um
+
+    def _read_stable_axis_position_um(self, axis: str) -> float:
+        reads: list[float] = []
+        total_reads = self._position_read_discard_initial + self._position_read_samples
+        for index in range(total_reads):
+            if index > 0 and self._position_read_interval_ms > 0:
+                time.sleep(self._position_read_interval_ms / 1000.0)
+            reads.append(self._read_axis_position_once_um(axis))
+
+        usable = reads[self._position_read_discard_initial :]
+        if not usable:
+            usable = reads
+        if len(usable) == 1:
+            return usable[0]
+
+        tolerance = max(self._stability_tolerance_um, 0.001)
+        for end in range(2, len(usable) + 1):
+            window = usable[end - 2 : end]
+            if abs(window[-1] - window[-2]) <= tolerance:
+                return float(statistics.median(window))
+        tail = usable[-min(3, len(usable)) :]
+        return float(statistics.median(tail))
+
+    def _read_axis_position_once_um(self, axis: str) -> float:
+        assert self._sdk is not None
+        status, position_mm = self._sdk_call(self._sdk.check_position)
+        self._require_status(status, f"check_position({axis})")
+        return float(position_mm) * 1000.0
 
     def _verification_reads(self, axes: set[str], count: int) -> list[dict[str, Any]]:
         reads: list[dict[str, Any]] = []

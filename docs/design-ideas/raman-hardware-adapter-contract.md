@@ -492,6 +492,7 @@ domain:
 - `autofocus.params.zStartUm/zEndUm` 表示实验室优化过的固定 Z range autofocus；MVP live daemon 不再支持旧的 `coarseRangeUm/fineRangeUm` coarse/fine path。
 - fixed-range autofocus 当前固定使用 10 点扫描；`pointCount` 可表达调用意图，但 daemon 会归一为有效 10 点，并在返回 payload 的 `params.effectivePointCount` / `params.effectiveSpacingUm` 中记录实际值。
 - `warmupFramesPerZ` 表示每个 Z 采样点丢弃的预热帧数；`framesPerZ` 表示参与评分的帧数。file-backed frame provider 会尽量只保留代表评分帧，减少 bridge 目录堆积。
+- live run 与 operator autofocus 的默认 action timeout 为 150s；daemon 传输层会额外保留短 guard window，用于让 Python 侧返回结构化超时/错误。
 
 ## 9. 预检与维护工具如何接 Raman
 

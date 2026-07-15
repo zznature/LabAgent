@@ -274,6 +274,7 @@ class AutofocusController:
         final_reproducibility = max(0.0, min(1.0, result.final_verification.score / (result.best.score + 1e-9)))
         sampled_spacing = AutofocusController._median_spacing_um(ordered)
         stage_accuracy = max(0.0, min(1.0, 1.0 - abs(result.final_error_um) / max(sampled_spacing, 1.0)))
+        selected = result.selected or result.best
 
         confidence = max(
             0.0,
@@ -298,6 +299,23 @@ class AutofocusController:
             "sampledSpacingUm": sampled_spacing,
             "bestIndex": float(best_index),
             "pointCount": float(len(ordered)),
+            "peakEstimateSource": result.peak.source,
+            "peakEstimateZUm": result.peak.z_um,
+            "sampledBestZUm": result.best.actual_z_um,
+            "sampledBestScore": result.best.score,
+            "selectedSource": result.selection_source,
+            "selectedZUm": selected.actual_z_um,
+            "selectedScore": selected.score,
+            "predictionVerificationZUm": (
+                result.prediction_verification.actual_z_um
+                if result.prediction_verification is not None
+                else float("nan")
+            ),
+            "predictionVerificationScore": (
+                result.prediction_verification.score
+                if result.prediction_verification is not None
+                else float("nan")
+            ),
         }
 
     @staticmethod
@@ -358,9 +376,26 @@ class FixedRangeAutofocusController:
         if not points:
             raise RuntimeError("fixed-range autofocus produced no scan points.")
         peak = self.peak_locator.locate(points, interpolate=params.interpolate_peak)
-        final_z_um = scanner.move_to_z(peak.z_um)
+        selected = peak.sampled_best
+        prediction_verification: ScoredZPoint | None = None
+        selection_source = "sampled"
+        if peak.source == "parabolic":
+            prediction_verification = scanner.sample(
+                peak.z_um,
+                roi,
+                frames_per_z=params.final_verification_frames_per_z,
+                tolerance_um=params.final_tolerance_um,
+            )
+            if prediction_verification.score > peak.sampled_best.score:
+                selected = prediction_verification
+                selection_source = "parabolic_verified"
+            else:
+                selection_source = "sampled_after_prediction_check"
+
+        final_target_um = selected.actual_z_um
+        final_z_um = scanner.move_to_z(final_target_um)
         final_verification = scanner.sample(
-            peak.z_um,
+            final_target_um,
             roi,
             frames_per_z=params.final_verification_frames_per_z,
             tolerance_um=params.final_tolerance_um,
@@ -370,6 +405,9 @@ class FixedRangeAutofocusController:
             peak=peak,
             final_z_um=final_z_um,
             final_verification=final_verification,
-            final_error_um=float(final_z_um - peak.z_um),
+            final_error_um=float(final_z_um - final_target_um),
             points=points,
+            selected=selected,
+            prediction_verification=prediction_verification,
+            selection_source=selection_source,
         )
