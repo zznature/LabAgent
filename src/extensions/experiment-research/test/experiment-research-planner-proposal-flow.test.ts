@@ -128,7 +128,7 @@ describe("experiment research planner proposal flow", () => {
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
 			grid: {
-				origin: { xUm: 1_000, yUm: 2_000 },
+				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
 				cols: 3,
 				pitchXUm: 10,
@@ -173,7 +173,7 @@ describe("experiment research planner proposal flow", () => {
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
 			grid: {
-				origin: { xUm: 1_000, yUm: 2_000 },
+				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
 				cols: 2,
 				pitchXUm: 10,
@@ -302,7 +302,7 @@ describe("experiment research planner proposal flow", () => {
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
 			grid: {
-				origin: { xUm: 1_000, yUm: 2_000 },
+				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
 				cols: 2,
 				pitchXUm: 10,
@@ -376,5 +376,74 @@ describe("experiment research planner proposal flow", () => {
 		expect(preflightDetails.status).toBe("warning");
 		expect(preflightState.readyForApproval).toBe(false);
 		expect(risks.some((risk) => risk.code === "laser_power_limit_exceeded")).toBe(true);
+	});
+
+	it("rejects live preflight when an absolute point cannot satisfy the runtime position contract", async () => {
+		const extension = loadExperimentExtension();
+		const context = {} as ExtensionContext;
+		const proposal = buildProcedureProposal({
+			...commonBuilderInput(),
+			procedureId: "raman_single_point_probe",
+			point: { xUm: 1_000, yUm: 2_000 },
+		});
+
+		const result = await extension.tools
+			.get("run_preflight")
+			?.execute(
+				"preflight-missing-z",
+				{ spec: proposal.spec, executionMode: "live-supervised" },
+				undefined,
+				undefined,
+				context,
+			);
+		const details = asRecord(result?.details);
+		const state = asRecord(details.stateAfter);
+		const risks = state.risks as Array<Record<string, unknown>>;
+		const text = result?.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(details.status).toBe("warning");
+		expect(state.readyForApproval).toBe(false);
+		expect(risks).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					level: "forbidden",
+					code: "missing_z_coordinate",
+				}),
+			]),
+		);
+		expect(text).toContain("missing_z_coordinate");
+	});
+
+	it("treats a computed grid endpoint as inside an equal declared motion limit", async () => {
+		const extension = loadExperimentExtension();
+		const context = {} as ExtensionContext;
+		const proposal = buildProcedureProposal({
+			...commonBuilderInput(),
+			limits: {
+				...commonBuilderInput().limits,
+				xRangeUm: { minUm: 1561.2065, maxUm: 2111.2065 },
+				yRangeUm: { minUm: 1108.0515, maxUm: 1108.0515 },
+				zRangeUm: { minUm: 1693.9185, maxUm: 1693.9185 },
+			},
+			procedureId: "raman_grid_mapping",
+			grid: {
+				origin: { xUm: 1561.2065, yUm: 1108.0515, zUm: 1693.9185 },
+				rows: 1,
+				cols: 12,
+				pitchXUm: 50,
+				pitchYUm: 50,
+				order: "snake",
+			},
+		});
+
+		const result = await extension.tools
+			.get("run_preflight")
+			?.execute("preflight-equal-bound", { spec: proposal.spec }, undefined, undefined, context);
+		const details = asRecord(result?.details);
+		const state = asRecord(details.stateAfter);
+		const risks = state.risks as Array<Record<string, unknown>>;
+
+		expect(details.status).toBe("success");
+		expect(risks.some((risk) => risk.code === "x_range_limit_exceeded")).toBe(false);
 	});
 });

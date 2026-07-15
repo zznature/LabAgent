@@ -36,6 +36,18 @@ interface FinalRetryQueueItem {
 	nextAttemptIndex: number;
 }
 
+function stopBeforeUnit(context: RunExecutionContext, unit: ExecutionUnit): boolean {
+	if (context.activeRun.abortRequested) {
+		context.abortAt(unit);
+		return true;
+	}
+	if (context.deadlineExceeded()) {
+		context.failDeadline(unit);
+		return true;
+	}
+	return false;
+}
+
 function artifactRefsForResult(result: ManagedUnitResult): RunState["artifactRefs"] {
 	return result.artifactRefs;
 }
@@ -112,21 +124,24 @@ function recordAttempt(
 	attempt: UnitAttemptContext,
 	status: "succeeded" | "failed",
 	artifacts: RunState["artifactRefs"],
-	failure?: ClassifiedFailure,
+	failure?: ClassifiedFailure | RuntimeError,
 	finalForPoint?: boolean,
 ): void {
+	const runtimeFailure = failure && "failure" in failure ? failure.failure : failure;
+	const classifiedFailure = failure && "failure" in failure ? failure : undefined;
 	context.recordPointAttempt({
 		pointUnitId: unit.unitId,
 		attemptId: `${unit.unitId}:${attempt.phase}:${attempt.attemptIndex}`,
 		attemptIndex: attempt.attemptIndex,
 		phase: attempt.phase,
 		status,
-		failureType: failure?.failureType,
-		failureReason: failure?.failureReason,
-		errorCode: failure?.failure.errorCode,
+		failureType: classifiedFailure?.failureType,
+		failureReason: classifiedFailure?.failureReason,
+		errorCode: runtimeFailure?.errorCode,
+		errorMessage: runtimeFailure?.message,
 		finalForPoint,
 		artifactIds: artifactIds(artifacts),
-	});
+	}, status === "failed" && finalForPoint === false ? artifacts : []);
 }
 
 function getObservationMetrics(result: ManagedUnitResult): RamanObservationMetrics | undefined {
@@ -277,8 +292,7 @@ export async function executeLinearRun(
 	const { activeRun } = context;
 
 	for (const unit of activeRun.units) {
-		if (activeRun.abortRequested) {
-			context.abortAt(unit);
+		if (stopBeforeUnit(context, unit)) {
 			return;
 		}
 
@@ -288,6 +302,10 @@ export async function executeLinearRun(
 
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
+			return;
+		}
+		if (context.deadlineExceeded()) {
+			context.failDeadline(unit, resultArtifacts);
 			return;
 		}
 
@@ -309,8 +327,7 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 
 	for (const [attemptIndex, attempt] of attempts.entries()) {
 		const unit = attempt.unit;
-		if (activeRun.abortRequested) {
-			context.abortAt(unit);
+		if (stopBeforeUnit(context, unit)) {
 			return;
 		}
 
@@ -324,6 +341,10 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
+			return;
+		}
+		if (context.deadlineExceeded()) {
+			context.failDeadline(unit, resultArtifacts);
 			return;
 		}
 
@@ -382,25 +403,30 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 		attempt: UnitAttemptContext,
 		finalAttemptExhausted = true,
 	): Promise<"succeeded" | "queued_final_retry" | "failed" | "run_failed" | "paused" | "aborted"> {
-		if (activeRun.abortRequested) {
-			context.abortAt(unit);
-			return "aborted";
+		if (stopBeforeUnit(context, unit)) {
+			return "run_failed";
 		}
 
 		context.markUnitStarted(unit, attempt);
-		const result = await context.executeUnit(unit);
+		const result = await context.executeUnit(unit, {
+			attempt: { attemptIndex: attempt.attemptIndex, phase: attempt.phase },
+		});
 		const resultArtifacts = artifactRefsForResult(result);
 
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
 			return "paused";
 		}
+		if (context.deadlineExceeded()) {
+			context.failDeadline(unit, resultArtifacts);
+			return "run_failed";
+		}
 
 		const classifiedFailure = classifyMappingFailure(result, resultArtifacts);
 		if (!classifiedFailure) {
 			if (result.status === "failed") {
 				const failure = errorForResult(result);
-				recordAttempt(context, unit, attempt, "failed", resultArtifacts, undefined, true);
+				recordAttempt(context, unit, attempt, "failed", resultArtifacts, failure, true);
 				if (activeRun.spec.stoppingRules?.stopOnError === false) {
 					context.recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt);
 					consecutiveMappingFailures += 1;
@@ -412,6 +438,7 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 							needsOperator: true,
 							safeToResume: false,
 							scope: "run",
+							payload: { triggeringError: failure },
 						}, []);
 						return "run_failed";
 					}
@@ -468,6 +495,7 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 					needsOperator: true,
 					safeToResume: false,
 					scope: "run",
+					payload: { triggeringError: classifiedFailure.failure },
 				}, []);
 				return "run_failed";
 			}

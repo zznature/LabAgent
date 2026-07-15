@@ -51,6 +51,7 @@ export const PointAttemptRecordSchema = Type.Object(
 		failureType: Type.Optional(RetryFailureTypeSchema),
 		failureReason: Type.Optional(RetryFailureReasonSchema),
 		errorCode: Type.Optional(Type.String({ minLength: 1 })),
+		errorMessage: Type.Optional(Type.String({ minLength: 1 })),
 		finalForPoint: Type.Optional(Type.Boolean()),
 		artifactIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 		timestamp: Type.String({ minLength: 1 }),

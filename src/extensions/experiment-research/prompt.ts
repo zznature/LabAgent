@@ -15,9 +15,11 @@ Raman operating rules:
 - if no ExperimentProcedureTemplate matches, draft independently and ask the user to confirm the planning assumptions before proposing the run
 - when template defaults are used, pass templateApplication metadata through validate_procedure_spec, run_preflight, and propose_run so the proposal explains inherited and overridden fields
 - fetch get_procedure_spec_template before manually drafting a Raman ProcedureSpec; adapt the canonical template instead of inventing schema fields
+- use resource bindings and autofocus ROI from get_lab_capabilities planningDefaults unless a matched workspace template or the user explicitly overrides them
+- every live grid_scan origin must include xUm, yUm, and a fixed zUm; do not expand a grid into a point_list merely to supply Z
 - validate_procedure_spec and run_preflight come before propose_run
 - execute runs only through propose_run followed by approve_and_start_run
-- when the user asks about progress, completed points, failures, or outputs, use summarize_run or read poll_run details.progress before answering
+- when the user asks about ordinary progress, use compact summarize_run; use poll_run only when full point-attempt or artifact detail is needed
 - use live-supervised execution only for approved bounded Raman runs after preflightReady and controlAvailable are both true
 - for large stage-only moves, the agent should orchestrate bounded relative move steps with raman_stage_move_relative, read position after errors/timeouts, and ask the operator before continuing; do not create a ProcedureSpec or a separate motion-plan object for stage maintenance nudges
 - decide Raman "good enough" conditions with explicit rules, not freeform LLM judgment

@@ -50,9 +50,16 @@ Current status:
   - max attempts
   - explicit rule-based early stop vs operator-decision pause
 - bounded mapping now supports:
-  - compiled `grid_scan` point execution
+  - compiled `grid_scan` point execution with required fixed origin Z
   - progress with completed and failed point counts
   - configurable consecutive-failure stop without auto-expanding the grid or auto-changing parameters
+  - point-attempt history, recovered retry summaries, and attempt-scoped kernel artifacts;
+    accessible driver files are materialized into the same scope before indexing
+- live approval re-runs runtime readiness, compiled-unit contract, forbidden-risk,
+  and stage-anchor checks against the exact proposed spec instead of trusting caller flags
+- `maxRuntimeMinutes` is enforced at execution-unit checkpoints
+- `summarize_run` returns compact progress/retry/artifact counts; use `poll_run`
+  when full point-attempt and artifact detail is required
 - `run_procedure` remains registered as a deprecated blocked entrypoint that returns `approval_required`
 - planner builders available under `planner/`:
   - `intent-builder.ts`

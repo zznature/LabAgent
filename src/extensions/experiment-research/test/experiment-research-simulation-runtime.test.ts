@@ -253,6 +253,8 @@ describe("experiment research simulation runtime", () => {
 		expect(summaryText).toContain("2/2 point units completed");
 		expect(summary.artifactCount).toBeGreaterThan(0);
 		expect(summary.artifactCountsByKind).toBeTypeOf("object");
+		expect(summaryState.artifactRefs).toBeUndefined();
+		expect(summaryState.pointAttempts).toBeUndefined();
 
 		const events = readRunEvents(cwd, runId);
 		expect(events.map((event) => event.eventType)).toEqual(
@@ -420,6 +422,23 @@ describe("experiment research simulation runtime", () => {
 				}),
 			]),
 		);
+		const resilientSummaryResult = await extension.tools
+			.get("summarize_run")
+			?.execute("summarize-recovered", { runId: resilientRunId }, undefined, undefined, context);
+		const resilientSummaryState = ((resilientSummaryResult?.details as Record<string, unknown>).stateAfter as Record<string, unknown>)
+			.summary as Record<string, unknown>;
+		expect(resilientSummaryState.retryStats).toEqual({
+			failedAttempts: 1,
+			retriedPoints: 1,
+			recoveredPoints: 1,
+			finalFailedPoints: 0,
+		});
+		expect((resilientState.artifactRefs as unknown[]).length).toBe(readArtifactRecords(cwd, resilientRunId).length);
+		const retryArtifactPaths = readArtifactRecords(cwd, resilientRunId)
+			.map((record) => record.artifact.path)
+			.filter((path) => path.includes("unit-0001"));
+		expect(retryArtifactPaths.some((path) => path.includes("unit-0001/attempt-000"))).toBe(true);
+		expect(retryArtifactPaths.some((path) => path.includes("unit-0001/attempt-001"))).toBe(true);
 
 		const failingSpec = {
 			...createProcedureSpec(4),
@@ -439,6 +458,9 @@ describe("experiment research simulation runtime", () => {
 		expect((failingState.progress as Record<string, unknown>).failedUnits).toBe(2);
 		expect((failingState.errorState as Record<string, unknown>).errorCode).toBe(
 			"mapping_consecutive_failures_limit_reached",
+		);
+		expect(((failingState.errorState as Record<string, unknown>).payload as Record<string, unknown>).triggeringError).toEqual(
+			expect.objectContaining({ errorCode: "spectrum_timeout" }),
 		);
 		const failingAttempts = failingState.pointAttempts as Record<string, unknown>[];
 		expect(failingAttempts).toEqual(
@@ -461,6 +483,29 @@ describe("experiment research simulation runtime", () => {
 				}),
 			]),
 		);
+	});
+
+	it("enforces maxRuntimeMinutes at execution-unit checkpoints", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = {
+			...createProcedureSpec(1),
+			procedureSpecId: "proc-runtime-deadline",
+			stoppingRules: {
+				maxRuntimeMinutes: 0.0005,
+				maxUnits: 1,
+				stopOnError: false,
+				maxConsecutiveFailures: 1,
+			},
+		};
+
+		const runId = await proposeAndStart(extension, spec, context, { perUnitDelayMs: 40 });
+		const state = await pollUntilTerminal(extension, runId, context, ["failed"]);
+
+		expect((state.errorState as Record<string, unknown>).errorCode).toBe("run_deadline_exceeded");
+		expect((state.progress as Record<string, unknown>).completedUnits).toBe(0);
 	});
 
 	it("rejects direct run execution and rejects approval if the spec changes after proposal", async () => {

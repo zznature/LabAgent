@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
+import { isOutsideMotionRange } from "../motion-range.ts";
 import type {
 	ExperimentIntent,
 	ExecutionUnit,
@@ -97,7 +98,7 @@ export interface ParameterSearchBuilderInput extends BaseProcedureBuilderInput {
 export interface GridMappingBuilderInput extends BaseProcedureBuilderInput {
 	procedureId: "raman_grid_mapping";
 	grid: {
-		origin: { xUm: number; yUm: number };
+		origin: { xUm: number; yUm: number; zUm: number };
 		rows: number;
 		cols: number;
 		pitchXUm: number;
@@ -244,7 +245,7 @@ function classifyMotionRangeRisks(spec: ProcedureSpec): ProposalRisk[] {
 	const risks: ProposalRisk[] = [];
 
 	for (const point of points) {
-		if (spec.limits.xRangeUm && (point.xUm < spec.limits.xRangeUm.minUm || point.xUm > spec.limits.xRangeUm.maxUm)) {
+		if (spec.limits.xRangeUm && isOutsideMotionRange(point.xUm, spec.limits.xRangeUm.minUm, spec.limits.xRangeUm.maxUm)) {
 			risks.push({
 				level: "forbidden",
 				code: "x_range_limit_exceeded",
@@ -255,7 +256,7 @@ function classifyMotionRangeRisks(spec: ProcedureSpec): ProposalRisk[] {
 	}
 
 	for (const point of points) {
-		if (spec.limits.yRangeUm && (point.yUm < spec.limits.yRangeUm.minUm || point.yUm > spec.limits.yRangeUm.maxUm)) {
+		if (spec.limits.yRangeUm && isOutsideMotionRange(point.yUm, spec.limits.yRangeUm.minUm, spec.limits.yRangeUm.maxUm)) {
 			risks.push({
 				level: "forbidden",
 				code: "y_range_limit_exceeded",
@@ -269,7 +270,7 @@ function classifyMotionRangeRisks(spec: ProcedureSpec): ProposalRisk[] {
 		if (
 			point.zUm !== undefined &&
 			spec.limits.zRangeUm &&
-			(point.zUm < spec.limits.zRangeUm.minUm || point.zUm > spec.limits.zRangeUm.maxUm)
+			isOutsideMotionRange(point.zUm, spec.limits.zRangeUm.minUm, spec.limits.zRangeUm.maxUm)
 		) {
 			risks.push({
 				level: "forbidden",

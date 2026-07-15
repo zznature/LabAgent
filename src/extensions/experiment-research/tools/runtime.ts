@@ -9,6 +9,7 @@ import {
 	startSimulationRun,
 } from "../kernel/run-controller.ts";
 import { approveAndFreezeProcedureSpec, RunAdmissionError } from "../kernel/run-admission.ts";
+import { prepareLiveRun } from "../kernel/prepare-live-run.ts";
 import { getRamanLiveRuntime } from "../runtime/raman/index.ts";
 import {
 	createProcedureProposal,
@@ -32,6 +33,13 @@ interface RuntimeToolDetails {
 	needsOperator?: boolean;
 	safeToResume?: boolean;
 	stateAfter: Record<string, unknown>;
+}
+
+interface RetryStats {
+	failedAttempts: number;
+	retriedPoints: number;
+	recoveredPoints: number;
+	finalFailedPoints: number;
 }
 
 function serializeRunState(runState: RunState): Record<string, unknown> {
@@ -62,6 +70,27 @@ function summarizeArtifacts(runState: RunState): Record<string, number> {
 	return counts;
 }
 
+function summarizeRetries(runState: RunState): RetryStats {
+	const attempts = runState.pointAttempts ?? [];
+	const attemptsByPoint = new Map<string, typeof attempts>();
+	for (const attempt of attempts) {
+		const pointAttempts = attemptsByPoint.get(attempt.pointUnitId) ?? [];
+		pointAttempts.push(attempt);
+		attemptsByPoint.set(attempt.pointUnitId, pointAttempts);
+	}
+	const pointAttempts = [...attemptsByPoint.values()];
+	return {
+		failedAttempts: attempts.filter((attempt) => attempt.status === "failed").length,
+		retriedPoints: pointAttempts.filter((records) => records.length > 1).length,
+		recoveredPoints: pointAttempts.filter(
+			(records) => records.some((attempt) => attempt.status === "failed") && records.some((attempt) => attempt.status === "succeeded" && attempt.finalForPoint),
+		).length,
+		finalFailedPoints: pointAttempts.filter(
+			(records) => records.some((attempt) => attempt.status === "failed" && attempt.finalForPoint),
+		).length,
+	};
+}
+
 function progressSummary(runState: RunState): string {
 	const progress = runState.progress;
 	const total = progress.totalUnits;
@@ -90,17 +119,28 @@ function runSummaryText(runState: RunState): string {
 		: runState.abortReason
 			? `, abort reason: ${runState.abortReason}`
 			: "";
-	return `Run ${runState.runId} is ${runState.status}: ${progressSummary(runState)}, ${artifactText}${reasonText}.`;
+	const retryStats = summarizeRetries(runState);
+	const retryText = `, ${retryStats.retriedPoints} retried, ${retryStats.recoveredPoints} recovered, ${retryStats.finalFailedPoints} final failures`;
+	return `Run ${runState.runId} is ${runState.status}: ${progressSummary(runState)}${retryText}, ${artifactText}${reasonText}.`;
 }
 
 function runSummaryState(runState: RunState): Record<string, unknown> {
 	return {
-		...serializeRunState(runState),
+		runId: runState.runId,
+		experimentId: runState.experimentId,
+		procedureSpecId: runState.procedureSpecId,
+		status: runState.status,
+		progress: runState.progress,
+		currentUnit: runState.currentUnit,
+		startedAt: runState.startedAt,
+		updatedAt: runState.updatedAt,
+		endedAt: runState.endedAt,
 		summary: {
 			status: runState.status,
 			progressText: progressSummary(runState),
 			artifactCount: runState.artifactRefs.length,
 			artifactCountsByKind: summarizeArtifacts(runState),
+			retryStats: summarizeRetries(runState),
 			latestArtifact: runState.artifactRefs.at(-1),
 			errorState: runState.errorState,
 			pauseReason: runState.pauseReason,
@@ -219,19 +259,44 @@ export const approveAndStartRunTool = {
 	executionMode: "sequential",
 	async execute(_toolCallId, params: ProposalIdParams, _signal, _onUpdate, ctx) {
 		const mode = params.executionMode ?? "simulation";
-		if (mode === "live-supervised" && !getRamanLiveRuntime(ctx.cwd)) {
+		const runtime = mode === "live-supervised" ? getRamanLiveRuntime(ctx.cwd) : undefined;
+		if (mode === "live-supervised" && !runtime) {
 			return error("No live Raman runtime is registered for this workspace.", "live_runtime_unavailable", {
 				executionMode: mode,
 			});
 		}
 
 		try {
+			let verifiedAdmission = params.admission;
+			if (mode === "live-supervised" && runtime) {
+				const preparation = await prepareLiveRun(params.spec, runtime);
+				if (preparation.contractIssues.length > 0 || preparation.forbiddenRisks.length > 0) {
+					throw new RunAdmissionError(
+						"Live supervised execution requires all preflight risks to be resolved before approval and start.",
+						"preflight_forbidden",
+						{ contractIssues: preparation.contractIssues, forbiddenRisks: preparation.forbiddenRisks },
+					);
+				}
+				verifiedAdmission = {
+					preflightReady: preparation.livePreflight.preflightReady,
+					controlAvailable: preparation.livePreflight.controlAvailable,
+				};
+				if (preparation.livePreflight.preflightReady && preparation.livePreflight.controlAvailable) {
+					if (!preparation.anchorValidation.valid) {
+						throw new RunAdmissionError(
+							"Live supervised execution requires the current stage anchor to match the approved ProcedureSpec.",
+							"preflight_stage_anchor_invalid",
+							preparation.anchorValidation.details,
+						);
+					}
+				}
+			}
 			const admitted = approveAndFreezeProcedureSpec({
 				cwd: ctx.cwd,
 				proposalId: params.proposalId,
 				spec: params.spec,
 				mode,
-				admission: params.admission,
+				admission: verifiedAdmission,
 			});
 			const runState =
 				mode === "live-supervised"

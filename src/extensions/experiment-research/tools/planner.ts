@@ -4,7 +4,9 @@ import type { ExperimentIntent, ProcedureId, ProcedureSpec } from "../schemas/in
 import { ExperimentIntentValidator, ProcedureSpecValidator, formatValidationErrors } from "../schemas/index.ts";
 import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
-import { getRamanLiveRuntime, getRamanPythonRuntimeConfigInfo, validateRuntimeAnchorState } from "../runtime/raman/index.ts";
+import { validateExecutionContract } from "../kernel/validate-execution.ts";
+import { prepareLiveRun } from "../kernel/prepare-live-run.ts";
+import { getRamanLiveRuntime, getRamanPythonRuntimeConfigInfo } from "../runtime/raman/index.ts";
 import { findExperimentProcedureTemplate, listExperimentProcedureTemplates, saveExperimentIntent } from "../store/index.ts";
 import {
 	ProcedureSpecParamsSchema,
@@ -299,7 +301,8 @@ async function buildPreflightState(
 	templateApplication?: TemplateApplication,
 ): Promise<Record<string, unknown>> {
 	const preview = summarizeProcedureProposal(spec);
-	const forbiddenRisks = preview.risks.filter((risk) => risk.level === "forbidden");
+	const risks = [...preview.risks, ...validateExecutionContract(spec, executionMode)];
+	const forbiddenRisks = risks.filter((risk) => risk.level === "forbidden");
 	const requiredRolesPresent = hasRequiredRamanRoles(spec);
 	const requestedModeSupported = executionMode === "simulation" || requiredRolesPresent;
 
@@ -315,7 +318,7 @@ async function buildPreflightState(
 			preflightReady: true,
 			controlAvailable: true,
 			requiresConfirmation: preview.requiresConfirmation,
-			risks: preview.risks,
+			risks,
 			limits: preview.limits,
 			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
@@ -338,7 +341,7 @@ async function buildPreflightState(
 			preflightReady: false,
 			controlAvailable: false,
 			requiresConfirmation: preview.requiresConfirmation,
-			risks: preview.risks,
+			risks,
 			limits: preview.limits,
 			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
@@ -349,10 +352,8 @@ async function buildPreflightState(
 		};
 	}
 
-	const livePreflight = await runtime.preflight();
-	const anchorValidation = livePreflight.preflightReady && livePreflight.controlAvailable
-		? await validateRuntimeAnchorState(spec, runtime)
-		: { valid: false, details: { skipped: true, reason: "runtime_preflight_not_ready" } };
+	const preparation = await prepareLiveRun(spec, runtime);
+	const preparedRisks = [...preview.risks, ...preparation.contractIssues];
 	return {
 		mode: executionMode,
 		procedureSpecId: spec.procedureSpecId,
@@ -361,25 +362,26 @@ async function buildPreflightState(
 		estimatedRuntimeMs: preview.estimatedRuntimeMs,
 		estimatedRuntimeMinutes: Number((preview.estimatedRuntimeMs / 60_000).toFixed(2)),
 		readyForApproval:
-			forbiddenRisks.length === 0 &&
+			preparation.contractIssues.length === 0 &&
+			preparation.forbiddenRisks.length === 0 &&
 			requiredRolesPresent &&
 			requestedModeSupported &&
-			livePreflight.preflightReady &&
-			livePreflight.controlAvailable &&
-			anchorValidation.valid,
-		preflightReady: livePreflight.preflightReady,
-		controlAvailable: livePreflight.controlAvailable,
+			preparation.livePreflight.preflightReady &&
+			preparation.livePreflight.controlAvailable &&
+			preparation.anchorValidation.valid,
+		preflightReady: preparation.livePreflight.preflightReady,
+		controlAvailable: preparation.livePreflight.controlAvailable,
 		requiresConfirmation: preview.requiresConfirmation,
-		risks: preview.risks,
+		risks: preparedRisks,
 		limits: preview.limits,
 		templateApplication: templateApplicationState(templateApplication),
 		savePath: preview.savePath,
 		requiredRolesPresent,
 		requestedModeSupported,
 		realRuntimeRegistered: true,
-		livePreflightDetails: livePreflight.details ?? {},
-		stageAnchorValid: anchorValidation.valid,
-		stageAnchorDetails: anchorValidation.details,
+		livePreflightDetails: preparation.livePreflight.details ?? {},
+		stageAnchorValid: preparation.anchorValidation.valid,
+		stageAnchorDetails: preparation.anchorValidation.details,
 		canProposeRun: true,
 	};
 }
@@ -394,7 +396,19 @@ export const getLabCapabilitiesTool = {
 	],
 	parameters: EmptyParamsSchema,
 	executionMode: "sequential",
-	async execute() {
+	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		const runtimeConfig = getRamanPythonRuntimeConfigInfo(ctx.cwd);
+		const resources = runtimeConfig.resources
+			? [
+					{ resourceId: runtimeConfig.resources.stage.resourceId, role: "stage" },
+					{ resourceId: runtimeConfig.resources.frameProvider.resourceId, role: "frame_provider" },
+					{ resourceId: runtimeConfig.resources.spectrometer.resourceId, role: "spectrometer" },
+				]
+			: [
+					{ resourceId: "stage-main", role: "stage" },
+					{ resourceId: "frame-main", role: "frame_provider" },
+					{ resourceId: "spectrometer-main", role: "spectrometer" },
+				];
 		return success("LabAgents MVP rebuild planner capabilities loaded.", {
 			source: "experiment-research",
 			stage: "phase10-bounded-search-and-mapping",
@@ -435,6 +449,11 @@ export const getLabCapabilitiesTool = {
 				liveSinglePointExecutionRequiresRegisteredRuntime: true,
 				liveParameterSearchExecutionRequiresRegisteredRuntime: true,
 				liveGridMappingExecutionRequiresRegisteredRuntime: true,
+			},
+			planningDefaults: {
+				source: runtimeConfig.resources ? runtimeConfig.path : "canonical-procedure-template",
+				resources,
+				autofocusRoi: { x: 492, y: 353, width: 225, height: 225 },
 			},
 		});
 	},
@@ -644,8 +663,16 @@ export const runPreflightTool = {
 		}
 
 		const state = await buildPreflightState(spec, ctx.cwd, params.executionMode ?? "simulation", params.templateApplication);
+		const forbiddenRiskSummary = (state.risks as Array<{ level: string; code: string; message: string }>)
+			.filter((risk) => risk.level === "forbidden")
+			.map((risk) => `${risk.code}: ${risk.message}`)
+			.join("; ");
 		if (state.requiredRolesPresent !== true) {
-			return error("ProcedureSpec preflight failed because required Raman resources are missing.", "preflight_missing_resources", state);
+			return error(
+				`ProcedureSpec preflight failed because required Raman resources are missing.${forbiddenRiskSummary ? ` ${forbiddenRiskSummary}` : ""}`,
+				"preflight_missing_resources",
+				state,
+			);
 		}
 
 		if (state.requestedModeSupported !== true) {
@@ -653,7 +680,7 @@ export const runPreflightTool = {
 		}
 
 		if ((state.risks as Array<{ level: string }>).some((risk) => risk.level === "forbidden")) {
-			return warning("ProcedureSpec preflight found forbidden risks that must be resolved before approval.", state);
+			return warning(`ProcedureSpec preflight found forbidden risks: ${forbiddenRiskSummary}`, state);
 		}
 
 		if (state.preflightReady !== true || state.controlAvailable !== true) {

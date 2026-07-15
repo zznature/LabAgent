@@ -118,6 +118,14 @@ describe("experiment research rebuild skeleton", () => {
 		const capabilitiesDetails = asRecord(capabilities?.details);
 		expect(capabilitiesDetails.status).toBe("success");
 		expect(capabilitiesDetails.summary).toBe("LabAgents MVP rebuild planner capabilities loaded.");
+		const capabilitiesState = asRecord(capabilitiesDetails.stateAfter);
+		const planningDefaults = asRecord(capabilitiesState.planningDefaults);
+		expect(planningDefaults.resources).toEqual([
+			{ resourceId: "stage-main", role: "stage" },
+			{ resourceId: "frame-main", role: "frame_provider" },
+			{ resourceId: "spectrometer-main", role: "spectrometer" },
+		]);
+		expect(planningDefaults.autofocusRoi).toEqual({ x: 492, y: 353, width: 225, height: 225 });
 
 		const labState = await extension.tools
 			.get("get_lab_state")

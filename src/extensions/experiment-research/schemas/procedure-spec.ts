@@ -22,6 +22,7 @@ export const GridPointSchema = Type.Object(
 	{
 		xUm: Type.Number(),
 		yUm: Type.Number(),
+		zUm: Type.Number(),
 	},
 	{ additionalProperties: false },
 );

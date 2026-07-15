@@ -102,7 +102,7 @@ describe("experiment research core schemas", () => {
 			plan: {
 				kind: "grid_scan",
 				grid: {
-					origin: { xUm: 1000, yUm: 2000 },
+					origin: { xUm: 1000, yUm: 2000, zUm: 1500 },
 					rows: 4,
 					cols: 5,
 					pitchXUm: 5,

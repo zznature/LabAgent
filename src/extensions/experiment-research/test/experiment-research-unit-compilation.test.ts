@@ -40,7 +40,7 @@ function createBaseProcedureSpec() {
 		plan: {
 			kind: "grid_scan",
 			grid: {
-				origin: { xUm: 1000, yUm: 2000 },
+				origin: { xUm: 1000, yUm: 2000, zUm: 1500 },
 				rows: 2,
 				cols: 3,
 				pitchXUm: 5,
@@ -124,12 +124,12 @@ describe("experiment research unit compilation", () => {
 			"proc-spec-compile/unit/0005",
 		]);
 		expect(units.map((unit) => unit.point)).toEqual([
-			{ row: 0, col: 0, xUm: 1000, yUm: 2000, zUm: undefined },
-			{ row: 0, col: 1, xUm: 1005, yUm: 2000, zUm: undefined },
-			{ row: 0, col: 2, xUm: 1010, yUm: 2000, zUm: undefined },
-			{ row: 1, col: 2, xUm: 1010, yUm: 2010, zUm: undefined },
-			{ row: 1, col: 1, xUm: 1005, yUm: 2010, zUm: undefined },
-			{ row: 1, col: 0, xUm: 1000, yUm: 2010, zUm: undefined },
+			{ row: 0, col: 0, xUm: 1000, yUm: 2000, zUm: 1500 },
+			{ row: 0, col: 1, xUm: 1005, yUm: 2000, zUm: 1500 },
+			{ row: 0, col: 2, xUm: 1010, yUm: 2000, zUm: 1500 },
+			{ row: 1, col: 2, xUm: 1010, yUm: 2010, zUm: 1500 },
+			{ row: 1, col: 1, xUm: 1005, yUm: 2010, zUm: 1500 },
+			{ row: 1, col: 0, xUm: 1000, yUm: 2010, zUm: 1500 },
 		]);
 		expect(units.every((unit) => unit.unitKind === "point")).toBe(true);
 		expect(units.every((unit) => unit.artifactScope.artifactPathPrefix.includes("proc-spec-compile"))).toBe(true);

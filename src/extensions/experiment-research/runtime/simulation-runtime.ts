@@ -70,8 +70,9 @@ function persistArtifact(cwd: string, runId: string, artifact: ArtifactRef, cont
 	});
 }
 
-function createUnitArtifacts(cwd: string, runId: string, unit: ExecutionUnit): ArtifactRef[] {
-	const prefix = `${unit.artifactScope.artifactPathPrefix}/${toSafeFileStem(unit.unitId)}`.replace(/^records\//u, "");
+function createUnitArtifacts(cwd: string, runId: string, unit: ExecutionUnit, attemptIndex: number): ArtifactRef[] {
+	const attemptDirectory = `attempt-${String(attemptIndex).padStart(3, "0")}`;
+	const prefix = `${unit.artifactScope.artifactPathPrefix}/${attemptDirectory}/${toSafeFileStem(unit.unitId)}`.replace(/^records\//u, "");
 	const artifacts: ArtifactRef[] = [];
 
 	for (const action of unit.actions) {
@@ -148,7 +149,7 @@ export async function runSimulationUnit(
 	) {
 		return {
 			status: "completed",
-			artifactRefs: createUnitArtifacts(cwd, runId, unit),
+			artifactRefs: createUnitArtifacts(cwd, runId, unit, attemptCount),
 			observationMetrics: {
 				autofocusConfidence: 0.1,
 				saturated: false,
@@ -172,7 +173,7 @@ export async function runSimulationUnit(
 
 	return {
 		status: "completed",
-		artifactRefs: createUnitArtifacts(cwd, runId, unit),
+		artifactRefs: createUnitArtifacts(cwd, runId, unit, attemptCount),
 		observationMetrics: controls.parameterSearchObservations?.[unit.index],
 	};
 }

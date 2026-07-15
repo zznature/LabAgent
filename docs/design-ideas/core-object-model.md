@@ -336,7 +336,7 @@ type ProcedureSpec = {
     | {
         kind: "grid_scan"
         grid: {
-          origin: { xUm: number; yUm: number }
+          origin: { xUm: number; yUm: number; zUm: number }
           rows: number
           cols: number
           pitchXUm: number
@@ -416,6 +416,8 @@ type RunState = {
     status: "succeeded" | "failed"
     failureType?: "execution" | "quality"
     failureReason?: "timeout" | "low_focus_confidence"
+    errorCode?: string
+    errorMessage?: string
     finalForPoint?: boolean
     artifactIds?: string[]
     timestamp: string

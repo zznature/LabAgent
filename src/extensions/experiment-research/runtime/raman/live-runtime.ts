@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type {
 	ArtifactRef,
 	ExecutionUnit,
@@ -11,6 +11,7 @@ import type {
 	RunState,
 	RuntimeError,
 } from "../../schemas/index.ts";
+import { isOutsideMotionRange } from "../../motion-range.ts";
 import { appendArtifactRecord } from "../../store/artifact-store.ts";
 import { runRoot } from "../../store/layout.ts";
 import { evaluateRamanGoodEnough } from "../../planner/evaluate-good-enough.ts";
@@ -81,6 +82,10 @@ export interface LiveRamanUnitFailure {
 export type LiveRamanUnitResult = LiveRamanUnitSuccess | LiveRamanUnitPause | LiveRamanUnitFailure;
 
 export interface LiveRamanUnitOptions {
+	attempt?: {
+		attemptIndex: number;
+		phase: "initial" | "immediate_retry" | "final_retry";
+	};
 	acquisitionOverride?: RamanAcquisition;
 	evaluation?: {
 		attemptIndex: number;
@@ -128,7 +133,7 @@ function ensureRange(
 	if (value === undefined) {
 		return undefined;
 	}
-	if ((minimum !== undefined && value < minimum) || (maximum !== undefined && value > maximum)) {
+	if (isOutsideMotionRange(value, minimum, maximum)) {
 		return failedActionResult(message, {
 			errorCode,
 			message,
@@ -320,14 +325,55 @@ function persistArtifactRecord(cwd: string, runId: string, artifact: ArtifactRef
 	});
 }
 
+function persistArtifactRecords(cwd: string, runId: string, artifacts: ArtifactRef[]): void {
+	for (const artifact of artifacts) {
+		persistArtifactRecord(cwd, runId, artifact);
+	}
+}
+
+function scopeRuntimeArtifacts(
+	cwd: string,
+	runId: string,
+	artifacts: ArtifactRef[],
+	unit: ExecutionUnit,
+	actionIndex: number,
+	attempt: LiveRamanUnitOptions["attempt"],
+): ArtifactRef[] {
+	const attemptIndex = attempt?.attemptIndex ?? 0;
+	const attemptPhase = attempt?.phase ?? "initial";
+	return artifacts.map((artifact) => {
+		const relativePath = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}/attempt-${String(attemptIndex).padStart(3, "0")}-${attemptPhase}/action-${String(actionIndex).padStart(2, "0")}/${basename(artifact.path)}`;
+		const sourceExists = existsSync(artifact.path);
+		if (sourceExists) {
+			const targetPath = join(runRoot(cwd, runId), relativePath);
+			mkdirSync(dirname(targetPath), { recursive: true });
+			copyFileSync(artifact.path, targetPath);
+		}
+		return {
+			...artifact,
+			artifactId: `${artifact.artifactId}-${unit.index}-${attemptIndex}-${actionIndex}`,
+			path: sourceExists ? relativePath.replace(/\\/gu, "/") : artifact.path,
+			metadata: {
+				...artifact.metadata,
+				pointUnitId: unit.unitId,
+				attemptIndex,
+				attemptPhase,
+				externalOnly: !sourceExists,
+			},
+		};
+	});
+}
+
 function persistEvaluationArtifact(
 	cwd: string,
 	runId: string,
 	unit: ExecutionUnit,
 	metrics: RamanObservationMetrics,
 	decision: RamanEvaluationDecision,
+	attempt: LiveRamanUnitOptions["attempt"],
 ): ArtifactRef {
-	const relativePath = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}-evaluation.json`;
+	const attemptSuffix = attempt ? `/attempt-${String(attempt.attemptIndex).padStart(3, "0")}-${attempt.phase}` : "";
+	const relativePath = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}${attemptSuffix}/evaluation.json`;
 	const absolutePath = join(runRoot(cwd, runId), relativePath);
 	mkdirSync(dirname(absolutePath), { recursive: true });
 	writeFileSync(
@@ -336,7 +382,7 @@ function persistEvaluationArtifact(
 		"utf-8",
 	);
 	return {
-		artifactId: `${runId}-evaluation-${unit.index}`,
+		artifactId: `${runId}-evaluation-${unit.index}-${attempt?.attemptIndex ?? 0}`,
 		kind: "raman-evaluation",
 		path: relativePath.replace(/\\/gu, "/"),
 		label: "Rule-based Raman evaluation",
@@ -351,8 +397,10 @@ function persistAutofocusArtifact(
 	runId: string,
 	unit: ExecutionUnit,
 	autofocusResult: ActionResult,
+	attempt: LiveRamanUnitOptions["attempt"],
 ): ArtifactRef {
-	const relativePath = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}-autofocus.json`;
+	const attemptSuffix = attempt ? `/attempt-${String(attempt.attemptIndex).padStart(3, "0")}-${attempt.phase}` : "";
+	const relativePath = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}${attemptSuffix}/autofocus.json`;
 	const absolutePath = join(runRoot(cwd, runId), relativePath);
 	mkdirSync(dirname(absolutePath), { recursive: true });
 	writeFileSync(
@@ -371,7 +419,7 @@ function persistAutofocusArtifact(
 		"utf-8",
 	);
 	return {
-		artifactId: `${runId}-autofocus-${unit.index}`,
+		artifactId: `${runId}-autofocus-${unit.index}-${attempt?.attemptIndex ?? 0}`,
 		kind: "raman-autofocus",
 		path: relativePath.replace(/\\/gu, "/"),
 		label: "Raman autofocus result",
@@ -479,6 +527,9 @@ function zAnchorFromSpec(spec: ProcedureSpec): number | undefined {
 	const plan = spec.plan;
 	if (plan.kind === "point_list") {
 		return plan.points.find((point) => typeof point.zUm === "number")?.zUm;
+	}
+	if (plan.kind === "grid_scan") {
+		return plan.grid.origin.zUm;
 	}
 	return undefined;
 }
@@ -611,7 +662,7 @@ export async function runLiveRamanUnit(
 	let autofocusResult: ActionResult | undefined;
 	let spectrumResult: ActionResult | undefined;
 
-	for (const action of unit.actions) {
+	for (const [actionIndex, action] of unit.actions.entries()) {
 		if (action.kind === "move_to_point") {
 			if (unit.positionRef === "current") {
 				continue;
@@ -626,8 +677,10 @@ export async function runLiveRamanUnit(
 				},
 				timeoutMs: 15_000,
 			});
+			const moveResultArtifacts = scopeRuntimeArtifacts(cwd, runId, moveResult.artifacts, unit, actionIndex, options.attempt);
 			if (moveResult.status !== "success") {
-				const moveArtifacts = artifactRefs.concat(moveResult.artifacts);
+				persistArtifactRecords(cwd, runId, moveResultArtifacts);
+				const moveArtifacts = artifactRefs.concat(moveResultArtifacts);
 				if (moveResult.status === "paused") {
 					return {
 						status: "paused",
@@ -641,7 +694,7 @@ export async function runLiveRamanUnit(
 					artifactRefs: moveArtifacts,
 				};
 			}
-			for (const artifact of moveResult.artifacts) {
+			for (const artifact of moveResultArtifacts) {
 				persistArtifactRecord(cwd, runId, artifact);
 				artifactRefs.push(artifact);
 			}
@@ -669,11 +722,13 @@ export async function runLiveRamanUnit(
 					timeoutMs: 30_000,
 				}),
 			);
-			const autofocusArtifact = persistAutofocusArtifact(cwd, runId, unit, autofocusResult);
+			const autofocusArtifact = persistAutofocusArtifact(cwd, runId, unit, autofocusResult, options.attempt);
 			persistArtifactRecord(cwd, runId, autofocusArtifact);
 			artifactRefs.push(autofocusArtifact);
+			const autofocusResultArtifacts = scopeRuntimeArtifacts(cwd, runId, autofocusResult.artifacts, unit, actionIndex, options.attempt);
 			if (autofocusResult.status !== "success") {
-				const autofocusArtifacts = artifactRefs.concat(autofocusResult.artifacts);
+				persistArtifactRecords(cwd, runId, autofocusResultArtifacts);
+				const autofocusArtifacts = artifactRefs.concat(autofocusResultArtifacts);
 				if (autofocusResult.status === "paused") {
 					return {
 						status: "paused",
@@ -687,7 +742,7 @@ export async function runLiveRamanUnit(
 					artifactRefs: autofocusArtifacts,
 				};
 			}
-			for (const artifact of autofocusResult.artifacts) {
+			for (const artifact of autofocusResultArtifacts) {
 				persistArtifactRecord(cwd, runId, artifact);
 				artifactRefs.push(artifact);
 			}
@@ -700,8 +755,10 @@ export async function runLiveRamanUnit(
 				resourceId: frameProviderResourceId,
 				timeoutMs: 10_000,
 			});
+			const frameResultArtifacts = scopeRuntimeArtifacts(cwd, runId, frameResult.artifacts, unit, actionIndex, options.attempt);
 			if (frameResult.status !== "success") {
-				const frameArtifacts = artifactRefs.concat(frameResult.artifacts);
+				persistArtifactRecords(cwd, runId, frameResultArtifacts);
+				const frameArtifacts = artifactRefs.concat(frameResultArtifacts);
 				if (frameResult.status === "paused") {
 					return {
 						status: "paused",
@@ -715,7 +772,7 @@ export async function runLiveRamanUnit(
 					artifactRefs: frameArtifacts,
 				};
 			}
-			for (const artifact of frameResult.artifacts) {
+			for (const artifact of frameResultArtifacts) {
 				persistArtifactRecord(cwd, runId, artifact);
 				artifactRefs.push(artifact);
 			}
@@ -738,8 +795,10 @@ export async function runLiveRamanUnit(
 				acquisition,
 				timeoutMs: acquisition.timeoutMs ?? 60_000,
 			});
+			const spectrumResultArtifacts = scopeRuntimeArtifacts(cwd, runId, spectrumResult.artifacts, unit, actionIndex, options.attempt);
 			if (spectrumResult.status !== "success") {
-				const spectrumArtifacts = artifactRefs.concat(spectrumResult.artifacts);
+				persistArtifactRecords(cwd, runId, spectrumResultArtifacts);
+				const spectrumArtifacts = artifactRefs.concat(spectrumResultArtifacts);
 				if (spectrumResult.status === "paused") {
 					return {
 						status: "paused",
@@ -753,7 +812,7 @@ export async function runLiveRamanUnit(
 					artifactRefs: spectrumArtifacts,
 				};
 			}
-			for (const artifact of spectrumResult.artifacts) {
+			for (const artifact of spectrumResultArtifacts) {
 				persistArtifactRecord(cwd, runId, artifact);
 				artifactRefs.push(artifact);
 			}
@@ -807,7 +866,7 @@ export async function runLiveRamanUnit(
 				}
 			: undefined,
 	);
-	const evaluationArtifact = persistEvaluationArtifact(cwd, runId, unit, metricsOrError, decision);
+	const evaluationArtifact = persistEvaluationArtifact(cwd, runId, unit, metricsOrError, decision, options.attempt);
 	persistArtifactRecord(cwd, runId, evaluationArtifact);
 	artifactRefs.push(evaluationArtifact);
 

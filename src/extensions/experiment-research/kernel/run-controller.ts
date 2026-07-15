@@ -39,6 +39,7 @@ export interface ActiveRun {
 	controls?: SimulationControls;
 	pauseRequested: boolean;
 	abortRequested: boolean;
+	deadlineAtMs?: number;
 	promise: Promise<void>;
 }
 
@@ -46,6 +47,8 @@ export interface RunExecutionContext {
 	activeRun: ActiveRun;
 	start(): void;
 	abortAt(unit: ExecutionUnit): void;
+	deadlineExceeded(): boolean;
+	failDeadline(unit: ExecutionUnit, artifacts?: RunState["artifactRefs"]): void;
 	markUnitStarted(unit: ExecutionUnit, attempt?: UnitAttemptContext): RunState;
 	executeUnit(unit: ExecutionUnit, options?: LiveRamanUnitOptions): Promise<ManagedUnitResult>;
 	pause(unit: ExecutionUnit, reason: string, resultArtifacts: RunState["artifactRefs"]): void;
@@ -63,7 +66,7 @@ export interface RunExecutionContext {
 		resultArtifacts: RunState["artifactRefs"],
 		attempt?: UnitAttemptContext,
 	): void;
-	recordPointAttempt(record: Omit<PointAttemptRecord, "timestamp">): void;
+	recordPointAttempt(record: Omit<PointAttemptRecord, "timestamp">, artifacts?: RunState["artifactRefs"]): void;
 }
 
 const activeRuns = new Map<string, ActiveRun>();
@@ -72,6 +75,11 @@ const DEFAULT_MAPPING_MAX_CONSECUTIVE_FAILURES = 3;
 
 function timestamp(): string {
 	return new Date().toISOString();
+}
+
+function deadlineAtMs(spec: ProcedureSpec): number | undefined {
+	const maxRuntimeMinutes = spec.stoppingRules?.maxRuntimeMinutes;
+	return maxRuntimeMinutes === undefined ? undefined : Date.now() + maxRuntimeMinutes * 60_000;
 }
 
 function appendEvent(cwd: string, event: RunEvent): void {
@@ -408,6 +416,19 @@ function createRunExecutionContext(activeRun: ActiveRun): RunExecutionContext {
 		abortAt(unit) {
 			abortActiveRun(activeRun, unit);
 		},
+		deadlineExceeded() {
+			return activeRun.deadlineAtMs !== undefined && Date.now() >= activeRun.deadlineAtMs;
+		},
+		failDeadline(unit, artifacts = []) {
+			failActiveRun(activeRun, unit, {
+				errorCode: "run_deadline_exceeded",
+				message: "Run stopped at an execution-unit checkpoint after maxRuntimeMinutes elapsed.",
+				retrySafe: false,
+				needsOperator: true,
+				safeToResume: false,
+				scope: "run",
+			}, artifacts);
+		},
 		markUnitStarted(unit, attempt) {
 			return markActiveUnitStarted(activeRun, unit, attempt);
 		},
@@ -433,9 +454,10 @@ function createRunExecutionContext(activeRun: ActiveRun): RunExecutionContext {
 		recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt) {
 			applySkippedFailureProgress(activeRun, unit, failure, resultArtifacts, attempt);
 		},
-		recordPointAttempt(record) {
+		recordPointAttempt(record, artifacts = []) {
 			updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 				...current,
+				artifactRefs: current.artifactRefs.concat(artifacts),
 				pointAttempts: (current.pointAttempts ?? []).concat({
 					...record,
 					timestamp: timestamp(),
@@ -504,6 +526,7 @@ export function startSimulationRun(
 		controls,
 		pauseRequested: false,
 		abortRequested: false,
+		deadlineAtMs: deadlineAtMs(spec),
 		promise: Promise.resolve(),
 	});
 }
@@ -524,6 +547,7 @@ export function startLiveRamanRun(
 		mode: "live-supervised",
 		pauseRequested: false,
 		abortRequested: false,
+		deadlineAtMs: deadlineAtMs(spec),
 		promise: Promise.resolve(),
 	});
 }

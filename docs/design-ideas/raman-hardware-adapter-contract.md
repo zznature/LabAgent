@@ -450,7 +450,7 @@ limits:
 plan:
   kind: grid_scan
   grid:
-    origin: { xUm: 1000, yUm: 2000 }
+    origin: { xUm: 1000, yUm: 2000, zUm: 1500 }
     rows: 10
     cols: 10
     pitchXUm: 5
@@ -485,6 +485,8 @@ domain:
 关键边界：
 
 - `domain.raman` 承载 Raman 特有参数
+- live `grid_scan` origin 必须包含固定 `zUm`；compiler 会把它复制到每个 point unit，
+  不允许依赖 runtime 猜测当前 Z
 - resource config 不由 planner 自由填写
 - `laserPowerPercent` 是请求的 LabSpec 激光功率百分比档位
 - `limits.maxLaserPowerPercent` 是本次 run 的安全上界
@@ -504,6 +506,9 @@ Raman 是真实硬件，因此只靠 `approve_and_start_run` 不够，还需要 
 - stage 能否连接并读位置
 - frame bridge 目录可用性
 - spectrum bridge 目录可用性
+- 编译后的每个 live absolute point 是否具有完整 X/Y/Z 和可执行 action 参数
+- grid compiler 先把计算坐标量化到固定精度，再做精确 motion range 比较；
+  runtime 在每个 action 前仍使用未经扩大的同一硬边界
 
 MVP rebuild 中，普通状态读取应优先通过 operator tool 完成：
 

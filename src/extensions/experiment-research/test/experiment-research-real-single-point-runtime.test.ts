@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -162,8 +162,23 @@ function createLiveRuntime(
 	controlAvailable = true,
 	observations?: Array<{ saturated: boolean; snr: number; targetPeakBaselineRatio: number }>,
 	metrics?: { stageMoveCalls: number },
+	autofocusConfidences?: number[],
+	artifactRoot?: string,
 ): RamanLiveRuntime {
 	let spectrumCall = 0;
+	let autofocusCall = 0;
+	function artifactPath(fileName: string, fallback: string): string {
+		if (!artifactRoot) {
+			return fallback;
+		}
+		mkdirSync(artifactRoot, { recursive: true });
+		const path = join(artifactRoot, fileName);
+		writeFileSync(path, `${fileName}\n`, "utf-8");
+		return path;
+	}
+	const autofocusCurvePath = artifactPath("autofocus-curve.json", "artifacts/live/autofocus-curve.json");
+	const framePath = artifactPath("frame.tif", "artifacts/live/frame.tif");
+	const spectrumPath = artifactPath("spectrum.txt", "artifacts/live/spectrum.txt");
 	return {
 		preflight() {
 			return {
@@ -212,18 +227,20 @@ function createLiveRuntime(
 		},
 		autofocus: {
 			runSingle() {
+				const confidence = autofocusConfidences?.[Math.min(autofocusCall, autofocusConfidences.length - 1)] ?? 0.96;
+				autofocusCall += 1;
 				return successActionResult(
 					"Autofocus completed.",
 					{
 						zBestUm: 260,
-						confidence: 0.96,
+						confidence,
 						finalScore: 1.4,
 					},
 					[
 						{
 							artifactId: "autofocus-curve",
 							kind: "autofocus",
-							path: "artifacts/live/autofocus-curve.json",
+							path: autofocusCurvePath,
 							label: "Live autofocus curve",
 						},
 					],
@@ -248,13 +265,13 @@ function createLiveRuntime(
 				return successActionResult(
 					"Frame captured.",
 					{
-						framePath: "artifacts/live/frame.tif",
+						framePath,
 					},
 					[
 						{
 							artifactId: "frame-latest",
 							kind: "frame",
-							path: "artifacts/live/frame.tif",
+							path: framePath,
 							label: "Live frame",
 						},
 					],
@@ -287,7 +304,7 @@ function createLiveRuntime(
 				return successActionResult(
 					"Spectrum acquired.",
 					{
-						outputPath: "artifacts/live/spectrum.txt",
+						outputPath: spectrumPath,
 						saturated: observation?.saturated ?? false,
 						snr: observation?.snr ?? 12,
 						targetPeakBaselineRatio: observation?.targetPeakBaselineRatio ?? 1.8,
@@ -296,7 +313,7 @@ function createLiveRuntime(
 						{
 							artifactId: "spectrum-live",
 							kind: "spectrum",
-							path: "artifacts/live/spectrum.txt",
+							path: spectrumPath,
 							label: "Live spectrum",
 						},
 					],
@@ -431,6 +448,56 @@ describe("experiment research real supervised single-point runtime", () => {
 		);
 	});
 
+	it("keeps live retry artifacts in distinct attempts under one logical point scope", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true, undefined, undefined, [0.1, 0.96], join(cwd, "driver-artifacts")));
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = {
+			...createSinglePointSpec({ procedureId: "raman_grid_mapping" }),
+			stoppingRules: { maxRuntimeMinutes: 20, maxUnits: 1, stopOnError: false, maxConsecutiveFailures: 1 },
+		};
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-retry-artifacts",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		await pollUntilTerminal(extension, runId, context, ["completed"]);
+		const autofocusArtifacts = readArtifactRecords(cwd, runId)
+			.map((record) => record.artifact)
+			.filter((artifact) => artifact.kind === "raman-autofocus");
+
+		expect(autofocusArtifacts.map((artifact) => artifact.path)).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("unit-0000/attempt-000-initial/autofocus.json"),
+				expect.stringContaining("unit-0000/attempt-001-immediate_retry/autofocus.json"),
+			]),
+		);
+		expect(new Set(autofocusArtifacts.map((artifact) => artifact.artifactId)).size).toBe(2);
+		const driverAutofocusArtifacts = readArtifactRecords(cwd, runId)
+			.map((record) => record.artifact)
+			.filter((artifact) => artifact.kind === "autofocus");
+		expect(driverAutofocusArtifacts.map((artifact) => artifact.path)).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("unit-0000/attempt-000-initial/action-01/autofocus-curve.json"),
+				expect.stringContaining("unit-0000/attempt-001-immediate_retry/action-01/autofocus-curve.json"),
+			]),
+		);
+		expect(
+			driverAutofocusArtifacts.every((artifact) => existsSync(join(cwd, "lab-records", "runs", runId, artifact.path))),
+		).toBe(true);
+	});
+
 	it("executes a live current-position single-point run without issuing a stage move", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
@@ -512,7 +579,7 @@ describe("experiment research real supervised single-point runtime", () => {
 		]);
 	});
 
-	it("rejects live start when control is unavailable and enforces runtime laser and clearance hard-limits", async () => {
+	it("rechecks live admission instead of trusting caller flags and blocks forbidden proposals", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
 		registerRamanLiveRuntime(cwd, createLiveRuntime(true, false));
@@ -529,7 +596,7 @@ describe("experiment research real supervised single-point runtime", () => {
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
-					controlAvailable: false,
+					controlAvailable: true,
 				},
 			},
 			undefined,
@@ -539,6 +606,29 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect((blockedStart?.details as Record<string, unknown>).errorCode).toBe("control_not_available");
 
 		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true));
+		const mismatchedResourceSpec = {
+			...createSinglePointSpec(),
+			procedureSpecId: "proc-live-resource-mismatch",
+			resources: [
+				{ resourceId: "wrong-stage", role: "stage" },
+				{ resourceId: "frame-main", role: "frame_provider" },
+				{ resourceId: "spectrometer-main", role: "spectrometer" },
+			],
+		};
+		const mismatchedProposalId = await proposeRun(extension, mismatchedResourceSpec, context);
+		const mismatchedStart = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-resource-mismatch",
+			{
+				proposalId: mismatchedProposalId,
+				spec: mismatchedResourceSpec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect((mismatchedStart?.details as Record<string, unknown>).errorCode).toBe("preflight_forbidden");
 
 		const highPowerSpec = createSinglePointSpec({ laserPowerPercent: 3.2 });
 		const highPowerProposalId = await proposeRun(extension, highPowerSpec, context);
@@ -557,11 +647,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			undefined,
 			context,
 		);
-		expect((highPowerStarted?.details as Record<string, unknown>).status).toBe("success");
-		const highPowerRunId = (highPowerStarted?.details as Record<string, unknown>).runId as string;
-		expect(highPowerRunId).toBeTypeOf("string");
-		const highPowerTerminal = await pollUntilTerminal(extension, highPowerRunId, context, ["failed"]);
-		expect((highPowerTerminal.errorState as Record<string, unknown>).errorCode).toBe("laser_power_limit_exceeded");
+		expect((highPowerStarted?.details as Record<string, unknown>).errorCode).toBe("preflight_forbidden");
 
 		const lowClearanceSpec = createSinglePointSpec({ pointZUm: 100 });
 		const lowClearanceProposalId = await proposeRun(extension, lowClearanceSpec, context);
@@ -580,12 +666,6 @@ describe("experiment research real supervised single-point runtime", () => {
 			undefined,
 			context,
 		);
-		expect((lowClearanceStarted?.details as Record<string, unknown>).status).toBe("success");
-		const lowClearanceRunId = (lowClearanceStarted?.details as Record<string, unknown>).runId as string;
-		expect(lowClearanceRunId).toBeTypeOf("string");
-		const lowClearanceTerminal = await pollUntilTerminal(extension, lowClearanceRunId, context, ["failed"]);
-		expect((lowClearanceTerminal.errorState as Record<string, unknown>).errorCode).toBe(
-			"objective_clearance_violation",
-		);
+		expect((lowClearanceStarted?.details as Record<string, unknown>).errorCode).toBe("preflight_stage_anchor_invalid");
 	});
 });

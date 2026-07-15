@@ -5,6 +5,7 @@ import type {
 import { ExecutionUnitValidator } from "../schemas/execution-unit.ts";
 import type { CurrentPositionPlan, GridScanPlan, Point, PointListPlan, ProcedureSpec } from "../schemas/procedure-spec.ts";
 import { formatValidationErrors } from "../schemas/validation.ts";
+import { normalizeMotionCoordinateUm } from "../motion-range.ts";
 
 function formatUnitIndex(index: number): string {
 	return String(index).padStart(4, "0");
@@ -59,8 +60,9 @@ function buildGridPoints(plan: GridScanPlan): ExecutionUnitPoint[] {
 			points.push({
 				row,
 				col,
-				xUm: plan.grid.origin.xUm + col * plan.grid.pitchXUm,
-				yUm: plan.grid.origin.yUm + row * plan.grid.pitchYUm,
+				xUm: normalizeMotionCoordinateUm(plan.grid.origin.xUm + col * plan.grid.pitchXUm),
+				yUm: normalizeMotionCoordinateUm(plan.grid.origin.yUm + row * plan.grid.pitchYUm),
+				zUm: plan.grid.origin.zUm,
 			});
 		}
 	}
