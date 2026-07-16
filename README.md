@@ -76,22 +76,3 @@ On Windows:
 
 The run script launches the locally installed, pinned `pi` binary from this
 repository and changes cwd to the lab workspace before starting the agent.
-
-## Upgrade pi
-
-1. Pin the new exact `@earendil-works/pi-coding-agent` version in `package.json`.
-2. Run `npm install --package-lock-only --ignore-scripts`.
-3. Run `npm run check`, `npm test`, and `npm run smoke:mac`.
-4. Re-run a Windows lab-machine smoke before deploying to the Raman computer.
-
-## Product Boundary
-
-- `src/extensions/experiment-research` exposes semantic Raman planning and
-  runtime tools.
-- `src/extensions/guardrail` blocks pi tool access outside the lab workspace.
-- `src/drivers/raman-python` contains the Raman Python runtime bridge; setup
-  deploys a copy into workspace `lab-config/drivers/raman-python`.
-- `deploy/templates/lab-workspace` defines deployable workspace files.
-- Workspace `lab-config/` holds lab-local configuration; `lab-records/` holds
-  agent-generated intermediate outputs and experiment results.
-- `docs/design-ideas/core-ideas.md` remains the implementation guide.
