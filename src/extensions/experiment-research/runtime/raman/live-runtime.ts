@@ -1139,12 +1139,20 @@ export async function runLiveRamanUnit(
 		}
 
 		if (action.kind === "capture_frame") {
-			const frameResult = await runtime.frame.captureLatest({
-				action: "frame.capture_latest",
-				resourceId: frameProviderResourceId,
-				timeoutMs: 10_000,
-				artifactContext: actionArtifactContext(cwd, runId, unit, actionIndex, options.attempt),
-			});
+			const artifactContext = actionArtifactContext(cwd, runId, unit, actionIndex, options.attempt);
+			const frameResult = action.laserState === "off"
+				? await runtime.frame.captureLaserOff({
+						action: "frame.capture_laser_off",
+						resourceId: frameProviderResourceId,
+						timeoutMs: 10_000,
+						artifactContext,
+					})
+				: await runtime.frame.captureLatest({
+						action: "frame.capture_latest",
+						resourceId: frameProviderResourceId,
+						timeoutMs: 10_000,
+						artifactContext,
+					});
 			const frameResultArtifacts = scopeRuntimeArtifacts(cwd, runId, frameResult.artifacts, unit, actionIndex, options.attempt);
 			for (const artifact of frameResultArtifacts) {
 				persistArtifactRecord(cwd, runId, artifact);
@@ -1175,6 +1183,9 @@ export async function runLiveRamanUnit(
 				requireRamanFramePayload(frameResult.payload, "captured frame"),
 				options.attempt,
 				frameResultArtifacts.map((artifact) => artifact.artifactId),
+				`frame-${action.role ?? "observation"}-${String(actionIndex).padStart(4, "0")}`,
+				artifactContext.actionId,
+				`${action.role ?? "observation"} canonical Raman frame`,
 			);
 			persistArtifactRecord(cwd, runId, canonicalFrameArtifact);
 			artifactRefs.push(canonicalFrameArtifact);

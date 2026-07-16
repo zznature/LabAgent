@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
 import {
 	clearRamanLiveRuntime,
+	failedActionResult,
 	type RamanLiveRuntime,
 	registerRamanLiveRuntime,
 	successActionResult,
@@ -416,6 +417,114 @@ async function pollUntilTerminal(
 }
 
 describe("experiment research real supervised single-point runtime", () => {
+	it("continues a repeated single-point run after a unit failure when stopOnError is false", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const runAutofocus = runtime.autofocus.runSingle.bind(runtime.autofocus);
+		let autofocusCalls = 0;
+		runtime.autofocus.runSingle = async (action) => {
+			autofocusCalls += 1;
+			if (autofocusCalls === 2) {
+				return failedActionResult("Injected autofocus failure.", {
+					errorCode: "autofocus_runtime_error",
+					message: "Injected autofocus failure.",
+					retrySafe: false,
+					needsOperator: false,
+					safeToResume: true,
+				});
+			}
+			return runAutofocus(action);
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		spec.plan.points = Array.from({ length: 3 }, () => ({ xUm: 1000, yUm: 2000, zUm: 250 }));
+		spec.stoppingRules = { maxRuntimeMinutes: 20, maxUnits: 3, stopOnError: false };
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-continue-on-failure",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(autofocusCalls).toBe(3);
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 2, failedUnits: 1 }));
+		expect(terminalState.qualityState).toBe("completed_with_failures");
+		const observation = createRunRecords(cwd).readRun(runId);
+		expect(observation?.units.map((unit) => unit.status)).toEqual(["succeeded", "failed", "succeeded"]);
+	});
+
+	it("captures distinct laser-off pre-focus and post-focus frame artifacts in one attempt", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const captureLatest = runtime.frame.captureLatest.bind(runtime.frame);
+		let latestCaptureCalls = 0;
+		let laserOffCaptureCalls = 0;
+		runtime.frame.captureLatest = async (action) => {
+			latestCaptureCalls += 1;
+			return captureLatest(action);
+		};
+		runtime.frame.captureLaserOff = async (action) => {
+			laserOffCaptureCalls += 1;
+			const result = await captureLatest({ ...action, action: "frame.capture_latest" });
+			return {
+				...result,
+				payload: { ...result.payload, laserStateVerified: "off" },
+			};
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		spec.plan.perPoint = [
+			{ kind: "move_to_point" },
+			{ kind: "capture_frame", role: "pre_focus", laserState: "off" },
+			{ kind: "autofocus" },
+			{ kind: "capture_frame", role: "post_focus", laserState: "unchanged" },
+			{ kind: "acquire_spectrum" },
+		];
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-frame-roles",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(laserOffCaptureCalls).toBe(1);
+		expect(latestCaptureCalls).toBe(1);
+		const explicitFrames = createRunRecords(cwd).listArtifacts(runId).filter(
+			(artifact) => artifact.profile === "raman-frame" && !artifact.artifactId.includes("autofocus"),
+		);
+		expect(explicitFrames).toHaveLength(2);
+		expect(new Set(explicitFrames.map((artifact) => artifact.artifactId)).size).toBe(2);
+		expect(explicitFrames.map((artifact) => artifact.data?.laserState)).toEqual(
+			expect.arrayContaining(["off", "unknown"]),
+		);
+	});
+
 	it.each([
 		{ operation: "abort", toolName: "abort_run", terminalStatus: "aborted" },
 		{ operation: "pause", toolName: "pause_run", terminalStatus: "paused" },
@@ -542,11 +651,24 @@ describe("experiment research real supervised single-point runtime", () => {
 			context,
 		);
 		const runId = (started?.details as Record<string, unknown>).runId as string;
-		await pollUntilTerminal(extension, runId, context, ["failed"]);
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["failed"]);
 
 		const observation = createRunRecords(cwd).readRun(runId);
 		expect(observation?.units[0]?.status).toBe("failed");
 		expect(observation?.errorState?.errorCode).toBe("canonical_artifact_publication_failed");
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 0, failedUnits: 1 }));
+		expect((terminalState.artifactRefs as unknown[]).length).toBeGreaterThan(0);
+		expect(createRunRecords(cwd).listArtifacts(runId).some((artifact) => artifact.status === "failed")).toBe(true);
+		const summary = await extension.tools.get("summarize_run")?.execute(
+			"summarize-canonical-failure",
+			{ runId },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(summary?.content[0]).toEqual(expect.objectContaining({
+			text: expect.stringContaining("canonical_artifact_publication_failed"),
+		}));
 	});
 
 	it("rejects live supervised approval when no live runtime is registered", async () => {

@@ -16,6 +16,7 @@ Raman operating rules:
 - when template defaults are used, pass templateApplication metadata through validate_procedure_spec, run_preflight, and propose_run so the proposal explains inherited and overridden fields
 - fetch get_procedure_spec_template before manually drafting a Raman ProcedureSpec; adapt the canonical template instead of inventing schema fields
 - use resource bindings and autofocus ROI from get_lab_capabilities planningDefaults unless a matched workspace template or the user explicitly overrides them
+- when an experiment requires explicit microscope evidence around focus, use capture_frame.role to distinguish pre_focus, post_focus, and observation; use capture_frame.laserState = "off" only for the requested laser-off capture and do not infer laser-off from an ordinary frame
 - every live grid_scan origin must include xUm, yUm, and a fixed zUm; do not expand a grid into a point_list merely to supply Z
 - validate_procedure_spec and run_preflight come before propose_run
 - execute runs only through propose_run followed by approve_and_start_run

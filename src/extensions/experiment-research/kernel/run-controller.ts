@@ -6,6 +6,7 @@ import type {
 	RunState,
 	RuntimeError,
 } from "../schemas/index.ts";
+import { readArtifactRecords } from "../store/artifact-store.ts";
 import { appendRunEvent, type RunEvent } from "../store/event-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
 import {
@@ -370,11 +371,20 @@ function failActiveRun(
 		});
 	}
 	records.applyRunChange(activeRun.runId, { type: "run_failed", error: failure, timestamp: timestamp() });
+	const observedFailedUnits = records.readRun(activeRun.runId)?.progress.failedUnits ?? 0;
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "failed",
 		errorState: failure,
-		artifactRefs: current.artifactRefs.concat(resultArtifacts),
+		progress: {
+			...current.progress,
+			failedUnits: Math.max(current.progress.failedUnits ?? 0, observedFailedUnits),
+		},
+		artifactRefs: current.artifactRefs.concat(
+			resultArtifacts.filter(
+				(artifact) => !current.artifactRefs.some((existing) => existing.artifactId === artifact.artifactId),
+			),
+		),
 		updatedAt: timestamp(),
 		endedAt: timestamp(),
 	}));
@@ -400,7 +410,10 @@ function failUnexpectedRun(activeRun: ActiveRun, cause: unknown): void {
 	);
 	const activeUnit = activeRun.units.find((unit) => unit.unitId === activeUnitObservation?.unitId);
 	if (activeUnit) {
-		failActiveRun(activeRun, activeUnit, failure, []);
+		const attemptArtifacts = readArtifactRecords(activeRun.cwd, activeRun.runId)
+			.map((record) => record.artifact)
+			.filter((artifact) => artifact.metadata?.pointUnitId === activeUnit.unitId);
+		failActiveRun(activeRun, activeUnit, failure, attemptArtifacts);
 		return;
 	}
 	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, {

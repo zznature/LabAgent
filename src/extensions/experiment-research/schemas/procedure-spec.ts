@@ -30,7 +30,18 @@ export const GridPointSchema = Type.Object(
 export const SemanticStepSchema = Type.Union([
 	Type.Object({ kind: Type.Literal("move_to_point") }, { additionalProperties: false }),
 	Type.Object({ kind: Type.Literal("autofocus") }, { additionalProperties: false }),
-	Type.Object({ kind: Type.Literal("capture_frame") }, { additionalProperties: false }),
+	Type.Object(
+		{
+			kind: Type.Literal("capture_frame"),
+			role: Type.Optional(Type.Union([
+				Type.Literal("pre_focus"),
+				Type.Literal("post_focus"),
+				Type.Literal("observation"),
+			])),
+			laserState: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("unchanged")])),
+		},
+		{ additionalProperties: false },
+	),
 	Type.Object({ kind: Type.Literal("acquire_spectrum") }, { additionalProperties: false }),
 ]);
 

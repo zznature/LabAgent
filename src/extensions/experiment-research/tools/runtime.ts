@@ -119,7 +119,9 @@ function runSummaryText(runState: RunState): string {
 		? `, pause reason: ${runState.pauseReason}`
 		: runState.abortReason
 			? `, abort reason: ${runState.abortReason}`
-			: "";
+			: runState.errorState
+				? `, error ${runState.errorState.errorCode}: ${runState.errorState.message}`
+				: "";
 	const retryStats = summarizeRetries(runState);
 	const retryText = `, ${retryStats.retriedPoints} retried, ${retryStats.recoveredPoints} recovered, ${retryStats.finalFailedPoints} final failures`;
 	return `Run ${runState.runId} is ${runState.status}: ${progressSummary(runState)}${retryText}, ${artifactText}${reasonText}.`;

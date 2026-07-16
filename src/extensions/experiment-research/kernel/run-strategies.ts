@@ -327,7 +327,13 @@ export async function executeLinearRun(
 		}
 
 		if (result.status === "failed") {
-			context.fail(unit, errorForResult(result), resultArtifacts);
+			const failure = errorForResult(result);
+			if (activeRun.spec.stoppingRules?.stopOnError === false && failure.scope !== "run") {
+				recordAttempt(context, unit, attempt, "failed", resultArtifacts, failure, true);
+				context.recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt);
+				continue;
+			}
+			context.fail(unit, failure, resultArtifacts);
 			return;
 		}
 
