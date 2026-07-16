@@ -72,12 +72,14 @@ class FixedRangeScanner:
             scored_frames.append((frame, self.strategy.score(frame.image, frame_roi)))
         scores = [score for _, score in scored_frames]
         score = float(statistics.median(scores))
-        self._discard_non_representative_frames(captured, scored_frames, score)
+        representative_frame = min(scored_frames, key=lambda item: abs(item[1] - score))[0]
+        self._discard_non_representative_frames(captured, representative_frame)
 
         return ScoredZPoint(
             target_z_um=float(target_z_um),
             actual_z_um=float(actual_z_um),
             score=score,
+            representative_frame_path=representative_frame.path,
         )
 
     def move_to_z(self, z_um: float) -> float:
@@ -118,12 +120,10 @@ class FixedRangeScanner:
     def _discard_non_representative_frames(
         self,
         captured: list[Frame],
-        scored_frames: list[tuple[Frame, float]],
-        median_score: float,
+        representative_frame: Frame,
     ) -> None:
-        if not captured or not scored_frames:
+        if not captured:
             return
-        representative_frame = min(scored_frames, key=lambda item: abs(item[1] - median_score))[0]
         discard_paths = [
             frame.path
             for frame in captured

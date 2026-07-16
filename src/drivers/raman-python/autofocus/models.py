@@ -217,6 +217,7 @@ class ScoredZPoint:
     target_z_um: float
     actual_z_um: float
     score: float
+    representative_frame_path: str | None = None
 
 
 @dataclass(frozen=True)

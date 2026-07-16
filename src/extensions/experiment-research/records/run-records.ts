@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import type { RuntimeError } from "../schemas/index.ts";
 import {
 	operatorArtifactIndexPath,
 	operatorArtifactRoot,
@@ -52,6 +53,7 @@ export interface RunObservationSnapshot {
 	};
 	units: UnitObservation[];
 	heartbeatAt?: string;
+	errorState?: RuntimeError;
 	startedAt: string;
 	updatedAt: string;
 	endedAt?: string;
@@ -61,8 +63,9 @@ export type RunObservationChange =
 	| { type: "run_started"; timestamp: string }
 	| { type: "run_paused"; timestamp: string }
 	| { type: "run_aborted"; timestamp: string }
-	| { type: "run_failed"; timestamp: string }
+	| { type: "run_failed"; error: RuntimeError; timestamp: string }
 	| { type: "run_completed"; timestamp: string }
+	| { type: "heartbeat_updated"; timestamp: string }
 	| { type: "attempt_started"; unitId: string; attemptId: string; timestamp: string }
 	| { type: "attempt_failed"; unitId: string; attemptId: string; willRetry: boolean; timestamp: string }
 	| {
@@ -303,13 +306,17 @@ function canonicalRepresentationCandidates(input: PublishRamanSpectrumInput | Pu
 	}
 	const data = input.canonicalData;
 	if (input.profile === "raman-autofocus") {
+		const frameArtifactIds = typeof data.frameArtifactIds === "object" && data.frameArtifactIds !== null
+			? data.frameArtifactIds as Record<string, unknown>
+			: {};
 		if (
 			data.schemaVersion !== 1 || typeof data.algorithmVersion !== "string" || !Array.isArray(data.scanPoints) ||
 			typeof data.peakEstimate !== "object" || data.peakEstimate === null ||
 			typeof data.selectedFocus !== "object" || data.selectedFocus === null ||
 			typeof data.finalVerification !== "object" || data.finalVerification === null ||
 			typeof data.parameters !== "object" || data.parameters === null ||
-			typeof data.frameArtifactIds !== "object" || data.frameArtifactIds === null
+			typeof frameArtifactIds.preFocus !== "string" || frameArtifactIds.preFocus.length === 0 ||
+			typeof frameArtifactIds.acceptedFocus !== "string" || frameArtifactIds.acceptedFocus.length === 0
 		) {
 			throw new Error("raman-autofocus canonical data does not match profile v1");
 		}
@@ -337,8 +344,22 @@ function validateFrameCandidates(input: PublishArtifactInput, candidates: Artifa
 	}
 	const display = candidates.filter((candidate) => candidate.role === "display" && candidate.mediaType === "image/png");
 	const thumbnails = candidates.filter((candidate) => candidate.role === "thumbnail" && candidate.mediaType === "image/webp");
+	const data = input.descriptorData;
+	const descriptorSourceArtifactIds = Array.isArray(data?.sourceArtifactIds) ? data.sourceArtifactIds : [];
 	if (input.layer !== "canonical" || input.sourceArtifactIds.length === 0 || candidates.length !== 2 || display.length !== 1 || thumbnails.length !== 1) {
 		throw new Error("raman-frame requires canonical PNG display and WebP thumbnail representations with source provenance");
+	}
+	if (
+		!data || typeof data.capturedAt !== "string" || Number.isNaN(Date.parse(data.capturedAt)) ||
+		typeof data.width !== "number" || !Number.isInteger(data.width) || data.width <= 0 ||
+		typeof data.height !== "number" || !Number.isInteger(data.height) || data.height <= 0 ||
+		typeof data.sourceBitDepth !== "number" || !Number.isInteger(data.sourceBitDepth) || data.sourceBitDepth <= 0 ||
+		typeof data.colorModel !== "string" || data.colorModel.length === 0 ||
+		descriptorSourceArtifactIds.length !== input.sourceArtifactIds.length ||
+		!input.sourceArtifactIds.every((artifactId, index) => descriptorSourceArtifactIds[index] === artifactId) ||
+		(data.laserState !== "on" && data.laserState !== "off" && data.laserState !== "unknown")
+	) {
+		throw new Error("raman-frame descriptor data does not match profile v1");
 	}
 }
 
@@ -485,15 +506,22 @@ export function createRunRecords(cwd: string): RunRecords {
 					throughSequence: sequence,
 					status: "aborted",
 					units: current.units.map((unit) =>
-						unit.status === "pending" || unit.status === "waiting_retry"
-							? { ...unit, status: "cancelled", endedAt: change.timestamp }
+						unit.status === "pending" || unit.status === "running" || unit.status === "waiting_retry"
+							? { ...unit, status: "cancelled", activeAttemptId: undefined, endedAt: change.timestamp }
 							: unit,
 					),
 					updatedAt: change.timestamp,
 					endedAt: change.timestamp,
 				};
 			} else if (change.type === "run_failed") {
-				next = { ...current, throughSequence: sequence, status: "failed", updatedAt: change.timestamp, endedAt: change.timestamp };
+				next = {
+					...current,
+					throughSequence: sequence,
+					status: "failed",
+					errorState: change.error,
+					updatedAt: change.timestamp,
+					endedAt: change.timestamp,
+				};
 			} else if (change.type === "run_completed") {
 				next = {
 					...current,
@@ -506,6 +534,13 @@ export function createRunRecords(cwd: string): RunRecords {
 					),
 					updatedAt: change.timestamp,
 					endedAt: change.timestamp,
+				};
+			} else if (change.type === "heartbeat_updated") {
+				next = {
+					...current,
+					throughSequence: sequence,
+					heartbeatAt: change.timestamp,
+					updatedAt: change.timestamp,
 				};
 			} else if (change.type === "attempt_started") {
 				next = {
@@ -748,6 +783,19 @@ export function createRunRecords(cwd: string): RunRecords {
 							source.scope.unitId !== scope.unitId || source.scope.attemptId !== scope.attemptId
 						) {
 							throw new Error(`canonical source artifact must be complete in the same attempt: ${sourceArtifactId}`);
+						}
+					}
+				}
+				if (scope.kind === "run" && input.profile === "raman-autofocus" && input.canonicalData !== undefined) {
+					const frameArtifactIds = input.canonicalData.frameArtifactIds as Record<string, unknown> | undefined;
+					for (const role of ["preFocus", "acceptedFocus"] as const) {
+						const artifactId = frameArtifactIds?.[role];
+						const frame = typeof artifactId === "string" ? this.readArtifact(scope.runId, artifactId) : undefined;
+						if (
+							!frame || frame.status !== "complete" || frame.profile !== "raman-frame" || frame.scope.kind !== "run" ||
+							frame.scope.unitId !== scope.unitId || frame.scope.attemptId !== scope.attemptId
+						) {
+							throw new Error(`raman-autofocus ${role} must reference a complete raman-frame in the same attempt`);
 						}
 					}
 				}

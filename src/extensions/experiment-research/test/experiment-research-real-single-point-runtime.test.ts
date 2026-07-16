@@ -178,6 +178,12 @@ function createLiveRuntime(
 		return path;
 	}
 	const autofocusCurvePath = artifactPath("autofocus-curve.json", "artifacts/live/autofocus-curve.json");
+	const preFocusFramePath = artifactPath("autofocus-pre-focus.tif", "artifacts/live/autofocus-pre-focus.tif");
+	const preFocusDisplayPath = artifactPath("autofocus-pre-focus.png", "artifacts/live/autofocus-pre-focus.png");
+	const preFocusThumbnailPath = artifactPath("autofocus-pre-focus.webp", "artifacts/live/autofocus-pre-focus.webp");
+	const acceptedFocusFramePath = artifactPath("autofocus-accepted-focus.tif", "artifacts/live/autofocus-accepted-focus.tif");
+	const acceptedFocusDisplayPath = artifactPath("autofocus-accepted-focus.png", "artifacts/live/autofocus-accepted-focus.png");
+	const acceptedFocusThumbnailPath = artifactPath("autofocus-accepted-focus.webp", "artifacts/live/autofocus-accepted-focus.webp");
 	const framePath = artifactPath("frame.tif", "artifacts/live/frame.tif");
 	const canonicalDisplayPath = artifactPath("frame.png", "artifacts/live/frame.png");
 	const canonicalThumbnailPath = artifactPath("thumbnail.webp", "artifacts/live/thumbnail.webp");
@@ -238,6 +244,30 @@ function createLiveRuntime(
 						zBestUm: 260,
 						confidence,
 						finalScore: 1.4,
+						autofocusFrames: {
+							preFocus: {
+								sourcePath: preFocusFramePath,
+								canonicalDisplayPath: preFocusDisplayPath,
+								canonicalThumbnailPath: preFocusThumbnailPath,
+								capturedAt: "2026-07-15T10:00:01.000Z",
+								width: 512,
+								height: 512,
+								bitDepth: 16,
+								colorModel: "grayscale",
+								laserStateVerified: "unknown",
+							},
+							acceptedFocus: {
+								sourcePath: acceptedFocusFramePath,
+								canonicalDisplayPath: acceptedFocusDisplayPath,
+								canonicalThumbnailPath: acceptedFocusThumbnailPath,
+								capturedAt: "2026-07-15T10:00:02.000Z",
+								width: 512,
+								height: 512,
+								bitDepth: 16,
+								colorModel: "grayscale",
+								laserStateVerified: "unknown",
+							},
+						},
 					},
 					[
 						{
@@ -245,6 +275,18 @@ function createLiveRuntime(
 							kind: "autofocus",
 							path: autofocusCurvePath,
 							label: "Live autofocus curve",
+						},
+						{
+							artifactId: "autofocus-pre-focus-frame",
+							kind: "autofocus-pre-focus-frame",
+							path: preFocusFramePath,
+							label: "Autofocus pre-focus frame",
+						},
+						{
+							artifactId: "autofocus-accepted-focus-frame",
+							kind: "autofocus-accepted-focus-frame",
+							path: acceptedFocusFramePath,
+							label: "Autofocus accepted-focus frame",
 						},
 					],
 				);
@@ -275,6 +317,7 @@ function createLiveRuntime(
 						height: 512,
 						bitDepth: 16,
 						colorModel: "grayscale",
+						capturedAt: "2026-07-15T10:00:03.000Z",
 					},
 					[
 						{
@@ -373,6 +416,139 @@ async function pollUntilTerminal(
 }
 
 describe("experiment research real supervised single-point runtime", () => {
+	it.each([
+		{ operation: "abort", toolName: "abort_run", terminalStatus: "aborted" },
+		{ operation: "pause", toolName: "pause_run", terminalStatus: "paused" },
+	])("stops before the next hardware action when $operation is requested during autofocus", async ({ toolName, terminalStatus }) => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const originalAutofocus = runtime.autofocus.runSingle.bind(runtime.autofocus);
+		const originalFrameCapture = runtime.frame.captureLatest.bind(runtime.frame);
+		const originalSpectrumAcquisition = runtime.spectrometer.acquireSpectrum.bind(runtime.spectrometer);
+		let autofocusStarted!: () => void;
+		let releaseAutofocus!: () => void;
+		const autofocusStartedPromise = new Promise<void>((resolve) => {
+			autofocusStarted = resolve;
+		});
+		const autofocusReleasePromise = new Promise<void>((resolve) => {
+			releaseAutofocus = resolve;
+		});
+		let frameCaptureCalls = 0;
+		let spectrumAcquisitionCalls = 0;
+		runtime.autofocus.runSingle = async (action) => {
+			autofocusStarted();
+			await autofocusReleasePromise;
+			return originalAutofocus(action);
+		};
+		runtime.frame.captureLatest = async (action) => {
+			frameCaptureCalls += 1;
+			return originalFrameCapture(action);
+		};
+		runtime.spectrometer.acquireSpectrum = async (action) => {
+			spectrumAcquisitionCalls += 1;
+			return originalSpectrumAcquisition(action);
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			`approve-live-${toolName}-checkpoint`,
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		await autofocusStartedPromise;
+		await extension.tools.get(toolName)?.execute(`${toolName}-live`, { runId }, undefined, undefined, context);
+		releaseAutofocus();
+
+		const terminalState = await pollUntilTerminal(extension, runId, context, [terminalStatus]);
+		expect(terminalState.status).toBe(terminalStatus);
+		expect(frameCaptureCalls).toBe(0);
+		expect(spectrumAcquisitionCalls).toBe(0);
+	});
+
+	it("fails the active attempt when required autofocus evidence is malformed", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const originalAutofocus = runtime.autofocus.runSingle.bind(runtime.autofocus);
+		runtime.autofocus.runSingle = async (action) => {
+			const result = await originalAutofocus(action);
+			return { ...result, payload: { ...result.payload, autofocusFrames: undefined } };
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-malformed-autofocus",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		await pollUntilTerminal(extension, runId, context, ["failed"]);
+
+		const observation = createRunRecords(cwd).readRun(runId);
+		expect(observation?.units[0]?.status).toBe("failed");
+		expect(observation?.units[0]?.activeAttemptId).toBeUndefined();
+		expect(observation?.errorState?.errorCode).toBe("live_runtime_error");
+	});
+
+	it("fails closed when a required canonical representation cannot be published", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const originalFrameCapture = runtime.frame.captureLatest.bind(runtime.frame);
+		runtime.frame.captureLatest = async (action) => {
+			const result = await originalFrameCapture(action);
+			return {
+				...result,
+				payload: { ...result.payload, canonicalDisplayPath: join(cwd, "missing-canonical-frame.png") },
+			};
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-canonical-failure",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		await pollUntilTerminal(extension, runId, context, ["failed"]);
+
+		const observation = createRunRecords(cwd).readRun(runId);
+		expect(observation?.units[0]?.status).toBe("failed");
+		expect(observation?.errorState?.errorCode).toBe("canonical_artifact_publication_failed");
+	});
+
 	it("rejects live supervised approval when no live runtime is registered", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
@@ -461,6 +637,21 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(formalArtifacts.length).toBeGreaterThan(0);
 		expect(formalArtifacts.map((artifact) => artifact.profile)).toEqual(
 			expect.arrayContaining(["raman-frame", "raman-autofocus", "raman-spectrum", "raman-evaluation"]),
+		);
+		const canonicalFrames = formalArtifacts.filter(
+			(artifact) => artifact.profile === "raman-frame" && artifact.status === "complete",
+		);
+		expect(canonicalFrames).toHaveLength(3);
+		expect(canonicalFrames.every((artifact) => typeof artifact.data?.capturedAt === "string")).toBe(true);
+		const autofocus = formalArtifacts.find(
+			(artifact) => artifact.profile === "raman-autofocus" && artifact.status === "complete",
+		);
+		expect(autofocus).toBeDefined();
+		const autofocusData = JSON.parse(
+			createRunRecords(cwd).readRepresentation(runId, autofocus!.artifactId, "data").bytes.toString("utf-8"),
+		) as { frameArtifactIds: { preFocus: string; acceptedFocus: string } };
+		expect(new Set([autofocusData.frameArtifactIds.preFocus, autofocusData.frameArtifactIds.acceptedFocus])).toEqual(
+			new Set(canonicalFrames.map((artifact) => artifact.artifactId).filter((artifactId) => artifactId.includes("autofocus"))),
 		);
 		const observationUnit = createRunRecords(cwd).readRun(runId)?.units[0];
 		const acceptedCanonicalIds = formalArtifacts

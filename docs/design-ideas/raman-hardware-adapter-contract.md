@@ -282,6 +282,7 @@ MVP 不必一开始拆到 `begin / poll / collect`。
 - `coarseCurveArtifact?`
 - `fineCurveArtifact?`
 - `message`
+- pre-focus 与 accepted-focus 代表帧的 source path、PNG/WebP staging representations 和 capture time
 
 #### XY Correction（MVP 不实现，reference-only）
 
@@ -499,6 +500,7 @@ domain:
 - `autofocus.params.zStartUm/zEndUm` 表示实验室优化过的固定 Z range autofocus；MVP live daemon 不再支持旧的 `coarseRangeUm/fineRangeUm` coarse/fine path。
 - fixed-range autofocus 当前固定使用 10 点扫描；`pointCount` 可表达调用意图，但 daemon 会归一为有效 10 点，并在返回 payload 的 `params.effectivePointCount` / `params.effectiveSpacingUm` 中记录实际值。
 - `warmupFramesPerZ` 表示每个 Z 采样点丢弃的预热帧数；`framesPerZ` 表示参与评分的帧数。file-backed frame provider 会尽量只保留代表评分帧，减少 bridge 目录堆积。
+- fixed-range autofocus 保留首个 scan sample 的代表帧作为 pre-focus evidence，并保留最终验证 sample 的代表帧作为 accepted-focus evidence；daemon 返回两者的 source path、PNG/WebP staging paths、尺寸、bit depth、color model 与基于 source file mtime 的 `capturedAt`。
 - live run 与 operator autofocus 的默认 action timeout 为 150s；daemon 传输层会额外保留短 guard window，用于让 Python 侧返回结构化超时/错误。
 
 ## 9. 预检与维护工具如何接 Raman
@@ -584,6 +586,8 @@ Runtime 再将 source evidence 规范化为四种 canonical profiles：
 
 - daemon/bridge 目录只作 staging；run action request 使用 `artifactContext = { runId, unitId, attemptId, actionId, stagingDir }`，但 daemon 不持久化这些 workflow IDs，也不能根据最近一次 stage move 推断正式 artifact scope
 - runtime 通过 Run Records Module 归档、校验并登记正式 artifacts
+- `raman-frame` 缺少合法 `capturedAt`、尺寸、source bit depth、color model、source provenance 或 verified laser state 时 fail closed
+- `raman-autofocus` 只有在 pre-focus / accepted-focus 都已发布为同一 attempt 下的 complete canonical `raman-frame` 后才能 complete
 - spectrum plot 由前端从 canonical spectrum JSON 绘制，不是权威 canonical result
 - requested laser state 不是 verified state；worker 未返回关闭验证证据时，不得把 laser-off frame 标为已验证 `off`
 - 不能靠 message 文本或裸 path 告诉上层“文件大概在某个目录里”

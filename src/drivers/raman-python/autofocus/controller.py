@@ -306,15 +306,17 @@ class AutofocusController:
             "selectedSource": result.selection_source,
             "selectedZUm": selected.actual_z_um,
             "selectedScore": selected.score,
+            "preFocusFramePath": result.points[0].representative_frame_path or "",
+            "acceptedFocusFramePath": result.final_verification.representative_frame_path or "",
             "predictionVerificationZUm": (
                 result.prediction_verification.actual_z_um
                 if result.prediction_verification is not None
-                else float("nan")
+                else ""
             ),
             "predictionVerificationScore": (
                 result.prediction_verification.score
                 if result.prediction_verification is not None
-                else float("nan")
+                else ""
             ),
         }
 

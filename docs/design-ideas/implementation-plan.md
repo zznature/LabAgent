@@ -686,7 +686,7 @@ docs freeze
 
 - [x] Phase A：simulation Run Records Module vertical slice
 - [x] Phase B：atomic artifact publication、descriptor、index、SHA-256 与 interrupted recovery
-- [ ] Phase C：Raman single-point canonical profiles 与 verified laser/scientific-axis semantics（主体已实现；autofocus 的 pre-focus / accepted-focus canonical frame links 尚待 driver evidence 接入）
+- [ ] Phase C：Raman single-point canonical profiles 与 verified laser/scientific-axis semantics。已完成 autofocus pre-focus / accepted-focus canonical frame links、frame capture time/source metadata 与 canonical publication fail-closed；typed source candidates 以及 legacy scattered writers 的替换仍未完成
 - [x] Phase D：mapping retry/resume 在同一 runId 下保留 immutable attempts，并显式选择 accepted attempt
 - [x] Phase E：backend read Adapter 与独立 operator operation artifact scopes
 - [ ] 前端测试 consumer 不读取 filesystem、不解析文件名、不按 artifact count 推断 progress

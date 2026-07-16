@@ -300,6 +300,40 @@ describe("experiment research simulation runtime", () => {
 		expect(abortedState.status).toBe("aborted");
 	});
 
+	it("honors an abort requested while the final unit is executing", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+
+		const runId = await proposeAndStart(extension, createProcedureSpec(1), context, { perUnitDelayMs: 50 });
+		await extension.tools.get("abort_run")?.execute("abort-final", { runId }, undefined, undefined, context);
+
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["aborted"]);
+		const observation = createRunRecords(cwd).readRun(runId);
+		expect(terminalState.status).toBe("aborted");
+		expect((terminalState.progress as Record<string, unknown>).completedUnits).toBe(0);
+		expect(observation?.status).toBe("aborted");
+		expect(observation?.units[0]?.status).toBe("cancelled");
+		expect(observation?.units[0]?.acceptedAttemptId).toBeUndefined();
+		expect(observation?.units[0]?.activeAttemptId).toBeUndefined();
+	});
+
+	it("keeps the observation heartbeat alive during a long runtime action", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+
+		const runId = await proposeAndStart(extension, createProcedureSpec(1), context, { perUnitDelayMs: 1_200 });
+		await new Promise((resolve) => setTimeout(resolve, 1_050));
+		const heartbeatEvents = createRunRecords(cwd).readEvents(runId, 0).filter(
+			(event) => event.change.type === "heartbeat_updated",
+		);
+		expect(heartbeatEvents.length).toBeGreaterThanOrEqual(3);
+		await pollUntilTerminal(extension, runId, context, ["completed"]);
+	});
+
 	it("treats simulated low-confidence autofocus as a quality signal while preserving hard failures", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);

@@ -10,6 +10,7 @@ import { appendRunEvent, type RunEvent } from "../store/event-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
 import {
 	getRamanLiveRuntime,
+	RamanCanonicalPublicationError,
 	runLiveRamanUnit,
 	type LiveRamanUnitOptions,
 	type LiveRamanUnitResult,
@@ -48,7 +49,7 @@ export interface ActiveRun {
 export interface RunExecutionContext {
 	activeRun: ActiveRun;
 	start(): void;
-	abortAt(unit: ExecutionUnit): void;
+	abortAt(unit: ExecutionUnit, resultArtifacts?: RunState["artifactRefs"]): void;
 	deadlineExceeded(): boolean;
 	failDeadline(unit: ExecutionUnit, artifacts?: RunState["artifactRefs"]): void;
 	markUnitStarted(unit: ExecutionUnit, attempt?: UnitAttemptContext): RunState;
@@ -75,6 +76,7 @@ const activeRuns = new Map<string, ActiveRun>();
 const pausedRuns = new Map<string, ActiveRun>();
 
 const DEFAULT_MAPPING_MAX_CONSECUTIVE_FAILURES = 3;
+const RUN_HEARTBEAT_INTERVAL_MS = 1_000;
 
 function timestamp(): string {
 	return new Date().toISOString();
@@ -93,6 +95,22 @@ function deadlineAtMs(spec: ProcedureSpec): number | undefined {
 
 function appendEvent(cwd: string, event: RunEvent): void {
 	appendRunEvent(cwd, event);
+}
+
+function recordHeartbeat(cwd: string, runId: string): string {
+	const heartbeatAt = timestamp();
+	createRunRecords(cwd).applyRunChange(runId, { type: "heartbeat_updated", timestamp: heartbeatAt });
+	return heartbeatAt;
+}
+
+function refreshRunHeartbeat(activeRun: ActiveRun): string {
+	const heartbeatAt = recordHeartbeat(activeRun.cwd, activeRun.runId);
+	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
+		...current,
+		heartbeatAt,
+		updatedAt: heartbeatAt,
+	}));
+	return heartbeatAt;
 }
 
 function isParameterSearchRun(spec: ProcedureSpec): boolean {
@@ -152,16 +170,58 @@ async function executeUnit(
 	currentState: RunState,
 	options?: LiveRamanUnitOptions,
 ): Promise<ManagedUnitResult> {
-	if (activeRun.mode === "simulation") {
-		return runSimulationUnit(activeRun.cwd, activeRun.runId, unit, activeRun.controls ?? {}, currentState, options?.attempt);
+	let heartbeatError: unknown;
+	const heartbeatTimer = setInterval(() => {
+		try {
+			if (createRunRecords(activeRun.cwd).readRun(activeRun.runId)?.status !== "running") {
+				return;
+			}
+			refreshRunHeartbeat(activeRun);
+		} catch (cause) {
+			heartbeatError = cause;
+			clearInterval(heartbeatTimer);
+		}
+	}, RUN_HEARTBEAT_INTERVAL_MS);
+	heartbeatTimer.unref();
+	try {
+		let result: ManagedUnitResult;
+		if (activeRun.mode === "simulation") {
+			result = await runSimulationUnit(
+				activeRun.cwd,
+				activeRun.runId,
+				unit,
+				activeRun.controls ?? {},
+				currentState,
+				options?.attempt,
+			);
+		} else {
+			const runtime = getRamanLiveRuntime(activeRun.cwd);
+			if (!runtime) {
+				throw new Error(`live Raman runtime not registered for cwd ${activeRun.cwd}`);
+			}
+			result = await runLiveRamanUnit(activeRun.cwd, activeRun.runId, unit, activeRun.spec, runtime, currentState, {
+				...options,
+				checkpoint: () => {
+					refreshRunHeartbeat(activeRun);
+					if (activeRun.abortRequested) {
+						return "abort";
+					}
+					if (activeRun.pauseRequested) {
+						return "pause";
+					}
+					return activeRun.deadlineAtMs !== undefined && Date.now() >= activeRun.deadlineAtMs
+						? "deadline"
+						: undefined;
+				},
+			});
+		}
+		if (heartbeatError !== undefined) {
+			throw heartbeatError;
+		}
+		return result;
+	} finally {
+		clearInterval(heartbeatTimer);
 	}
-
-	const runtime = getRamanLiveRuntime(activeRun.cwd);
-	if (!runtime) {
-		throw new Error(`live Raman runtime not registered for cwd ${activeRun.cwd}`);
-	}
-
-	return runLiveRamanUnit(activeRun.cwd, activeRun.runId, unit, activeRun.spec, runtime, currentState, options);
 }
 
 function appendRunStartedEvent(activeRun: ActiveRun): void {
@@ -309,7 +369,7 @@ function failActiveRun(
 			timestamp: timestamp(),
 		});
 	}
-	records.applyRunChange(activeRun.runId, { type: "run_failed", timestamp: timestamp() });
+	records.applyRunChange(activeRun.runId, { type: "run_failed", error: failure, timestamp: timestamp() });
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "failed",
@@ -319,6 +379,42 @@ function failActiveRun(
 		endedAt: timestamp(),
 	}));
 	appendUnitFailedEvent(activeRun, unit, failure, resultArtifacts);
+	activeRuns.delete(activeRun.runId);
+	pausedRuns.delete(activeRun.runId);
+}
+
+function failUnexpectedRun(activeRun: ActiveRun, cause: unknown): void {
+	const failure: RuntimeError = cause instanceof RamanCanonicalPublicationError
+		? cause.runtimeError
+		: {
+				errorCode: activeRun.mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error",
+				message: cause instanceof Error ? cause.message : String(cause),
+				retrySafe: false,
+				needsOperator: true,
+				safeToResume: false,
+				scope: "run",
+			};
+	const observation = createRunRecords(activeRun.cwd).readRun(activeRun.runId);
+	const activeUnitObservation = observation?.units.find(
+		(unit) => unit.status === "running" && unit.activeAttemptId !== undefined,
+	);
+	const activeUnit = activeRun.units.find((unit) => unit.unitId === activeUnitObservation?.unitId);
+	if (activeUnit) {
+		failActiveRun(activeRun, activeUnit, failure, []);
+		return;
+	}
+	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, {
+		type: "run_failed",
+		error: failure,
+		timestamp: timestamp(),
+	});
+	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
+		...current,
+		status: "failed",
+		errorState: failure,
+		updatedAt: timestamp(),
+		endedAt: timestamp(),
+	}));
 	activeRuns.delete(activeRun.runId);
 	pausedRuns.delete(activeRun.runId);
 }
@@ -368,6 +464,7 @@ function applyCompletedProgress(
 		canonicalArtifactIds,
 		timestamp: timestamp(),
 	});
+	const heartbeatAt = recordHeartbeat(activeRun.cwd, activeRun.runId);
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
@@ -378,8 +475,8 @@ function applyCompletedProgress(
 		},
 		currentUnit: { unitId: unit.unitId, index: unit.index },
 		artifactRefs: current.artifactRefs.concat(resultArtifacts),
-		heartbeatAt: timestamp(),
-		updatedAt: timestamp(),
+		heartbeatAt,
+		updatedAt: heartbeatAt,
 	}));
 	appendUnitCompletedEvent(activeRun, unit, resultArtifacts, additionalPayload, attempt);
 }
@@ -391,6 +488,7 @@ function applySkippedFailureProgress(
 	resultArtifacts: RunState["artifactRefs"],
 	attempt?: UnitAttemptContext,
 ): void {
+	const heartbeatAt = recordHeartbeat(activeRun.cwd, activeRun.runId);
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
@@ -400,8 +498,8 @@ function applySkippedFailureProgress(
 		},
 		currentUnit: { unitId: unit.unitId, index: unit.index },
 		artifactRefs: current.artifactRefs.concat(resultArtifacts),
-		heartbeatAt: timestamp(),
-		updatedAt: timestamp(),
+		heartbeatAt,
+		updatedAt: heartbeatAt,
 	}));
 	appendUnitFailedEvent(activeRun, unit, failure, resultArtifacts, attempt);
 }
@@ -421,21 +519,27 @@ function singlePointOptions(activeRun: ActiveRun): LiveRamanUnitOptions | undefi
 
 function startActiveRun(activeRun: ActiveRun): void {
 	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, { type: "run_started", timestamp: timestamp() });
+	const heartbeatAt = recordHeartbeat(activeRun.cwd, activeRun.runId);
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
-		updatedAt: timestamp(),
-		heartbeatAt: timestamp(),
+		updatedAt: heartbeatAt,
+		heartbeatAt,
 	}));
 	appendRunStartedEvent(activeRun);
 }
 
-function abortActiveRun(activeRun: ActiveRun, unit: ExecutionUnit): void {
+function abortActiveRun(
+	activeRun: ActiveRun,
+	unit: ExecutionUnit,
+	resultArtifacts: RunState["artifactRefs"] = [],
+): void {
 	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, { type: "run_aborted", timestamp: timestamp() });
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "aborted",
 		abortReason: "operator_requested",
+		artifactRefs: current.artifactRefs.concat(resultArtifacts),
 		updatedAt: timestamp(),
 		endedAt: timestamp(),
 	}));
@@ -445,7 +549,11 @@ function abortActiveRun(activeRun: ActiveRun, unit: ExecutionUnit): void {
 		experimentId: activeRun.spec.experimentId,
 		eventType: "run_aborted",
 		timestamp: timestamp(),
-		payload: { unitId: unit.unitId, index: unit.index },
+		payload: {
+			unitId: unit.unitId,
+			index: unit.index,
+			artifacts: resultArtifacts.map((artifact) => artifact.artifactId),
+		},
 	});
 	activeRuns.delete(activeRun.runId);
 	pausedRuns.delete(activeRun.runId);
@@ -459,12 +567,13 @@ function markActiveUnitStarted(activeRun: ActiveRun, unit: ExecutionUnit, attemp
 		attemptId: observationAttemptId(attempt),
 		timestamp: timestamp(),
 	});
+	const heartbeatAt = recordHeartbeat(activeRun.cwd, activeRun.runId);
 	return updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
 		status: "running",
 		currentUnit: { unitId: unit.unitId, index: unit.index },
-		heartbeatAt: timestamp(),
-		updatedAt: timestamp(),
+		heartbeatAt,
+		updatedAt: heartbeatAt,
 	}));
 }
 
@@ -474,8 +583,8 @@ function createRunExecutionContext(activeRun: ActiveRun): RunExecutionContext {
 		start() {
 			startActiveRun(activeRun);
 		},
-		abortAt(unit) {
-			abortActiveRun(activeRun, unit);
+		abortAt(unit, resultArtifacts) {
+			abortActiveRun(activeRun, unit, resultArtifacts);
 		},
 		deadlineExceeded() {
 			return activeRun.deadlineAtMs !== undefined && Date.now() >= activeRun.deadlineAtMs;
@@ -568,23 +677,8 @@ function startRun(activeRun: ActiveRun): RunState {
 		units: activeRun.units.map((unit) => ({ unitId: unit.unitId, index: unit.index, point: unit.point })),
 	});
 	const queuedState = setRunState(activeRun.cwd, createBaseRunState(activeRun.runId, activeRun.spec, activeRun.units));
-	activeRun.promise = executeManagedRun(activeRun).catch((error) => {
-		createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, { type: "run_failed", timestamp: timestamp() });
-		updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
-			...current,
-			status: "failed",
-			errorState: {
-				errorCode: activeRun.mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error",
-				message: error instanceof Error ? error.message : String(error),
-				retrySafe: false,
-				needsOperator: true,
-				safeToResume: false,
-				scope: "run",
-			},
-			updatedAt: timestamp(),
-			endedAt: timestamp(),
-		}));
-		activeRuns.delete(activeRun.runId);
+	activeRun.promise = executeManagedRun(activeRun).catch((cause) => {
+		failUnexpectedRun(activeRun, cause);
 	});
 	activeRuns.set(activeRun.runId, activeRun);
 	pausedRuns.delete(activeRun.runId);
@@ -623,22 +717,7 @@ export function resumeRun(cwd: string, runId: string): RunState {
 	pausedRuns.delete(runId);
 	activeRuns.set(runId, resumedRun);
 	resumedRun.promise = executeManagedRun(resumedRun).catch((cause) => {
-		createRunRecords(cwd).applyRunChange(runId, { type: "run_failed", timestamp: timestamp() });
-		updateRunState(cwd, runId, (current) => ({
-			...current,
-			status: "failed",
-			errorState: {
-				errorCode: resumedRun.mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error",
-				message: cause instanceof Error ? cause.message : String(cause),
-				retrySafe: false,
-				needsOperator: true,
-				safeToResume: false,
-				scope: "run",
-			},
-			updatedAt: timestamp(),
-			endedAt: timestamp(),
-		}));
-		activeRuns.delete(runId);
+		failUnexpectedRun(resumedRun, cause);
 	});
 	return queuedState;
 }
@@ -693,10 +772,11 @@ export function pauseRun(cwd: string, runId: string): RunState {
 		throw new Error(`run not active: ${runId}`);
 	}
 	activeRun.pauseRequested = true;
+	const heartbeatAt = recordHeartbeat(cwd, runId);
 	return updateRunState(cwd, runId, (current) => ({
 		...current,
-		heartbeatAt: timestamp(),
-		updatedAt: timestamp(),
+		heartbeatAt,
+		updatedAt: heartbeatAt,
 	}));
 }
 
@@ -706,10 +786,11 @@ export function abortRun(cwd: string, runId: string): RunState {
 		throw new Error(`run not active: ${runId}`);
 	}
 	activeRun.abortRequested = true;
+	const heartbeatAt = recordHeartbeat(cwd, runId);
 	return updateRunState(cwd, runId, (current) => ({
 		...current,
-		heartbeatAt: timestamp(),
-		updatedAt: timestamp(),
+		heartbeatAt,
+		updatedAt: heartbeatAt,
 	}));
 }
 

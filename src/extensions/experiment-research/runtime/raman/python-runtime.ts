@@ -636,14 +636,26 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				),
 		},
 		autofocus: {
-			runSingle: async (action: AutofocusRunSingleAction): Promise<ActionResult> =>
-				createActionResult(
-					await daemon.request(
-						"autofocus",
-						{ roi: action.roi, params: action.params, timeoutMs: action.timeoutMs, artifactContext: action.artifactContext },
-						action.timeoutMs + 10_000,
-					),
-				),
+			runSingle: async (action: AutofocusRunSingleAction): Promise<ActionResult> => {
+				const response = await daemon.request(
+					"autofocus",
+					{ roi: action.roi, params: action.params, timeoutMs: action.timeoutMs, artifactContext: action.artifactContext },
+					action.timeoutMs + 10_000,
+				);
+				const autofocusFrames = response.ok && isRecord(response.payload.autofocusFrames)
+					? response.payload.autofocusFrames
+					: {};
+				const preFocus = isRecord(autofocusFrames.preFocus) ? autofocusFrames.preFocus : {};
+				const acceptedFocus = isRecord(autofocusFrames.acceptedFocus) ? autofocusFrames.acceptedFocus : {};
+				const artifacts = response.ok
+					? [
+							...asArtifact(response.payload.autofocusResultPath, "autofocus", "Autofocus evidence"),
+							...asArtifact(preFocus.sourcePath, "autofocus-pre-focus-frame", "Autofocus pre-focus frame"),
+							...asArtifact(acceptedFocus.sourcePath, "autofocus-accepted-focus-frame", "Autofocus accepted-focus frame"),
+						]
+					: [];
+				return createActionResult(response, artifacts);
+			},
 		},
 		frame: {
 			resource: resolvedConfig.frameProvider,

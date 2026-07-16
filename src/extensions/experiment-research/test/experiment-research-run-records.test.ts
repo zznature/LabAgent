@@ -134,6 +134,44 @@ describe("Run Records Interface", () => {
 		})).toThrow(/attemptId was already used/u);
 	});
 
+	it("projects heartbeat and terminal errors through the observation interface", () => {
+		const cwd = createTempCwd();
+		const records = createRunRecords(cwd);
+		records.initializeRun({
+			runId: "run-observation-health",
+			experimentId: "experiment-001",
+			procedureSpecId: "spec-001",
+			startedAt: "2026-07-15T10:00:00.000Z",
+			units: [{ unitId: "unit-0000", index: 0 }],
+		});
+		records.applyRunChange("run-observation-health", {
+			type: "heartbeat_updated",
+			timestamp: "2026-07-15T10:00:01.000Z",
+		});
+		const failure = {
+			errorCode: "live_runtime_error",
+			message: "Raman runtime stopped responding.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+			scope: "run" as const,
+		};
+		const failed = records.applyRunChange("run-observation-health", {
+			type: "run_failed",
+			timestamp: "2026-07-15T10:00:02.000Z",
+			error: failure,
+		});
+
+		expect(failed).toMatchObject({
+			status: "failed",
+			heartbeatAt: "2026-07-15T10:00:01.000Z",
+			errorState: failure,
+			throughSequence: 2,
+		});
+		expect(createRunRecordsReadAdapter(cwd).readEvents("run-observation-health", 0).map((event) => event.change.type))
+			.toEqual(["heartbeat_updated", "run_failed"]);
+	});
+
 	it("publishes an immutable artifact with indexed SHA-256 representations", () => {
 		const cwd = createTempCwd();
 		const records = createRunRecords(cwd);
@@ -288,6 +326,69 @@ describe("Run Records Interface", () => {
 			representations: [{ role: "display", mediaType: "image/jpeg", fileName: "frame.jpg", content: "jpeg" }],
 		});
 		expect(descriptor).toMatchObject({ status: "failed", error: { errorCode: "artifact_publication_failed" } });
+	});
+
+	it("fails canonical frame and autofocus publication when required evidence is absent", () => {
+		const cwd = createTempCwd();
+		const records = createRunRecords(cwd);
+		records.initializeRun({
+			runId: "run-profile-evidence",
+			experimentId: "experiment-001",
+			procedureSpecId: "spec-001",
+			startedAt: "2026-07-15T10:00:00.000Z",
+			units: [{ unitId: "unit-0000", index: 0 }],
+		});
+		records.applyRunChange("run-profile-evidence", {
+			type: "attempt_started",
+			unitId: "unit-0000",
+			attemptId: "attempt-0000",
+			timestamp: "2026-07-15T10:00:01.000Z",
+		});
+		const sourcePath = join(cwd, "source-frame.tif");
+		writeFileSync(sourcePath, "source");
+		records.publishArtifact({
+			artifactId: "source-frame",
+			scope: { kind: "run", runId: "run-profile-evidence", unitId: "unit-0000", attemptId: "attempt-0000", actionId: "action-frame" },
+			layer: "source",
+			sourceArtifactIds: [],
+			createdAt: "2026-07-15T10:00:01.500Z",
+			representations: [{ role: "source", mediaType: "image/tiff", fileName: "source.tif", sourcePath }],
+		});
+
+		const frame = records.publishArtifact({
+			artifactId: "canonical-frame-without-capture-time",
+			scope: { kind: "run", runId: "run-profile-evidence", unitId: "unit-0000", attemptId: "attempt-0000", actionId: "action-frame" },
+			layer: "canonical",
+			profile: "raman-frame",
+			sourceArtifactIds: ["source-frame"],
+			createdAt: "2026-07-15T10:00:02.000Z",
+			descriptorData: { width: 512, height: 512, sourceBitDepth: 16, colorModel: "grayscale", laserState: "unknown" },
+			representations: [
+				{ role: "display", mediaType: "image/png", fileName: "frame.png", content: "png" },
+				{ role: "thumbnail", mediaType: "image/webp", fileName: "thumbnail.webp", content: "webp" },
+			],
+		});
+		expect(frame).toMatchObject({ status: "failed", error: { errorCode: "artifact_publication_failed" } });
+
+		const autofocus = records.publishArtifact({
+			artifactId: "canonical-autofocus-without-frame-links",
+			scope: { kind: "run", runId: "run-profile-evidence", unitId: "unit-0000", attemptId: "attempt-0000", actionId: "action-autofocus" },
+			layer: "canonical",
+			profile: "raman-autofocus",
+			sourceArtifactIds: ["source-frame"],
+			createdAt: "2026-07-15T10:00:03.000Z",
+			canonicalData: {
+				schemaVersion: 1,
+				algorithmVersion: "fixed-range-autofocus-v1",
+				scanPoints: [],
+				peakEstimate: {},
+				selectedFocus: {},
+				finalVerification: {},
+				parameters: {},
+				frameArtifactIds: { preFocus: null, acceptedFocus: null },
+			},
+		});
+		expect(autofocus).toMatchObject({ status: "failed", error: { errorCode: "artifact_publication_failed" } });
 	});
 
 	it("reconciles a publication interrupted before indexing as failed", () => {

@@ -24,9 +24,11 @@ import statistics
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PIL import Image
 
 # The vendor stage SDK and some bridge helpers print to stdout. That channel is
@@ -145,10 +147,14 @@ def _artifact_staging_dir(payload: dict) -> Path | None:
     return path
 
 
-def _write_frame_canonical_staging(bridge_dir: Path, frame: Any) -> dict[str, Any]:
-    staging_dir = bridge_dir / "canonical-staging" / f"frame_{time.time_ns()}"
+def _captured_at(source_path: Path) -> str:
+    captured_at = datetime.fromtimestamp(source_path.stat().st_mtime, timezone.utc)
+    return captured_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _write_canonical_frame_staging(staging_dir: Path, image_array: Any, source_path: Path) -> dict[str, Any]:
     staging_dir.mkdir(parents=True, exist_ok=True)
-    image = Image.fromarray(frame.image)
+    image = Image.fromarray(image_array)
     display_path = staging_dir / "frame.png"
     image.save(display_path, format="PNG")
     thumbnail = image.copy()
@@ -157,14 +163,30 @@ def _write_frame_canonical_staging(bridge_dir: Path, frame: Any) -> dict[str, An
     thumbnail.thumbnail((256, 256))
     thumbnail_path = staging_dir / "thumbnail.webp"
     thumbnail.save(thumbnail_path, format="WEBP", quality=80)
-    shape = list(frame.image.shape)
+    shape = list(image_array.shape)
     return {
         "canonicalDisplayPath": str(display_path),
         "canonicalThumbnailPath": str(thumbnail_path),
         "width": int(shape[1]) if len(shape) >= 2 else 0,
         "height": int(shape[0]) if len(shape) >= 2 else 0,
-        "bitDepth": int(frame.image.dtype.itemsize * 8),
+        "bitDepth": int(image_array.dtype.itemsize * 8),
         "colorModel": "grayscale" if len(shape) == 2 else "rgb",
+        "capturedAt": _captured_at(source_path),
+    }
+
+
+def _autofocus_frame_payload(source_value: Any, staging_root: Path, name: str) -> dict[str, Any]:
+    if not isinstance(source_value, str) or not source_value:
+        raise RuntimeError(f"autofocus {name} representative frame path is missing")
+    source_path = Path(source_value)
+    if not source_path.exists():
+        raise RuntimeError(f"autofocus {name} representative frame does not exist: {source_path}")
+    with Image.open(source_path) as image:
+        image_array = np.asarray(image)
+    return {
+        "sourcePath": str(source_path),
+        "laserStateVerified": "unknown",
+        **_write_canonical_frame_staging(staging_root / name, image_array, source_path),
     }
 
 
@@ -416,7 +438,11 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
                 "laserStateVerified": laser_state_verified or "unknown",
             },
         )
-    canonical_frame = _write_frame_canonical_staging(bridge_dir, frame)
+    canonical_frame = _write_canonical_frame_staging(
+        bridge_dir / "canonical-staging" / f"frame_{time.time_ns()}",
+        frame.image,
+        source_path,
+    )
     return _success(
         "Frame captured through LabSpec bridge.",
         {
@@ -515,6 +541,30 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         "stageMoveCommands": _stage_move_commands(xyz_stage),
         "stageSettleDiagnostics": _stage_settle_diagnostics(xyz_stage),
     }
+    if result.coarse is not None:
+        response_payload["scanPoints"] = [
+            {"zUm": point.z_um, "score": point.score, "saturationRatio": point.saturation_ratio}
+            for point in result.coarse.points
+        ]
+    if str(result.status.value) == "ok":
+        diagnostics = result.diagnostics or {}
+        frame_staging_root = action_dir or (
+            Path(request["frameProvider"]["config"]["bridgeDir"])
+            / "canonical-staging"
+            / f"autofocus_{time.time_ns()}"
+        )
+        response_payload["autofocusFrames"] = {
+            "preFocus": _autofocus_frame_payload(
+                diagnostics.get("preFocusFramePath"),
+                frame_staging_root,
+                "pre-focus",
+            ),
+            "acceptedFocus": _autofocus_frame_payload(
+                diagnostics.get("acceptedFocusFramePath"),
+                frame_staging_root,
+                "accepted-focus",
+            ),
+        }
     if action_dir is not None:
         response_payload["actionStagingDir"] = str(action_dir)
         response_payload["autofocusResultPath"] = str(action_dir / "autofocus-result.json")
@@ -525,11 +575,6 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
             )
         except Exception:
             pass
-    if result.coarse is not None:
-        response_payload["scanPoints"] = [
-            {"zUm": point.z_um, "score": point.score, "saturationRatio": point.saturation_ratio}
-            for point in result.coarse.points
-        ]
     if str(result.status.value) == "ok":
         return _success("Autofocus completed.", response_payload)
     if str(result.status.value) == "stage_error":

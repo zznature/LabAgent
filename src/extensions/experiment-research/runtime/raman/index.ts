@@ -63,6 +63,7 @@ export {
 	clearRamanLiveRuntime,
 	runLiveRamanUnit,
 	validateRuntimeAnchorState,
+	RamanCanonicalPublicationError,
 	type RamanLivePreflightResult,
 	type RamanStageRuntime,
 	type RamanAutofocusRuntime,

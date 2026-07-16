@@ -313,6 +313,10 @@ export async function executeLinearRun(
 		});
 		const resultArtifacts = artifactRefsForResult(result);
 
+		if (activeRun.abortRequested || result.status === "aborted") {
+			context.abortAt(unit, resultArtifacts);
+			return;
+		}
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
 			return;
@@ -356,6 +360,10 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 		);
 		const resultArtifacts = artifactRefsForResult(result);
 
+		if (activeRun.abortRequested || result.status === "aborted") {
+			context.abortAt(unit, resultArtifacts);
+			return;
+		}
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
 			return;
@@ -430,6 +438,10 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 		});
 		const resultArtifacts = artifactRefsForResult(result);
 
+		if (activeRun.abortRequested || result.status === "aborted") {
+			context.abortAt(unit, resultArtifacts);
+			return "aborted";
+		}
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
 			return "paused";

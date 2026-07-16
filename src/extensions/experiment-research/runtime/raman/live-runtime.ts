@@ -86,7 +86,12 @@ export interface LiveRamanUnitFailure {
 	artifactRefs: ArtifactRef[];
 }
 
-export type LiveRamanUnitResult = LiveRamanUnitSuccess | LiveRamanUnitPause | LiveRamanUnitFailure;
+export interface LiveRamanUnitAbort {
+	status: "aborted";
+	artifactRefs: ArtifactRef[];
+}
+
+export type LiveRamanUnitResult = LiveRamanUnitSuccess | LiveRamanUnitPause | LiveRamanUnitFailure | LiveRamanUnitAbort;
 
 export interface LiveRamanUnitOptions {
 	attempt?: {
@@ -100,12 +105,47 @@ export interface LiveRamanUnitOptions {
 		envelope?: RamanSearchEnvelope;
 		singlePointAcceptance?: boolean;
 	};
+	checkpoint?: () => "abort" | "pause" | "deadline" | undefined;
+}
+
+export class RamanCanonicalPublicationError extends Error {
+	readonly runtimeError: RuntimeError;
+
+	constructor(descriptor: ArtifactDescriptor) {
+		super(`Canonical artifact ${descriptor.artifactId} failed publication.`);
+		this.name = "RamanCanonicalPublicationError";
+		this.runtimeError = {
+			errorCode: "canonical_artifact_publication_failed",
+			message: this.message,
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+			scope: "unit",
+			payload: {
+				artifactId: descriptor.artifactId,
+				profile: descriptor.profile,
+				publicationError: descriptor.error,
+			},
+		};
+	}
 }
 
 interface StagePosition {
 	xUm: number;
 	yUm: number;
 	zUm: number;
+}
+
+interface RamanFramePayload {
+	sourcePath: string;
+	canonicalDisplayPath: string;
+	canonicalThumbnailPath: string;
+	capturedAt: string;
+	width: number;
+	height: number;
+	bitDepth: number;
+	colorModel: string;
+	laserStateVerified: string;
 }
 
 const liveRuntimeRegistry = new Map<string, RamanLiveRuntime>();
@@ -121,6 +161,41 @@ function toRuntimeError(actionResult: ActionResult, fallbackCode: string, scope:
 		scope,
 		payload: actionResult.payload,
 	};
+}
+
+function checkpointResult(
+	options: LiveRamanUnitOptions,
+	artifactRefs: ArtifactRef[],
+): LiveRamanUnitAbort | LiveRamanUnitPause | LiveRamanUnitFailure | undefined {
+	const stopReason = options.checkpoint?.();
+	if (stopReason === "abort") {
+		return { status: "aborted", artifactRefs };
+	}
+	if (stopReason === "pause") {
+		return { status: "paused", reason: "operator_requested", artifactRefs };
+	}
+	if (stopReason === "deadline") {
+		return {
+			status: "failed",
+			error: {
+				errorCode: "run_deadline_exceeded",
+				message: "Run stopped at a hardware-action checkpoint after maxRuntimeMinutes elapsed.",
+				retrySafe: false,
+				needsOperator: true,
+				safeToResume: false,
+				scope: "run",
+			},
+			artifactRefs,
+		};
+	}
+	return undefined;
+}
+
+function requireCompleteCanonicalArtifact(descriptor: ArtifactDescriptor): ArtifactDescriptor {
+	if (descriptor.status !== "complete") {
+		throw new RamanCanonicalPublicationError(descriptor);
+	}
+	return descriptor;
 }
 
 function findResourceId(spec: ProcedureSpec, role: string): string {
@@ -156,6 +231,36 @@ function ensureRange(
 function readNumber(record: Record<string, unknown>, key: string): number | undefined {
 	const value = record[key];
 	return typeof value === "number" ? value : undefined;
+}
+
+function requireRamanFramePayload(value: unknown, label: string): RamanFramePayload {
+	if (!isRecord(value)) {
+		throw new Error(`${label} did not provide frame metadata`);
+	}
+	const sourcePath = value.sourcePath ?? value.framePath;
+	if (
+		typeof sourcePath !== "string" || sourcePath.length === 0 ||
+		typeof value.canonicalDisplayPath !== "string" || value.canonicalDisplayPath.length === 0 ||
+		typeof value.canonicalThumbnailPath !== "string" || value.canonicalThumbnailPath.length === 0 ||
+		typeof value.capturedAt !== "string" || Number.isNaN(Date.parse(value.capturedAt)) ||
+		typeof value.width !== "number" || value.width <= 0 ||
+		typeof value.height !== "number" || value.height <= 0 ||
+		typeof value.bitDepth !== "number" || value.bitDepth <= 0 ||
+		typeof value.colorModel !== "string" || value.colorModel.length === 0
+	) {
+		throw new Error(`${label} did not provide complete canonical frame evidence`);
+	}
+	return {
+		sourcePath,
+		canonicalDisplayPath: value.canonicalDisplayPath,
+		canonicalThumbnailPath: value.canonicalThumbnailPath,
+		capturedAt: value.capturedAt,
+		width: value.width,
+		height: value.height,
+		bitDepth: value.bitDepth,
+		colorModel: value.colorModel,
+		laserStateVerified: typeof value.laserStateVerified === "string" ? value.laserStateVerified : "unknown",
+	};
 }
 
 function stagePositionFromActionResult(result: ActionResult): StagePosition | undefined {
@@ -333,12 +438,6 @@ function persistArtifactRecord(cwd: string, runId: string, artifact: ArtifactRef
 	});
 }
 
-function persistArtifactRecords(cwd: string, runId: string, artifacts: ArtifactRef[]): void {
-	for (const artifact of artifacts) {
-		persistArtifactRecord(cwd, runId, artifact);
-	}
-}
-
 function scopeRuntimeArtifacts(
 	cwd: string,
 	runId: string,
@@ -437,7 +536,7 @@ function persistEvaluationArtifact(
 	sourceArtifactIds: string[],
 ): ArtifactRef {
 	const attemptIndex = attempt?.attemptIndex ?? 0;
-	const descriptor = createRunRecords(cwd).publishArtifact({
+	const descriptor = requireCompleteCanonicalArtifact(createRunRecords(cwd).publishArtifact({
 		artifactId: `${runId}-evaluation-${unit.index}-${attemptIndex}`,
 		scope: {
 			kind: "run",
@@ -464,7 +563,7 @@ function persistEvaluationArtifact(
 			reasons: decision.reasons,
 			unitId: unit.unitId,
 		},
-	});
+	}));
 	return {
 		artifactId: descriptor.artifactId,
 		kind: "raman-evaluation",
@@ -520,7 +619,7 @@ function persistSpectrumArtifact(
 	sourceArtifactIds: string[],
 ): ArtifactRef {
 	const attemptIndex = attempt?.attemptIndex ?? 0;
-	const descriptor = createRunRecords(cwd).publishArtifact({
+	const descriptor = requireCompleteCanonicalArtifact(createRunRecords(cwd).publishArtifact({
 		artifactId: `${runId}-spectrum-${unit.index}-${attemptIndex}`,
 		scope: {
 			kind: "run",
@@ -534,7 +633,7 @@ function persistSpectrumArtifact(
 		sourceArtifactIds,
 		createdAt: new Date().toISOString(),
 		canonicalData: spectrumCanonicalData(spectrumResult, acquisition, metrics),
-	});
+	}));
 	return {
 		artifactId: descriptor.artifactId,
 		kind: "raman-spectrum",
@@ -548,53 +647,57 @@ function persistFrameArtifact(
 	cwd: string,
 	runId: string,
 	unit: ExecutionUnit,
-	frameResult: ActionResult,
+	frame: RamanFramePayload,
 	attempt: LiveRamanUnitOptions["attempt"],
 	sourceArtifactIds: string[],
+	artifactName = "frame",
+	actionId = "action-frame",
+	label = "Canonical Raman frame",
 ): ArtifactRef {
 	const attemptIndex = attempt?.attemptIndex ?? 0;
-	const payload = frameResult.payload ?? {};
-	const descriptor = createRunRecords(cwd).publishArtifact({
-		artifactId: `${runId}-frame-${unit.index}-${attemptIndex}`,
+	const descriptor = requireCompleteCanonicalArtifact(createRunRecords(cwd).publishArtifact({
+		artifactId: `${runId}-${artifactName}-${unit.index}-${attemptIndex}`,
 		scope: {
 			kind: "run",
 			runId,
 			unitId: `unit-${String(unit.index).padStart(4, "0")}`,
 			attemptId: `attempt-${String(attemptIndex).padStart(4, "0")}-${attempt?.phase ?? "initial"}`,
-			actionId: "action-frame",
+			actionId,
 		},
 		layer: "canonical",
 		profile: "raman-frame",
 		sourceArtifactIds,
 		createdAt: new Date().toISOString(),
 		descriptorData: {
-			width: payload.width,
-			height: payload.height,
-			bitDepth: payload.bitDepth,
-			colorModel: payload.colorModel,
-			laserState: payload.laserStateVerified ?? "unknown",
+			width: frame.width,
+			height: frame.height,
+			sourceBitDepth: frame.bitDepth,
+			colorModel: frame.colorModel,
+			capturedAt: frame.capturedAt,
+			sourceArtifactIds,
+			laserState: frame.laserStateVerified,
 		},
 		representations: [
 			{
 				role: "display",
 				mediaType: "image/png",
 				fileName: "frame.png",
-				sourcePath: typeof payload.canonicalDisplayPath === "string" ? payload.canonicalDisplayPath : "",
+				sourcePath: frame.canonicalDisplayPath,
 			},
 			{
 				role: "thumbnail",
 				mediaType: "image/webp",
 				fileName: "thumbnail.webp",
-				sourcePath: typeof payload.canonicalThumbnailPath === "string" ? payload.canonicalThumbnailPath : "",
+				sourcePath: frame.canonicalThumbnailPath,
 			},
 		],
-	});
+	}));
 	return {
 		artifactId: descriptor.artifactId,
 		kind: "raman-frame",
 		path: legacyArtifactPath(descriptor),
-		label: "Canonical Raman frame",
-		metadata: { publicationStatus: descriptor.status, laserState: payload.laserStateVerified ?? "unknown" },
+		label,
+		metadata: { publicationStatus: descriptor.status, laserState: frame.laserStateVerified },
 	};
 }
 
@@ -605,11 +708,12 @@ function persistAutofocusArtifact(
 	autofocusResult: ActionResult,
 	attempt: LiveRamanUnitOptions["attempt"],
 	sourceArtifactIds: string[],
+	frameArtifactIds: { preFocus: string; acceptedFocus: string },
 ): ArtifactRef {
 	const attemptIndex = attempt?.attemptIndex ?? 0;
 	const payload = autofocusResult.payload ?? {};
 	const diagnostics = isRecord(payload.confidenceDiagnostics) ? payload.confidenceDiagnostics : {};
-	const descriptor = createRunRecords(cwd).publishArtifact({
+	const descriptor = requireCompleteCanonicalArtifact(createRunRecords(cwd).publishArtifact({
 		artifactId: `${runId}-autofocus-${unit.index}-${attemptIndex}`,
 		scope: {
 			kind: "run",
@@ -645,12 +749,12 @@ function persistAutofocusArtifact(
 			},
 			parameters: isRecord(payload.params) ? payload.params : {},
 			frameArtifactIds: {
-				preFocus: payload.preFocusFrameArtifactId ?? null,
-				acceptedFocus: payload.acceptedFocusFrameArtifactId ?? null,
+				preFocus: frameArtifactIds.preFocus,
+				acceptedFocus: frameArtifactIds.acceptedFocus,
 			},
 			diagnostics,
 		},
-	});
+	}));
 	return {
 		artifactId: descriptor.artifactId,
 		kind: "raman-autofocus",
@@ -872,6 +976,10 @@ export async function runLiveRamanUnit(
 	const artifactRefs: ArtifactRef[] = [];
 	const stageResourceId = findResourceId(spec, "stage");
 	const unitPosition = await resolveUnitPosition(unit, runtime, stageResourceId);
+	const positionCheckpoint = checkpointResult(options, artifactRefs);
+	if (positionCheckpoint) {
+		return positionCheckpoint;
+	}
 	if ("status" in unitPosition) {
 		return {
 			status: "failed",
@@ -912,25 +1020,27 @@ export async function runLiveRamanUnit(
 				artifactContext: actionArtifactContext(cwd, runId, unit, actionIndex, options.attempt),
 			});
 			const moveResultArtifacts = scopeRuntimeArtifacts(cwd, runId, moveResult.artifacts, unit, actionIndex, options.attempt);
+			for (const artifact of moveResultArtifacts) {
+				persistArtifactRecord(cwd, runId, artifact);
+				artifactRefs.push(artifact);
+			}
+			const moveCheckpoint = checkpointResult(options, artifactRefs);
+			if (moveCheckpoint) {
+				return moveCheckpoint;
+			}
 			if (moveResult.status !== "success") {
-				persistArtifactRecords(cwd, runId, moveResultArtifacts);
-				const moveArtifacts = artifactRefs.concat(moveResultArtifacts);
 				if (moveResult.status === "paused") {
 					return {
 						status: "paused",
 						reason: moveResult.summary,
-						artifactRefs: moveArtifacts,
+						artifactRefs,
 					};
 				}
 				return {
 					status: "failed",
 					error: toRuntimeError(moveResult, "stage_move_failed"),
-					artifactRefs: moveArtifacts,
+					artifactRefs,
 				};
-			}
-			for (const artifact of moveResultArtifacts) {
-				persistArtifactRecord(cwd, runId, artifact);
-				artifactRefs.push(artifact);
 			}
 			continue;
 		}
@@ -958,6 +1068,60 @@ export async function runLiveRamanUnit(
 				}),
 			);
 			const autofocusResultArtifacts = scopeRuntimeArtifacts(cwd, runId, autofocusResult.artifacts, unit, actionIndex, options.attempt);
+			for (const artifact of autofocusResultArtifacts) {
+				persistArtifactRecord(cwd, runId, artifact);
+				artifactRefs.push(artifact);
+			}
+			const autofocusCheckpoint = checkpointResult(options, artifactRefs);
+			if (autofocusCheckpoint) {
+				return autofocusCheckpoint;
+			}
+			if (autofocusResult.status !== "success") {
+				if (autofocusResult.status === "paused") {
+					return {
+						status: "paused",
+						reason: autofocusResult.summary,
+						artifactRefs,
+					};
+				}
+				return {
+					status: "failed",
+					error: toRuntimeError(autofocusResult, "autofocus_failed"),
+					artifactRefs,
+				};
+			}
+			const autofocusFrames = isRecord(autofocusResult.payload?.autofocusFrames)
+				? autofocusResult.payload.autofocusFrames
+				: undefined;
+			const preFocusFrame = requireRamanFramePayload(autofocusFrames?.preFocus, "autofocus pre-focus frame");
+			const acceptedFocusFrame = requireRamanFramePayload(autofocusFrames?.acceptedFocus, "autofocus accepted-focus frame");
+			const preFocusSource = autofocusResultArtifacts.find((artifact) => artifact.kind === "autofocus-pre-focus-frame");
+			const acceptedFocusSource = autofocusResultArtifacts.find((artifact) => artifact.kind === "autofocus-accepted-focus-frame");
+			if (!preFocusSource || !acceptedFocusSource) {
+				throw new Error("autofocus did not provide source artifacts for both representative frames");
+			}
+			const preFocusArtifact = persistFrameArtifact(
+				cwd,
+				runId,
+				unit,
+				preFocusFrame,
+				options.attempt,
+				[preFocusSource.artifactId],
+				"autofocus-pre-focus-frame",
+				`action-${String(actionIndex).padStart(4, "0")}-pre-focus`,
+				"Autofocus pre-focus canonical frame",
+			);
+			const acceptedFocusArtifact = persistFrameArtifact(
+				cwd,
+				runId,
+				unit,
+				acceptedFocusFrame,
+				options.attempt,
+				[acceptedFocusSource.artifactId],
+				"autofocus-accepted-focus-frame",
+				`action-${String(actionIndex).padStart(4, "0")}-accepted-focus`,
+				"Autofocus accepted-focus canonical frame",
+			);
 			const autofocusArtifact = persistAutofocusArtifact(
 				cwd,
 				runId,
@@ -965,26 +1129,9 @@ export async function runLiveRamanUnit(
 				autofocusResult,
 				options.attempt,
 				autofocusResultArtifacts.map((artifact) => artifact.artifactId),
+				{ preFocus: preFocusArtifact.artifactId, acceptedFocus: acceptedFocusArtifact.artifactId },
 			);
-			persistArtifactRecord(cwd, runId, autofocusArtifact);
-			artifactRefs.push(autofocusArtifact);
-			if (autofocusResult.status !== "success") {
-				persistArtifactRecords(cwd, runId, autofocusResultArtifacts);
-				const autofocusArtifacts = artifactRefs.concat(autofocusResultArtifacts);
-				if (autofocusResult.status === "paused") {
-					return {
-						status: "paused",
-						reason: autofocusResult.summary,
-						artifactRefs: autofocusArtifacts,
-					};
-				}
-				return {
-					status: "failed",
-					error: toRuntimeError(autofocusResult, "autofocus_failed"),
-					artifactRefs: autofocusArtifacts,
-				};
-			}
-			for (const artifact of autofocusResultArtifacts) {
+			for (const artifact of [preFocusArtifact, acceptedFocusArtifact, autofocusArtifact]) {
 				persistArtifactRecord(cwd, runId, artifact);
 				artifactRefs.push(artifact);
 			}
@@ -999,31 +1146,33 @@ export async function runLiveRamanUnit(
 				artifactContext: actionArtifactContext(cwd, runId, unit, actionIndex, options.attempt),
 			});
 			const frameResultArtifacts = scopeRuntimeArtifacts(cwd, runId, frameResult.artifacts, unit, actionIndex, options.attempt);
+			for (const artifact of frameResultArtifacts) {
+				persistArtifactRecord(cwd, runId, artifact);
+				artifactRefs.push(artifact);
+			}
+			const frameCheckpoint = checkpointResult(options, artifactRefs);
+			if (frameCheckpoint) {
+				return frameCheckpoint;
+			}
 			if (frameResult.status !== "success") {
-				persistArtifactRecords(cwd, runId, frameResultArtifacts);
-				const frameArtifacts = artifactRefs.concat(frameResultArtifacts);
 				if (frameResult.status === "paused") {
 					return {
 						status: "paused",
 						reason: frameResult.summary,
-						artifactRefs: frameArtifacts,
+						artifactRefs,
 					};
 				}
 				return {
 					status: "failed",
 					error: toRuntimeError(frameResult, "frame_capture_failed"),
-					artifactRefs: frameArtifacts,
+					artifactRefs,
 				};
-			}
-			for (const artifact of frameResultArtifacts) {
-				persistArtifactRecord(cwd, runId, artifact);
-				artifactRefs.push(artifact);
 			}
 			const canonicalFrameArtifact = persistFrameArtifact(
 				cwd,
 				runId,
 				unit,
-				frameResult,
+				requireRamanFramePayload(frameResult.payload, "captured frame"),
 				options.attempt,
 				frameResultArtifacts.map((artifact) => artifact.artifactId),
 			);
@@ -1050,25 +1199,27 @@ export async function runLiveRamanUnit(
 				artifactContext: actionArtifactContext(cwd, runId, unit, actionIndex, options.attempt),
 			});
 			const spectrumResultArtifacts = scopeRuntimeArtifacts(cwd, runId, spectrumResult.artifacts, unit, actionIndex, options.attempt);
+			for (const artifact of spectrumResultArtifacts) {
+				persistArtifactRecord(cwd, runId, artifact);
+				artifactRefs.push(artifact);
+			}
+			const spectrumCheckpoint = checkpointResult(options, artifactRefs);
+			if (spectrumCheckpoint) {
+				return spectrumCheckpoint;
+			}
 			if (spectrumResult.status !== "success") {
-				persistArtifactRecords(cwd, runId, spectrumResultArtifacts);
-				const spectrumArtifacts = artifactRefs.concat(spectrumResultArtifacts);
 				if (spectrumResult.status === "paused") {
 					return {
 						status: "paused",
 						reason: spectrumResult.summary,
-						artifactRefs: spectrumArtifacts,
+						artifactRefs,
 					};
 				}
 				return {
 					status: "failed",
 					error: toRuntimeError(spectrumResult, "spectrum_acquisition_failed"),
-					artifactRefs: spectrumArtifacts,
+					artifactRefs,
 				};
-			}
-			for (const artifact of spectrumResultArtifacts) {
-				persistArtifactRecord(cwd, runId, artifact);
-				artifactRefs.push(artifact);
 			}
 		}
 	}

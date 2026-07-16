@@ -306,6 +306,10 @@ pause / abort 必须在 kernel 认可的安全边界生效：
 - action checkpoint
 - runtime 明确宣称可中断的动作点
 
+runtime action 返回后也是强制 checkpoint：kernel 必须先重新检查 abort，再处理 pause / deadline，
+最后才能接受 attempt 或完成 unit。这样即使 operator 在最后一个 unit 执行期间请求 abort，
+该 unit 也不会被接受，run 不会错误进入 `completed`。
+
 不能依赖“中断当前前台函数调用”来代替 run cancellation。
 
 `stoppingRules.maxRuntimeMinutes` 同样是 kernel 硬约束。kernel 在 unit checkpoint

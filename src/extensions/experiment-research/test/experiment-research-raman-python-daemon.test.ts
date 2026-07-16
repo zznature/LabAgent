@@ -54,6 +54,11 @@ rl.on("line", (raw) => {
       payload.status = "ok";
       payload.zBestUm = 260;
       payload.confidence = 0.95;
+      payload.autofocusResultPath = "D:\\RamanLab\\SpecBridge\\autofocus-result.json";
+	  payload.autofocusFrames = {
+		preFocus: { sourcePath: "D:\\RamanLab\\SpecBridge\\autofocus-pre-focus.tif" },
+		acceptedFocus: { sourcePath: "D:\\RamanLab\\SpecBridge\\autofocus-accepted-focus.tif" }
+	  };
       payload.params = {
         zStartUm: req.payload.params.zStartUm,
         zEndUm: req.payload.params.zEndUm,
@@ -222,6 +227,11 @@ describe("experiment research Raman Python daemon transport", () => {
 		expect(autofocus.status).toBe("success");
 		expect((autofocus.payload?.params as Record<string, unknown>).effectivePointCount).toBe(10);
 		expect(autofocus.payload?.stageSettleDiagnostics).toEqual({ status: "settled", axes: ["z"] });
+		expect(autofocus.artifacts.map((artifact) => artifact.kind).sort()).toEqual([
+			"autofocus",
+			"autofocus-accepted-focus-frame",
+			"autofocus-pre-focus-frame",
+		]);
 	});
 
 	it("serializes concurrent actions so the single hardware session is never touched in parallel", async () => {
