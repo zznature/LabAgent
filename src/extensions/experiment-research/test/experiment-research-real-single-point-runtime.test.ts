@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
+import { validateExecutionContract } from "../kernel/validate-execution.ts";
+import type { ProcedureSpec } from "../schemas/index.ts";
 import {
 	clearRamanLiveRuntime,
 	failedActionResult,
@@ -417,6 +419,26 @@ async function pollUntilTerminal(
 }
 
 describe("experiment research real supervised single-point runtime", () => {
+	it("rejects misleading or ambiguous focus evidence roles", () => {
+		const reversed = createSinglePointSpec();
+		reversed.plan.perPoint = [
+			{ kind: "capture_frame", role: "post_focus" },
+			{ kind: "autofocus" },
+			{ kind: "capture_frame", role: "pre_focus", laserState: "off" },
+			{ kind: "acquire_spectrum" },
+		];
+		const repeatedAutofocus = createSinglePointSpec();
+		repeatedAutofocus.plan.perPoint = [
+			{ kind: "autofocus" },
+			{ kind: "autofocus" },
+			{ kind: "acquire_spectrum" },
+		];
+
+		expect(validateExecutionContract(reversed as ProcedureSpec, "live-supervised").map((issue) => issue.code))
+			.toContain("invalid_focus_evidence_order");
+		expect(validateExecutionContract(repeatedAutofocus as ProcedureSpec, "live-supervised").map((issue) => issue.code))
+			.toContain("ambiguous_raman_action_sequence");
+	});
 	it("continues a repeated single-point run after a unit failure when stopOnError is false", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
@@ -520,6 +542,9 @@ describe("experiment research real supervised single-point runtime", () => {
 		);
 		expect(explicitFrames).toHaveLength(2);
 		expect(new Set(explicitFrames.map((artifact) => artifact.artifactId)).size).toBe(2);
+		expect(new Set(explicitFrames.map((artifact) => artifact.scope.actionId))).toEqual(
+			new Set(["action-0001", "action-0003"]),
+		);
 		expect(explicitFrames.map((artifact) => artifact.data?.laserState)).toEqual(
 			expect.arrayContaining(["off", "unknown"]),
 		);
@@ -657,8 +682,15 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(observation?.units[0]?.status).toBe("failed");
 		expect(observation?.errorState?.errorCode).toBe("canonical_artifact_publication_failed");
 		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 0, failedUnits: 1 }));
-		expect((terminalState.artifactRefs as unknown[]).length).toBeGreaterThan(0);
-		expect(createRunRecords(cwd).listArtifacts(runId).some((artifact) => artifact.status === "failed")).toBe(true);
+		const recordArtifacts = createRunRecords(cwd).listArtifacts(runId, {
+			unitId: "unit-0000",
+			attemptId: "attempt-0000-initial",
+		});
+		const stateArtifactIds = new Set(
+			(terminalState.artifactRefs as Array<{ artifactId: string }>).map((artifact) => artifact.artifactId),
+		);
+		expect(recordArtifacts.some((artifact) => artifact.status === "failed")).toBe(true);
+		expect(recordArtifacts.every((artifact) => stateArtifactIds.has(artifact.artifactId))).toBe(true);
 		const summary = await extension.tools.get("summarize_run")?.execute(
 			"summarize-canonical-failure",
 			{ runId },

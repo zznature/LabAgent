@@ -6,7 +6,6 @@ import type {
 	RunState,
 	RuntimeError,
 } from "../schemas/index.ts";
-import { readArtifactRecords } from "../store/artifact-store.ts";
 import { appendRunEvent, type RunEvent } from "../store/event-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
 import {
@@ -23,7 +22,7 @@ import {
 } from "../runtime/simulation-runtime.ts";
 import { compileProcedureSpec } from "./compile-units.ts";
 import { executeLinearRun, executeMappingRun, executeParameterSearchRun } from "./run-strategies.ts";
-import { createRunRecords } from "../records/run-records.ts";
+import { createRunRecords, type ArtifactDescriptor } from "../records/run-records.ts";
 
 type ExecutionMode = "simulation" | "live-supervised";
 export type ManagedUnitResult = SimulationUnitResult | LiveRamanUnitResult;
@@ -404,19 +403,21 @@ function failUnexpectedRun(activeRun: ActiveRun, cause: unknown): void {
 				safeToResume: false,
 				scope: "run",
 			};
-	const observation = createRunRecords(activeRun.cwd).readRun(activeRun.runId);
+	const records = createRunRecords(activeRun.cwd);
+	const observation = records.readRun(activeRun.runId);
 	const activeUnitObservation = observation?.units.find(
 		(unit) => unit.status === "running" && unit.activeAttemptId !== undefined,
 	);
 	const activeUnit = activeRun.units.find((unit) => unit.unitId === activeUnitObservation?.unitId);
-	if (activeUnit) {
-		const attemptArtifacts = readArtifactRecords(activeRun.cwd, activeRun.runId)
-			.map((record) => record.artifact)
-			.filter((artifact) => artifact.metadata?.pointUnitId === activeUnit.unitId);
+	if (activeUnit && activeUnitObservation?.activeAttemptId) {
+		const attemptArtifacts = records.listArtifacts(activeRun.runId, {
+			unitId: activeUnit.unitId,
+			attemptId: activeUnitObservation.activeAttemptId,
+		}).map(runStateArtifactRef);
 		failActiveRun(activeRun, activeUnit, failure, attemptArtifacts);
 		return;
 	}
-	createRunRecords(activeRun.cwd).applyRunChange(activeRun.runId, {
+	records.applyRunChange(activeRun.runId, {
 		type: "run_failed",
 		error: failure,
 		timestamp: timestamp(),
@@ -430,6 +431,25 @@ function failUnexpectedRun(activeRun: ActiveRun, cause: unknown): void {
 	}));
 	activeRuns.delete(activeRun.runId);
 	pausedRuns.delete(activeRun.runId);
+}
+
+function runStateArtifactRef(descriptor: ArtifactDescriptor): RunState["artifactRefs"][number] {
+	if (descriptor.scope.kind !== "run") {
+		throw new Error(`run failure recovery received operator artifact: ${descriptor.artifactId}`);
+	}
+	const representationPath = descriptor.representations[0]?.path ?? "descriptor.json";
+	return {
+		artifactId: descriptor.artifactId,
+		kind: descriptor.profile ?? `${descriptor.layer}-artifact`,
+		path: `artifacts/units/${descriptor.scope.unitId}/attempts/${descriptor.scope.attemptId}/${descriptor.artifactId}/${representationPath}`,
+		label: descriptor.profile ? `Canonical ${descriptor.profile}` : `${descriptor.layer} artifact`,
+		metadata: {
+			publicationStatus: descriptor.status,
+			actionId: descriptor.scope.actionId,
+			attemptId: descriptor.scope.attemptId,
+			...(descriptor.error ? { publicationError: descriptor.error } : {}),
+		},
+	};
 }
 
 function completeActiveRun(activeRun: ActiveRun): void {

@@ -243,10 +243,11 @@ type ArtifactRepresentation = {
 
 Profile 可以进一步限制 allowed roles。调用者不能自行发明 role 或把任意 driver payload 填入 descriptor。
 
-同一 attempt 内每个语义 action 必须拥有稳定且互不冲突的 `actionId`。特别是多次
-`capture_frame` 不能共享通用的 `frame` artifact identity；其 identity 至少区分 action 顺序，
+同一 attempt 内每个可重复的 artifact-producing action 必须拥有稳定且互不冲突的 `actionId`。
+特别是多次 `capture_frame` 不能共享通用的 `frame` artifact identity；其 identity 至少区分 action 顺序，
 并可附带 `pre_focus`、`post_focus` 或 `observation` role。role 是科学语义，action 顺序负责唯一性，
-两者都不能依赖文件名反推。
+两者都不能依赖文件名反推。MVP 的 live execution contract 对每个 unit 只允许一个 autofocus
+和一个 acquire_spectrum；显式 focus evidence role 还必须位于该 autofocus 的正确一侧。
 
 ### 5.2 Lifecycle 与发布
 
