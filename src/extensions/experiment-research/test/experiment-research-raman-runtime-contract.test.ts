@@ -110,6 +110,7 @@ describe("experiment research Raman runtime contract", () => {
 			action: "frame.capture_latest",
 			resourceId: "labspec_frame_main",
 			timeoutMs: 2_000,
+			laserOff: true,
 		};
 		const spectrumAction = {
 			action: "spectrometer.acquire_spectrum",

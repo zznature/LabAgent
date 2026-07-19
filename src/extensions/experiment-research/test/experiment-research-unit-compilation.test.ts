@@ -40,7 +40,7 @@ function createBaseProcedureSpec() {
 		plan: {
 			kind: "grid_scan",
 			grid: {
-				origin: { xUm: 1000, yUm: 2000 },
+				origin: { xUm: 1000, yUm: 2000, zUm: 50 },
 				rows: 2,
 				cols: 3,
 				pitchXUm: 5,
@@ -53,6 +53,7 @@ function createBaseProcedureSpec() {
 				{ kind: "capture_frame" },
 				{ kind: "acquire_spectrum" },
 			],
+			interPointDelayMs: 1_000,
 		},
 	};
 }
@@ -68,6 +69,7 @@ describe("experiment research unit compilation", () => {
 					{ xUm: 1000, yUm: 2000 },
 					{ xUm: 1005, yUm: 2010, zUm: 50 },
 				],
+				interPointDelayMs: 300_000,
 				perPoint: [{ kind: "move_to_point" }, { kind: "autofocus" }, { kind: "acquire_spectrum" }],
 			},
 		};
@@ -77,6 +79,8 @@ describe("experiment research unit compilation", () => {
 		expect(units).toHaveLength(2);
 		expect(units[0]?.point).toEqual({ row: undefined, col: undefined, xUm: 1000, yUm: 2000, zUm: undefined });
 		expect(units[1]?.point).toEqual({ row: undefined, col: undefined, xUm: 1005, yUm: 2010, zUm: 50 });
+		expect(units[0]?.interUnitDelayMs).toBe(300_000);
+		expect(units[1]?.interUnitDelayMs).toBeUndefined();
 		expect(units[0]?.limits).toEqual(spec.limits);
 		expect(units[0]?.actions).toEqual(spec.plan.perPoint);
 		expect(units.every((unit) => ExecutionUnitValidator.Check(unit))).toBe(true);
@@ -124,14 +128,16 @@ describe("experiment research unit compilation", () => {
 			"proc-spec-compile/unit/0005",
 		]);
 		expect(units.map((unit) => unit.point)).toEqual([
-			{ row: 0, col: 0, xUm: 1000, yUm: 2000, zUm: undefined },
-			{ row: 0, col: 1, xUm: 1005, yUm: 2000, zUm: undefined },
-			{ row: 0, col: 2, xUm: 1010, yUm: 2000, zUm: undefined },
-			{ row: 1, col: 2, xUm: 1010, yUm: 2010, zUm: undefined },
-			{ row: 1, col: 1, xUm: 1005, yUm: 2010, zUm: undefined },
-			{ row: 1, col: 0, xUm: 1000, yUm: 2010, zUm: undefined },
+			{ row: 0, col: 0, xUm: 1000, yUm: 2000, zUm: 50 },
+			{ row: 0, col: 1, xUm: 1005, yUm: 2000, zUm: 50 },
+			{ row: 0, col: 2, xUm: 1010, yUm: 2000, zUm: 50 },
+			{ row: 1, col: 2, xUm: 1010, yUm: 2010, zUm: 50 },
+			{ row: 1, col: 1, xUm: 1005, yUm: 2010, zUm: 50 },
+			{ row: 1, col: 0, xUm: 1000, yUm: 2010, zUm: 50 },
 		]);
 		expect(units.every((unit) => unit.unitKind === "point")).toBe(true);
+		expect(units.slice(0, -1).every((unit) => unit.interUnitDelayMs === 1_000)).toBe(true);
+		expect(units.at(-1)?.interUnitDelayMs).toBeUndefined();
 		expect(units.every((unit) => unit.artifactScope.artifactPathPrefix.includes("proc-spec-compile"))).toBe(true);
 		expect(units.every((unit) => ExecutionUnitValidator.Check(unit))).toBe(true);
 	});

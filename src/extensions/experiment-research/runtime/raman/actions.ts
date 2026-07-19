@@ -102,6 +102,7 @@ export const FrameCaptureLatestActionSchema = Type.Object(
 		action: Type.Literal("frame.capture_latest"),
 		resourceId: Type.String({ minLength: 1 }),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		laserOff: Type.Optional(Type.Boolean()),
 	},
 	{ additionalProperties: false },
 );

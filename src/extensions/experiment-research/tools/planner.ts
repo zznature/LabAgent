@@ -226,6 +226,7 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 					{ kind: "capture_frame" },
 					{ kind: "acquire_spectrum" },
 				],
+				interPointDelayMs: 300_000,
 			},
 		};
 	}
@@ -249,9 +250,11 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 				perPoint: [
 					{ kind: "move_to_point" },
 					{ kind: "autofocus" },
+					{ kind: "capture_frame", laserOff: true },
 					{ kind: "capture_frame" },
 					{ kind: "acquire_spectrum" },
 				],
+				interPointDelayMs: 300_000,
 			},
 			domain: {
 				raman: {
@@ -270,20 +273,24 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 	return {
 		...common,
 		stoppingRules: {
-			maxRuntimeMinutes: 180,
-			maxUnits: 20,
+			maxRuntimeMinutes: 1_200,
+			maxUnits: 256,
 			stopOnError: false,
-			maxConsecutiveFailures: 20,
+			maxConsecutiveFailures: 256,
 		},
 		plan: {
-			kind: "point_list",
-			points: [
-				{ xUm: 2_375, yUm: 1_640, zUm: 1_510 },
-				{ xUm: 2_475, yUm: 1_640, zUm: 1_510 },
-				{ xUm: 2_575, yUm: 1_640, zUm: 1_510 },
-			],
+			kind: "grid_scan",
+			grid: {
+				origin: { xUm: 2_375, yUm: 1_640, zUm: 1_510 },
+				rows: 16,
+				cols: 16,
+				pitchXUm: 10,
+				pitchYUm: 10,
+				order: "snake",
+			},
 			perPoint: [
 				{ kind: "move_to_point" },
+				{ kind: "capture_frame", laserOff: true },
 				{ kind: "autofocus" },
 				{ kind: "capture_frame" },
 				{ kind: "acquire_spectrum" },
@@ -553,6 +560,7 @@ export const getProcedureSpecTemplateTool = {
 			notes: [
 				"ProcedureSpec supports plan.kind values current_position, point_list, and grid_scan.",
 				"Line scans should use point_list when one axis is fixed and pitchYUm would be zero.",
+				"Use plan.interPointDelayMs on point_list or grid_scan when repeated points need a fixed wait between completed units.",
 				"Use limits only for maxLaserPowerPercent, minObjectiveClearanceUm, xRangeUm, yRangeUm, and zRangeUm.",
 				"Store the research goal with record_experiment_intent, then reference its intentId here.",
 			],

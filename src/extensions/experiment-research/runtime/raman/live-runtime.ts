@@ -97,6 +97,7 @@ interface StagePosition {
 }
 
 const liveRuntimeRegistry = new Map<string, RamanLiveRuntime>();
+const DEFAULT_STAGE_MOVE_TIMEOUT_MS = 120_000;
 const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
 
 function toRuntimeError(actionResult: ActionResult, fallbackCode: string, scope: RuntimeError["scope"] = "unit"): RuntimeError {
@@ -625,7 +626,7 @@ export async function runLiveRamanUnit(
 					yUm: unitPosition.yUm,
 					zUm: unitPosition.zUm,
 				},
-				timeoutMs: 15_000,
+				timeoutMs: DEFAULT_STAGE_MOVE_TIMEOUT_MS,
 			});
 			if (moveResult.status !== "success") {
 				const moveArtifacts = artifactRefs.concat(moveResult.artifacts);
@@ -700,6 +701,7 @@ export async function runLiveRamanUnit(
 				action: "frame.capture_latest",
 				resourceId: frameProviderResourceId,
 				timeoutMs: 10_000,
+				laserOff: action.laserOff ?? false,
 			});
 			if (frameResult.status !== "success") {
 				const frameArtifacts = artifactRefs.concat(frameResult.artifacts);

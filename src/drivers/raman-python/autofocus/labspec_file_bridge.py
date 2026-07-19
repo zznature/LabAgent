@@ -102,20 +102,33 @@ class LabSpecFileBridgeFrameProvider:
         return self._last_frame
 
     def wait_for_next(self, after_ts: float, timeout_ms: int) -> Frame:
+        return self._wait_for_next(after_ts=after_ts, timeout_ms=timeout_ms, laser_off=False)
+
+    def wait_for_next_no_laser(self, after_ts: float, timeout_ms: int) -> Frame:
+        return self._wait_for_next(after_ts=after_ts, timeout_ms=timeout_ms, laser_off=True)
+
+    def _wait_for_next(self, after_ts: float, timeout_ms: int, *, laser_off: bool) -> Frame:
         from PIL import Image
         import numpy as np
 
         deadline = time.monotonic() + timeout_ms / 1000.0
-        request = self._request_capture(timeout_ms)
+        request = self._request_capture(timeout_ms, laser_off=laser_off)
         _trace_bridge(
             self.bridge_dir,
             "capture_frame_request_created",
-            {"requestId": request.request_id, "requestPath": str(request.request_path), "resultPath": str(request.result_path), "outputPath": str(request.output_path)},
+            {
+                "requestId": request.request_id,
+                "requestPath": str(request.request_path),
+                "resultPath": str(request.result_path),
+                "outputPath": str(request.output_path),
+                "laserOff": laser_off,
+            },
         )
         requested_path = request.output_path
         if requested_path is None:
             raise FrameTimeoutError(f"LabSpec capture request {request.request_id} has no output path")
         result = self._wait_for_result(request.result_path, request.request_id, timeout_ms)
+        self._validate_capture_result(result, request.request_id, laser_off=laser_off)
         result_frame_path = Path(result.get("frame_path") or requested_path)
         while time.monotonic() <= deadline:
             if result_frame_path not in self._seen_paths and self._is_stable_file(result_frame_path):
@@ -171,7 +184,7 @@ class LabSpecFileBridgeFrameProvider:
         except Exception:
             return str(source)
 
-    def _request_capture(self, timeout_ms: int):
+    def _request_capture(self, timeout_ms: int, *, laser_off: bool = False):
         request_id = f"cap_{time.monotonic_ns()}"
         return create_labspec_video_frame_request(
             bridge_dir=self.bridge_dir,
@@ -179,7 +192,20 @@ class LabSpecFileBridgeFrameProvider:
             image_format=self.image_format,
             timeout_ms=timeout_ms,
             min_capture_interval_ms=self.min_capture_interval_ms,
+            laser_off=laser_off,
         )
+
+    @staticmethod
+    def _validate_capture_result(result: dict[str, str], request_id: str, *, laser_off: bool) -> None:
+        if not laser_off:
+            return
+        action = result.get("action", "").strip().lower()
+        shutter = result.get("laser_shutter", "").strip().lower()
+        if action != "capture_frame_no_laser" or shutter != "off":
+            raise FrameTimeoutError(
+                f"LabSpec no-laser capture request {request_id} returned "
+                f"action={action or '<missing>'}, laser_shutter={shutter or '<missing>'}"
+            )
 
     @staticmethod
     def _is_stable_file(path: Path) -> bool:

@@ -24,6 +24,11 @@ interface MutablePosition {
 	zUm: number;
 }
 
+interface OperatorRuntimeOptions {
+	autofocusZBestUm?: number;
+	capturedLaserOffValues?: boolean[];
+}
+
 const tempRoots: string[] = [];
 
 afterEach(() => {
@@ -64,7 +69,7 @@ function loadExperimentExtension(): CapturedExtension {
 	return { tools, handlers };
 }
 
-function createOperatorRuntime(position: MutablePosition, options: { autofocusZBestUm?: number } = {}): RamanLiveRuntime {
+function createOperatorRuntime(position: MutablePosition, options: OperatorRuntimeOptions = {}): RamanLiveRuntime {
 	return {
 		preflight() {
 			return {
@@ -146,7 +151,8 @@ function createOperatorRuntime(position: MutablePosition, options: { autofocusZB
 				leasePolicy: "shared-read",
 				simulationAvailable: false,
 			},
-			captureLatest() {
+			captureLatest(action) {
+				options.capturedLaserOffValues?.push(action.laserOff ?? false);
 				return successActionResult(
 					"Frame captured.",
 					{
@@ -302,6 +308,30 @@ describe("experiment research operator tools", () => {
 				label: "LabSpec frame",
 			},
 		]);
+	});
+
+	it("captures a microscope frame through the no-laser runtime path", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const capturedLaserOffValues: boolean[] = [];
+		registerRamanLiveRuntime(cwd, createOperatorRuntime(
+			{ xUm: 100, yUm: 200, zUm: 300 },
+			{ capturedLaserOffValues },
+		));
+		const context = { cwd } as ExtensionContext;
+
+		const frameResult = await extension.tools
+			.get("raman_capture_frame_no_laser")
+			?.execute("frame-no-laser", {}, undefined, undefined, context);
+		const frameDetails = asRecord(frameResult?.details);
+		const frameState = asRecord(frameDetails.stateAfter);
+
+		expect(frameDetails.status).toBe("success");
+		expect(asRecord(frameResult).content).toEqual([
+			{ type: "text", text: "No-laser frame captured: D:\\RamanLab\\SpecBridge\\frames\\frame_1.tif." },
+		]);
+		expect(frameState.laserOff).toBe(true);
+		expect(capturedLaserOffValues).toEqual([true]);
 	});
 
 	it("requires confirmation for autofocus and rejects an unsafe autofocus result", async () => {

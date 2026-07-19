@@ -139,6 +139,24 @@ MVP 策略表只启用：
 
 后续可以扩展更多质量失败原因，例如 low signal-to-noise、saturation、missing peak 或 cosmic ray artifact，但不能把 retry 判断写成散落在 agent prompt 或 driver callback 里的临时逻辑。
 
+### 4.2 点间等待策略
+
+重复采集、mapping 或时间序列实验有时需要在两个测试点之间保持固定等待时间。这个等待属于 `ProcedureSpec.plan` 的调度语义，而不是某个 driver action 的 timeout，也不是 acquisition 参数。
+
+MVP 支持在 `point_list` 和 `grid_scan` plan 上声明：
+
+```ts
+interPointDelayMs: number
+```
+
+语义规则：
+
+- kernel 在当前 point unit 完成后、下一个 point unit 开始前等待。
+- 最后一个 unit 之后不等待。
+- 等待期间仍刷新 heartbeat，并响应 pause / abort 请求。
+- `current_position` 单点 plan 不使用该字段。
+- 该字段只表达 unit 边界上的确定性等待，不允许表达任意循环、条件分支或 driver 命令序列。
+
 ## 5. `ExecutionUnit` 为什么是 kernel 核心对象
 
 `ExecutionUnit` 是 kernel 的核心，不是附属实现细节。

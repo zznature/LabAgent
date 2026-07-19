@@ -238,8 +238,47 @@ describe("experiment research planner proposal flow", () => {
 		const plan = asRecord(template.plan);
 		expect(templateDetails.status).toBe("success");
 		expect(template.procedureId).toBe("raman_grid_mapping");
-		expect(plan.kind).toBe("point_list");
+		expect(plan.kind).toBe("grid_scan");
+		expect(asRecord(plan.grid).rows).toBe(16);
+		expect(asRecord(plan.grid).cols).toBe(16);
+		expect(asRecord(template.stoppingRules).maxUnits).toBe(256);
 		expect(templateState.notes).toEqual(expect.arrayContaining([expect.stringContaining("Line scans should use point_list")]));
+	});
+
+	it("allows a full 16x16 bounded grid mapping through planner preflight when hard limits are satisfied", async () => {
+		const extension = loadExperimentExtension();
+		const context = {} as ExtensionContext;
+		const proposal = buildProcedureProposal({
+			...commonBuilderInput(),
+			procedureId: "raman_grid_mapping",
+			stoppingRules: {
+				maxRuntimeMinutes: 1_200,
+				maxUnits: 256,
+				stopOnError: false,
+				maxConsecutiveFailures: 256,
+			},
+			grid: {
+				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
+				rows: 16,
+				cols: 16,
+				pitchXUm: 10,
+				pitchYUm: 10,
+				order: "snake",
+			},
+		});
+
+		const preflightResult = await extension.tools
+			.get("run_preflight")
+			?.execute("preflight-16x16", { spec: proposal.spec }, undefined, undefined, context);
+		const preflightDetails = asRecord(preflightResult?.details);
+		const preflightState = asRecord(preflightDetails.stateAfter);
+		const risks = preflightState.risks as Array<Record<string, unknown>>;
+
+		expect(preflightDetails.status).toBe("success");
+		expect(preflightState.unitCount).toBe(256);
+		expect(preflightState.readyForApproval).toBe(true);
+		expect(risks.some((risk) => risk.level === "forbidden")).toBe(false);
+		expect(risks.some((risk) => risk.code === "multi_point_mapping")).toBe(true);
 	});
 
 	it("matches workspace experiment procedure templates and surfaces template application metadata", async () => {

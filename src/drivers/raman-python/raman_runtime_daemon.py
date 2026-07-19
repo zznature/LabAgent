@@ -78,13 +78,17 @@ def _fail(
     }
 
 
+_STAGE_COMMAND_TAIL_LIMIT = 40
+
+
 def _stage_move_commands(stage: Any | None) -> list[dict[str, Any]]:
     if stage is None:
         return []
     commands = getattr(stage, "last_move_commands", [])
     if not isinstance(commands, list):
         return []
-    return [dict(command) for command in commands if isinstance(command, dict)]
+    tail = commands[-_STAGE_COMMAND_TAIL_LIMIT:]
+    return [dict(command) for command in tail if isinstance(command, dict)]
 
 
 def _stage_settle_diagnostics(stage: Any | None) -> dict[str, Any]:
@@ -94,6 +98,16 @@ def _stage_settle_diagnostics(stage: Any | None) -> dict[str, Any]:
     if not isinstance(diagnostics, dict):
         return {}
     return dict(diagnostics)
+
+
+def _clear_stage_diagnostics(stage: Any | None) -> None:
+    if stage is None:
+        return
+    commands = getattr(stage, "last_move_commands", None)
+    if isinstance(commands, list):
+        commands.clear()
+    if isinstance(getattr(stage, "last_settle_diagnostics", None), dict):
+        stage.last_settle_diagnostics = {}
 
 
 def _stage_error_payload(stage: Any | None, extra: dict | None = None) -> dict:
@@ -344,6 +358,7 @@ def _handle_stage_position(session: HardwareSession, request: dict) -> dict:
 def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -> dict:
     target = payload["target"]
     stage = session.stage(request["stage"])
+    _clear_stage_diagnostics(stage)
     try:
         stage.move_absolute_and_wait_um(
             x_um=target.get("xUm"),
@@ -383,13 +398,17 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
     bridge_dir = Path(frame_cfg["config"]["bridgeDir"])
     image_format = frame_cfg["config"]["imageFormat"]
     timeout_ms = int(payload["timeoutMs"])
-    _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
+    laser_off = bool(payload.get("laserOff", False))
+    _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
     provider = session.frame(frame_cfg, timeout_ms)
-    _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms})
+    _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
     previous_artifact_dir = getattr(provider, "artifact_dir", None)
     provider.artifact_dir = None
     try:
-        frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
+        if laser_off and hasattr(provider, "wait_for_next_no_laser"):
+            frame = provider.wait_for_next_no_laser(after_ts=0.0, timeout_ms=timeout_ms)
+        else:
+            frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
     finally:
         provider.artifact_dir = previous_artifact_dir
     source_path = Path(frame.path) if getattr(frame, "path", None) else Path(latest_frame_path(bridge_dir, image_format))
@@ -406,6 +425,7 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
             "framePath": frame_path,
             "sourceFramePath": str(source_path),
             "pointArtifactDir": str(point_dir) if point_dir is not None else "",
+            "laserOff": laser_off,
         },
     )
 
@@ -418,6 +438,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     params = payload.get("params") or {}
     timeout_ms = int(payload["timeoutMs"])
     xyz_stage = session.stage(stage_cfg)
+    _clear_stage_diagnostics(xyz_stage)
     stage = _ZOnlyStageAdapter(xyz_stage)
     provider = session.frame(request["frameProvider"], timeout_ms)
     point_dir = session.current_point_dir()

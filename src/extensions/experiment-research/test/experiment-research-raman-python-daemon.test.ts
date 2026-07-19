@@ -41,6 +41,7 @@ rl.on("line", (raw) => {
       payload.stageSettleDiagnostics = { status: "settled", axes: ["z"] };
     } else if (req.action === "frame_capture") {
       payload.framePath = "D:\\RamanLab\\SpecBridge\\frames\\frame_1.tif";
+      payload.laserOff = req.payload.laserOff === true;
     } else if (req.action === "spectrum") {
       payload.outputPath = "D:\\RamanLab\\SpecBridge\\spectra\\" + req.payload.pointId + ".txt";
       payload.spectrumPlotPath = "D:\\RamanLab\\SpecBridge\\spectra\\" + req.payload.pointId + ".png";
@@ -188,6 +189,16 @@ describe("experiment research Raman Python daemon transport", () => {
 		});
 		expect(frame.status).toBe("success");
 		expect(frame.artifacts.map((artifact) => artifact.kind)).toContain("frame");
+		expect(frame.payload?.laserOff).toBe(false);
+
+		const noLaserFrame = await runtime.frame.captureLatest({
+			action: "frame.capture_latest",
+			resourceId: "frame-main",
+			timeoutMs: 5_000,
+			laserOff: true,
+		});
+		expect(noLaserFrame.status).toBe("success");
+		expect(noLaserFrame.payload?.laserOff).toBe(true);
 
 		const spectrum = await runtime.spectrometer.acquireSpectrum({
 			action: "spectrometer.acquire_spectrum",

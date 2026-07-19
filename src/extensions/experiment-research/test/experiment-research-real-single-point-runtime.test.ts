@@ -162,6 +162,7 @@ function createLiveRuntime(
 	controlAvailable = true,
 	observations?: Array<{ saturated: boolean; snr: number; targetPeakBaselineRatio: number }>,
 	metrics?: { stageMoveCalls: number },
+	capturedFrameLaserOff?: boolean[],
 ): RamanLiveRuntime {
 	let spectrumCall = 0;
 	return {
@@ -244,7 +245,8 @@ function createLiveRuntime(
 				leasePolicy: "shared-read",
 				simulationAvailable: false,
 			},
-			captureLatest() {
+			captureLatest(action) {
+				capturedFrameLaserOff?.push(action.laserOff ?? false);
 				return successActionResult(
 					"Frame captured.",
 					{
@@ -461,6 +463,45 @@ describe("experiment research real supervised single-point runtime", () => {
 
 		expect(terminalState.status).toBe("completed");
 		expect(metrics.stageMoveCalls).toBe(0);
+	});
+
+	it("passes bounded ProcedureSpec laser-off frame capture intent to live runtime", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedFrameLaserOff: boolean[] = [];
+		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true, undefined, undefined, capturedFrameLaserOff));
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ procedureId: "raman_grid_mapping" });
+		spec.plan.perPoint = [
+			{ kind: "move_to_point" },
+			{ kind: "autofocus" },
+			{ kind: "capture_frame", laserOff: true },
+			{ kind: "capture_frame" },
+			{ kind: "acquire_spectrum" },
+		];
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-laser-off-frame",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedFrameLaserOff).toEqual([true, false]);
 	});
 
 	it("executes live bounded parameter search and stops early once acceptable conditions are confirmed", async () => {

@@ -297,6 +297,10 @@ export async function executeLinearRun(
 		}
 
 		context.completeUnit(unit, resultArtifacts);
+		const waitResult = await context.waitAfterUnit(unit);
+		if (waitResult !== "continue") {
+			return;
+		}
 	}
 
 	context.complete();
@@ -366,6 +370,11 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 			);
 			return;
 		}
+
+		const waitResult = await context.waitAfterUnit(unit);
+		if (waitResult !== "continue") {
+			return;
+		}
 	}
 
 	context.complete();
@@ -401,10 +410,10 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 			if (result.status === "failed") {
 				const failure = errorForResult(result);
 				recordAttempt(context, unit, attempt, "failed", resultArtifacts, undefined, true);
-				if (activeRun.spec.stoppingRules?.stopOnError === false) {
-					context.recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt);
-					consecutiveMappingFailures += 1;
-					if (consecutiveMappingFailures >= failureLimit) {
+			if (activeRun.spec.stoppingRules?.stopOnError === false) {
+				context.recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt);
+				consecutiveMappingFailures += 1;
+				if (consecutiveMappingFailures >= failureLimit) {
 						context.fail(unit, {
 							errorCode: "mapping_consecutive_failures_limit_reached",
 							message: `Mapping stopped after ${consecutiveMappingFailures} consecutive point failures.`,
@@ -412,11 +421,15 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 							needsOperator: true,
 							safeToResume: false,
 							scope: "run",
-						}, []);
-						return "run_failed";
-					}
-					return "failed";
+					}, []);
+					return "run_failed";
 				}
+				const waitResult = await context.waitAfterUnit(unit);
+				if (waitResult !== "continue") {
+					return waitResult;
+				}
+				return "failed";
+			}
 
 				context.fail(unit, failure, resultArtifacts);
 				return "run_failed";
@@ -424,6 +437,10 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 			consecutiveMappingFailures = 0;
 			recordAttempt(context, unit, attempt, "succeeded", resultArtifacts, undefined, true);
 			context.completeUnit(unit, resultArtifacts, {}, attempt);
+			const waitResult = await context.waitAfterUnit(unit);
+			if (waitResult !== "continue") {
+				return waitResult;
+			}
 			return "succeeded";
 		}
 
@@ -470,6 +487,10 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 					scope: "run",
 				}, []);
 				return "run_failed";
+			}
+			const waitResult = await context.waitAfterUnit(unit);
+			if (waitResult !== "continue") {
+				return waitResult;
 			}
 			return "failed";
 		}

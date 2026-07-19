@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
+import type { ProcedureSpec } from "../schemas/index.ts";
 import { readArtifactRecords, readRunEvents } from "../store/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
@@ -54,7 +55,7 @@ function loadExperimentExtension(): CapturedExtension {
 	return { tools, handlers, getActiveTools: () => activeTools };
 }
 
-function createProcedureSpec(pointCount = 3) {
+function createProcedureSpec(pointCount = 3): ProcedureSpec {
 	return {
 		procedureSpecId: `proc-spec-${pointCount}`,
 		experimentId: "exp-sim-001",
@@ -104,7 +105,7 @@ function createProcedureSpec(pointCount = 3) {
 	};
 }
 
-function createParameterSearchSpec(maxAttempts = 3) {
+function createParameterSearchSpec(maxAttempts = 3): ProcedureSpec {
 	return {
 		procedureSpecId: `proc-search-${maxAttempts}`,
 		experimentId: "exp-search-001",
@@ -162,7 +163,7 @@ function createParameterSearchSpec(maxAttempts = 3) {
 
 async function proposeAndStart(
 	extension: CapturedExtension,
-	spec: ReturnType<typeof createProcedureSpec>,
+	spec: ProcedureSpec,
 	context: ExtensionContext,
 	simulation?: Record<string, unknown>,
 ): Promise<string> {
@@ -259,6 +260,26 @@ describe("experiment research simulation runtime", () => {
 			expect.arrayContaining(["run_started", "unit_started", "unit_completed", "run_completed"]),
 		);
 		expect(readArtifactRecords(cwd, runId).length).toBeGreaterThan(0);
+	});
+
+	it("waits between repeated points when interPointDelayMs is set", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createProcedureSpec(2);
+		if (spec.plan.kind !== "point_list") {
+			throw new Error("test spec must use point_list");
+		}
+		spec.plan.interPointDelayMs = 30;
+
+		const startedAt = Date.now();
+		const runId = await proposeAndStart(extension, spec, context, { perUnitDelayMs: 1 });
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(30);
+		expect(terminalState.status).toBe("completed");
+		expect(readRunEvents(cwd, runId).map((event) => event.eventType)).toContain("inter_unit_delay_started");
 	});
 
 	it("supports manual pause and manual abort requests at safe unit boundaries", async () => {

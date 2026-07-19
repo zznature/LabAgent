@@ -644,7 +644,11 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 		frame: {
 			resource: resolvedConfig.frameProvider,
 			captureLatest: async (action: FrameCaptureLatestAction): Promise<ActionResult> => {
-				const response = await daemon.request("frame_capture", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000);
+				const response = await daemon.request(
+					"frame_capture",
+					{ timeoutMs: action.timeoutMs, laserOff: action.laserOff ?? false },
+					action.timeoutMs + 10_000,
+				);
 				return createActionResult(response, response.ok ? asArtifact(response.payload.framePath, "frame", "LabSpec frame") : []);
 			},
 		},

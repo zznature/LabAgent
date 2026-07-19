@@ -304,6 +304,7 @@ def create_labspec_video_frame_request(
     image_format: str = "tif",
     timeout_ms: int = 3000,
     min_capture_interval_ms: int = 400,
+    laser_off: bool = False,
 ) -> LabSpecQueuedWorkerRequest:
     """Create one queued video-frame capture request for the unified worker."""
 
@@ -316,15 +317,16 @@ def create_labspec_video_frame_request(
 
     resolved_bridge_dir = Path(bridge_dir) if bridge_dir is not None else DEFAULT_LABSPEC_BRIDGE_DIR
     resolved_request_id = _file_safe_request_id(request_id or uuid.uuid4().hex)
+    frame_prefix = "frame_no_laser" if laser_off else "frame"
     resolved_output_path = (
         Path(output_path)
         if output_path is not None
         else resolved_bridge_dir
         / DEFAULT_LABSPEC_FRAME_DIRNAME
-        / f"frame_{resolved_request_id}.{image_format}"
+        / f"{frame_prefix}_{resolved_request_id}.{image_format}"
     )
     return create_labspec_worker_request(
-        action="capture_frame",
+        action="capture_frame_no_laser" if laser_off else "capture_frame",
         bridge_dir=resolved_bridge_dir,
         request_id=resolved_request_id,
         output_path=resolved_output_path,

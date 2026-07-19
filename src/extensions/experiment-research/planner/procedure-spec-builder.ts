@@ -81,6 +81,7 @@ interface BaseProcedureBuilderInput {
 	stoppingRules?: StoppingRules;
 	autofocus: AutofocusInput;
 	acquisition: RamanAcquisitionInput;
+	interPointDelayMs?: number;
 }
 
 export interface SinglePointProbeBuilderInput extends BaseProcedureBuilderInput {
@@ -97,7 +98,7 @@ export interface ParameterSearchBuilderInput extends BaseProcedureBuilderInput {
 export interface GridMappingBuilderInput extends BaseProcedureBuilderInput {
 	procedureId: "raman_grid_mapping";
 	grid: {
-		origin: { xUm: number; yUm: number };
+		origin: { xUm: number; yUm: number; zUm?: number };
 		rows: number;
 		cols: number;
 		pitchXUm: number;
@@ -155,6 +156,7 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 			kind: "grid_scan",
 			grid: input.grid,
 			perPoint: defaultActions(),
+			interPointDelayMs: input.interPointDelayMs,
 		};
 	}
 
@@ -163,6 +165,7 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 			kind: "point_list",
 			points: Array.from({ length: input.parameterSearch.maxAttempts }, () => ({ ...input.point })),
 			perPoint: defaultActions(),
+			interPointDelayMs: input.interPointDelayMs,
 		};
 	}
 
@@ -177,6 +180,7 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 		kind: "point_list",
 		points: [{ ...input.point }],
 		perPoint: defaultActions(),
+		interPointDelayMs: input.interPointDelayMs,
 	};
 }
 
@@ -285,7 +289,13 @@ function classifyMotionRangeRisks(spec: ProcedureSpec): ProposalRisk[] {
 
 export function estimateProcedureRuntimeMs(spec: ProcedureSpec): number {
 	const units = compileProcedureSpec(spec);
-	return units.reduce((total, unit) => total + unit.actions.reduce((sum, action) => sum + actionRuntimeMs(spec, action.kind), 0), 0);
+	return units.reduce(
+		(total, unit) =>
+			total +
+			unit.actions.reduce((sum, action) => sum + actionRuntimeMs(spec, action.kind), 0) +
+			(unit.interUnitDelayMs ?? 0),
+		0,
+	);
 }
 
 export function defaultProposalSavePath(spec: ProcedureSpec): string {

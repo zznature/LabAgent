@@ -41,6 +41,7 @@ function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): Executio
 		point: toExecutionPoint(point),
 		actions: plan.perPoint,
 		limits: spec.limits,
+		interUnitDelayMs: index < plan.points.length - 1 ? plan.interPointDelayMs : undefined,
 		resumeKey: createResumeKey(spec.procedureSpecId, index),
 		artifactScope: {
 			artifactPathPrefix: createArtifactPrefix(spec.procedureSpecId, index),
@@ -61,6 +62,7 @@ function buildGridPoints(plan: GridScanPlan): ExecutionUnitPoint[] {
 				col,
 				xUm: plan.grid.origin.xUm + col * plan.grid.pitchXUm,
 				yUm: plan.grid.origin.yUm + row * plan.grid.pitchYUm,
+				zUm: plan.grid.origin.zUm,
 			});
 		}
 	}
@@ -68,7 +70,8 @@ function buildGridPoints(plan: GridScanPlan): ExecutionUnitPoint[] {
 }
 
 function buildGridScanUnits(spec: ProcedureSpec, plan: GridScanPlan): ExecutionUnit[] {
-	return buildGridPoints(plan).map((point, index) => ({
+	const points = buildGridPoints(plan);
+	return points.map((point, index) => ({
 		unitId: createUnitId(spec.procedureSpecId, index),
 		index,
 		unitKind: "point",
@@ -76,6 +79,7 @@ function buildGridScanUnits(spec: ProcedureSpec, plan: GridScanPlan): ExecutionU
 		point,
 		actions: plan.perPoint,
 		limits: spec.limits,
+		interUnitDelayMs: index < points.length - 1 ? plan.interPointDelayMs : undefined,
 		resumeKey: createResumeKey(spec.procedureSpecId, index),
 		artifactScope: {
 			artifactPathPrefix: createArtifactPrefix(spec.procedureSpecId, index),

@@ -381,6 +381,49 @@ export const ramanCaptureFrameTool = {
 	},
 } satisfies ToolDefinition<typeof EmptyParamsSchema, OperatorToolDetails>;
 
+export const ramanCaptureFrameNoLaserTool = {
+	name: "raman_capture_frame_no_laser",
+	label: "Raman Capture Frame No Laser",
+	description: "Capture one microscope/frame-provider image with the LabSpec worker no-laser capture path.",
+	promptSnippet: "Capture one current microscope/sample image without opening the Raman laser",
+	promptGuidelines: [
+		"Use this when the operator asks for a frame, microscope image, or sample image without laser exposure.",
+		"This tool sends the LabSpec worker capture_frame_no_laser action through the registered live runtime.",
+		"Return the frame artifact/path from the tool result when capture succeeds.",
+	],
+	parameters: EmptyParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		const runtime = getRamanLiveRuntime(ctx.cwd);
+		if (!runtime) {
+			return runtimeUnavailableState();
+		}
+
+		const frameResult = await runtime.frame.captureLatest({
+			action: "frame.capture_latest",
+			resourceId: runtime.frame.resource.resourceId,
+			timeoutMs: 10_000,
+			laserOff: true,
+		});
+		const payload = isRecord(frameResult.payload) ? frameResult.payload : {};
+		const framePath = readString(payload, "framePath");
+		const stateAfter: Record<string, unknown> = {
+			frameProviderResourceId: runtime.frame.resource.resourceId,
+			actionStatus: frameResult.status,
+			laserOff: true,
+			payload,
+			artifactRefs: frameResult.artifacts,
+		};
+
+		if (frameResult.status !== "success") {
+			return error(frameResult.summary, frameResult.errorCode ?? "frame_capture_failed", stateAfter, frameResult.retrySafe);
+		}
+
+		const summary = framePath ? `No-laser frame captured: ${framePath}.` : "No-laser frame captured.";
+		return success(summary, stateAfter);
+	},
+} satisfies ToolDefinition<typeof EmptyParamsSchema, OperatorToolDetails>;
+
 export const ramanAcquireSmokeSpectrumTool = {
 	name: "raman_acquire_smoke_spectrum",
 	label: "Raman Smoke Spectrum",

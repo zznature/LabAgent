@@ -37,6 +37,7 @@ export const ExecutionUnitSchema = Type.Object(
 		point: Type.Optional(ExecutionUnitPointSchema),
 		actions: Type.Array(SemanticStepSchema, { minItems: 1 }),
 		limits: ProcedureLimitsSchema,
+		interUnitDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
 		resumeKey: Type.String({ minLength: 1 }),
 		artifactScope: ArtifactScopeSchema,
 	},

@@ -22,6 +22,7 @@ export const GridPointSchema = Type.Object(
 	{
 		xUm: Type.Number(),
 		yUm: Type.Number(),
+		zUm: Type.Optional(Type.Number()),
 	},
 	{ additionalProperties: false },
 );
@@ -29,7 +30,13 @@ export const GridPointSchema = Type.Object(
 export const SemanticStepSchema = Type.Union([
 	Type.Object({ kind: Type.Literal("move_to_point") }, { additionalProperties: false }),
 	Type.Object({ kind: Type.Literal("autofocus") }, { additionalProperties: false }),
-	Type.Object({ kind: Type.Literal("capture_frame") }, { additionalProperties: false }),
+	Type.Object(
+		{
+			kind: Type.Literal("capture_frame"),
+			laserOff: Type.Optional(Type.Boolean()),
+		},
+		{ additionalProperties: false },
+	),
 	Type.Object({ kind: Type.Literal("acquire_spectrum") }, { additionalProperties: false }),
 ]);
 
@@ -204,6 +211,7 @@ export const GridScanPlanSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		perPoint: Type.Array(SemanticStepSchema, { minItems: 1 }),
+		interPointDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
 	},
 	{ additionalProperties: false },
 );
@@ -213,6 +221,7 @@ export const PointListPlanSchema = Type.Object(
 		kind: Type.Literal("point_list"),
 		points: Type.Array(PointSchema, { minItems: 1 }),
 		perPoint: Type.Array(SemanticStepSchema, { minItems: 1 }),
+		interPointDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
 	},
 	{ additionalProperties: false },
 );

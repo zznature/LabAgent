@@ -48,6 +48,7 @@ export interface RunExecutionContext {
 	abortAt(unit: ExecutionUnit): void;
 	markUnitStarted(unit: ExecutionUnit, attempt?: UnitAttemptContext): RunState;
 	executeUnit(unit: ExecutionUnit, options?: LiveRamanUnitOptions): Promise<ManagedUnitResult>;
+	waitAfterUnit(unit: ExecutionUnit): Promise<"continue" | "paused" | "aborted">;
 	pause(unit: ExecutionUnit, reason: string, resultArtifacts: RunState["artifactRefs"]): void;
 	fail(unit: ExecutionUnit, failure: RuntimeError, resultArtifacts: RunState["artifactRefs"]): void;
 	complete(): void;
@@ -69,6 +70,7 @@ export interface RunExecutionContext {
 const activeRuns = new Map<string, ActiveRun>();
 
 const DEFAULT_MAPPING_MAX_CONSECUTIVE_FAILURES = 3;
+const INTER_UNIT_DELAY_HEARTBEAT_MS = 1_000;
 
 function timestamp(): string {
 	return new Date().toISOString();
@@ -199,6 +201,21 @@ function appendUnitCompletedEvent(
 			artifacts: artifacts.map((artifact) => artifact.artifactId),
 			...attemptPayload(attempt),
 			...additionalPayload,
+		},
+	});
+}
+
+function appendInterUnitDelayEvent(activeRun: ActiveRun, unit: ExecutionUnit, delayMs: number): void {
+	appendEvent(activeRun.cwd, {
+		eventId: `${activeRun.runId}-inter-unit-delay-${unit.index}`,
+		runId: activeRun.runId,
+		experimentId: activeRun.spec.experimentId,
+		eventType: "inter_unit_delay_started",
+		timestamp: timestamp(),
+		payload: {
+			unitId: unit.unitId,
+			index: unit.index,
+			delayMs,
 		},
 	});
 }
@@ -346,6 +363,44 @@ function applySkippedFailureProgress(
 	appendUnitFailedEvent(activeRun, unit, failure, resultArtifacts, attempt);
 }
 
+function refreshHeartbeat(activeRun: ActiveRun): void {
+	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
+		...current,
+		heartbeatAt: timestamp(),
+		updatedAt: timestamp(),
+	}));
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms);
+	});
+}
+
+async function waitAfterUnitBoundary(activeRun: ActiveRun, unit: ExecutionUnit): Promise<"continue" | "paused" | "aborted"> {
+	const delayMs = unit.interUnitDelayMs ?? 0;
+	if (delayMs <= 0) {
+		return "continue";
+	}
+
+	appendInterUnitDelayEvent(activeRun, unit, delayMs);
+	const deadline = Date.now() + delayMs;
+	while (Date.now() < deadline) {
+		if (activeRun.abortRequested) {
+			abortActiveRun(activeRun, unit);
+			return "aborted";
+		}
+		if (activeRun.pauseRequested) {
+			pauseActiveRun(activeRun, unit, "operator_requested_during_inter_unit_delay", []);
+			return "paused";
+		}
+		refreshHeartbeat(activeRun);
+		await sleep(Math.min(INTER_UNIT_DELAY_HEARTBEAT_MS, Math.max(0, deadline - Date.now())));
+	}
+
+	return "continue";
+}
+
 function singlePointOptions(activeRun: ActiveRun): LiveRamanUnitOptions | undefined {
 	if (activeRun.mode !== "live-supervised") {
 		return undefined;
@@ -417,6 +472,9 @@ function createRunExecutionContext(activeRun: ActiveRun): RunExecutionContext {
 				throw new Error(`run state missing while executing: ${activeRun.runId}`);
 			}
 			return executeUnit(activeRun, unit, currentState, options);
+		},
+		waitAfterUnit(unit) {
+			return waitAfterUnitBoundary(activeRun, unit);
 		},
 		pause(unit, reason, resultArtifacts) {
 			pauseActiveRun(activeRun, unit, reason, resultArtifacts);

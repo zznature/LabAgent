@@ -49,10 +49,11 @@ describe("experiment research core schemas", () => {
 			plan: {
 				kind: "point_list",
 				points: [{ xUm: 1000, yUm: 2000 }],
+				interPointDelayMs: 300_000,
 				perPoint: [
 					{ kind: "move_to_point" },
 					{ kind: "autofocus" },
-					{ kind: "capture_frame" },
+					{ kind: "capture_frame", laserOff: true },
 					{ kind: "acquire_spectrum" },
 				],
 			},
@@ -102,7 +103,7 @@ describe("experiment research core schemas", () => {
 			plan: {
 				kind: "grid_scan",
 				grid: {
-					origin: { xUm: 1000, yUm: 2000 },
+					origin: { xUm: 1000, yUm: 2000, zUm: 1540 },
 					rows: 4,
 					cols: 5,
 					pitchXUm: 5,
@@ -110,6 +111,7 @@ describe("experiment research core schemas", () => {
 					order: "snake",
 				},
 				perPoint: pointListSpec.plan.perPoint,
+				interPointDelayMs: 300_000,
 			},
 			stoppingRules: {
 				maxRuntimeMinutes: 60,
