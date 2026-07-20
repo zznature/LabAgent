@@ -22,10 +22,10 @@ Implementation should always follow `docs/design-ideas/core-ideas.md`, which is 
 
 Every non-trivial response must contain two sections:
 
-1. **✅ ★ Direct Execution ★** — Deliver results that serve the user's *real* goal, not just the literal words. Solve the whole problem.
-2. **🔎 ★ Deep Thinking ★** — Always challenge the user with in-depth analysis:
+1. **✅ ★ Direct Execution ★** — Deliver results that serve the user's *real* goal, not just the literal words.
+2. **🔎 ★ Deep Thinking ★** — Always challenge the user with in-depth analysis, such as:
    - Insights: Dig insights in the building process
-   - Questions: whether the stated task fits the real goal
+   - Questions: Whether the stated task fits the real goal
    - Improvements: Suggest more elegant / efficient / straightforward options when one exists
 
 ## Code Quality
