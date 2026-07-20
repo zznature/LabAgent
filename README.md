@@ -1,9 +1,7 @@
 # LabAgents
 
-LabAgents is the Raman lab product layer for pi. The pi runtime is consumed as a
-fixed npm dependency; this repository owns the product source (`src/`), the
-deployment layer (`deploy/`), design notes, and product tests. See
-`docs/repo-structure.md` for the full layout.
+LabAgents is designed for controlling intruments to conduct autonomous experiments.
+At present we are demostrating first auto-researches on Raman experiments.
 
 ## Install
 
@@ -13,7 +11,7 @@ npm run check
 npm test
 ```
 
-## Setup a Lab Workspace
+### Setup a Lab Workspace
 
 The agent must run from a workspace that does not contain product source code.
 
@@ -49,20 +47,7 @@ rendering. The local runtime config is merged over `raman-runtime.lab.json`, so
 it can contain only local differences such as `pythonExecutable` and
 `stage.config.port`.
 
-The MC.Newton LT-06 vendor SDK wheel is bundled under
-`lab-config\drivers\raman-python\vendor\` and is loaded directly by the stage
-driver if it has not been installed into the Python environment. Installing it
-separately is optional unless the lab wants the SDK available outside
-LabAgents.
-
-To refresh only the deployed Raman Python driver copy without rewriting `.pi`
-settings or lab runtime config, run:
-
-```powershell
-.\deploy\sync-driver.ps1 C:\RamanLab\RamanLabWorkspace
-```
-
-## Run
+### Run
 
 ```sh
 deploy/run-labagents.sh /path/to/RamanLabWorkspace
@@ -76,3 +61,11 @@ On Windows:
 
 The run script launches the locally installed, pinned `pi` binary from this
 repository and changes cwd to the lab workspace before starting the agent.
+
+## Acknowledge
+
+This project is built upon or inspired by the repositories:
+
+- pi
+- bluesky
+- pymeasure
