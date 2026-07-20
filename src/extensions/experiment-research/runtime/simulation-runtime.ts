@@ -13,6 +13,8 @@ export interface SimulationControls {
 	spectrumTimeoutAtUnit?: number;
 	spectrumTimeoutAtUnits?: number[];
 	spectrumTimeoutFailuresBeforeSuccessByUnit?: Record<string, number>;
+	stageSettleTimeoutFailuresBeforeSuccessByUnit?: Record<string, number>;
+	systemicFailureAtUnit?: number;
 	operatorPauseAtUnit?: number;
 	parameterSearchObservations?: RamanObservationMetrics[];
 	attemptCountsByUnit?: Record<string, number>;
@@ -167,6 +169,26 @@ export async function runSimulationUnit(
 		return {
 			status: "paused",
 			reason: `Simulated operator pause requested at unit ${unit.index}.`,
+			artifactRefs: [],
+		};
+	}
+
+	if (controls.systemicFailureAtUnit === unit.index) {
+		return {
+			status: "failed",
+			error: createRuntimeError(
+				"unknown_python_action",
+				"Unsupported Python Raman action: frame_capture_laser_off",
+				false,
+			),
+			artifactRefs: [],
+		};
+	}
+
+	if (failsBeforeSuccess(controls.stageSettleTimeoutFailuresBeforeSuccessByUnit, unit.index, attemptCount)) {
+		return {
+			status: "failed",
+			error: createRuntimeError("stage_settle_timeout", `Simulated stage settle timeout at unit ${unit.index}.`, true),
 			artifactRefs: [],
 		};
 	}

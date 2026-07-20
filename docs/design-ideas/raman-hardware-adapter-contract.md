@@ -221,6 +221,24 @@ spectrometer 若没有独立长连接，也必须由 daemon 串行管理 request
 
 daemon 仅从 `lab-config/drivers/raman-python` 下导入；`docs/Raman` 仍只作 legacy/reference。
 
+### 4.6 Daemon protocol compatibility
+
+daemon preflight 必须返回 `protocolVersion`、`driverVersion` 与 `supportedActions`。TS runtime 只在
+protocol version 与当前 client 完全一致、driver version 等于当前部署修订 `raman-python-v1` 且 action table 非空时报告 ready；
+旧 daemon 即使返回 `ok: true` 也不得被视为兼容。
+
+对具体 `ProcedureSpec` 做 live preflight 时，Raman runtime（而非 kernel）根据编译后的 units 推导所需 Python actions，
+并验证：
+
+```text
+requiredActions ⊆ supportedActions
+```
+
+缺少 `frame_capture_laser_off`、`autofocus`、`spectrum` 等任一计划所需 action 时产生 forbidden
+`runtime_action_unsupported`，阻止 proposal approval 与 run start。工作区部署脚本负责从
+`src/drivers/raman-python` 刷新 `lab-config/drivers/raman-python`；运行时握手而非“复制命令成功”
+是判断部署兼容的最终事实。
+
 ## 5. Raman Driver 分层
 
 本文把 Raman 接入分成三层：
@@ -514,6 +532,8 @@ Raman 是真实硬件，因此只靠 `approve_and_start_run` 不够，还需要 
 - stage 能否连接并读位置
 - frame bridge 目录可用性
 - spectrum bridge 目录可用性
+- daemon protocol version、driver version 与 supported actions
+- 编译计划所需 action 全部受当前 daemon 支持
 - 编译后的每个 live absolute point 是否具有完整 X/Y/Z 和可执行 action 参数
 - grid compiler 先把计算坐标量化到固定精度，再做精确 motion range 比较；
   runtime 在每个 action 前仍使用未经扩大的同一硬边界
@@ -596,10 +616,10 @@ Runtime 再将 source evidence 规范化为四种 canonical profiles：
 
 Raman 接入必须把 Python 异常归一化成结构化错误码，而不是把 traceback 暴露给 kernel 或 Agent。
 
-MVP 最小错误模型建议至少区分：
+MVP 最小错误模型至少区分：
 
 - `stage_connection_error`
-- `stage_timeout`
+- `stage_settle_timeout`
 - `frame_timeout`
 - `autofocus_no_peak`
 - `autofocus_low_confidence`
@@ -607,6 +627,8 @@ MVP 最小错误模型建议至少区分：
 - `spectrum_timeout`
 - `worker_result_error`
 - `bridge_protocol_error`
+- `unknown_python_action`
+- `python_runtime_protocol_mismatch`
 
 > `xy_correction_low_confidence` remains a future/reference error code and is outside the MVP error surface.
 
@@ -623,6 +645,11 @@ MVP 最小错误模型建议至少区分：
 - `retrySafe`
 - `needsOperator`
 - `safeToResume`
+
+`stage_settle_timeout` 映射到 retry policy 的 `execution.timeout`；普通 `stage_move_failed` 不因 message
+中出现时间描述而自动重试。`unknown_python_action`、`python_runtime_protocol_mismatch`、daemon
+spawn/exit/parse failure 和 invalid runtime contract 属于系统性错误，必须结束 bounded run，不能被
+`stopOnError: false` 或 point-level consecutive failure threshold 吞掉。
 
 ## 12. 为什么 mapping runner 只能作为参考
 

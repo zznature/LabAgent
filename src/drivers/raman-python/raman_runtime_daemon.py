@@ -28,6 +28,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+RAMAN_RUNTIME_PROTOCOL_VERSION = 1
+RAMAN_RUNTIME_DRIVER_VERSION = "raman-python-v1"
+SUPPORTED_ACTIONS = [
+    "preflight",
+    "stage_position",
+    "stage_move",
+    "frame_capture",
+    "frame_capture_laser_off",
+    "autofocus",
+    "spectrum",
+]
+
 import numpy as np
 from PIL import Image
 
@@ -40,6 +53,8 @@ sys.stdout = sys.stderr
 _DAEMON_ROOT = Path(__file__).resolve().parent
 if str(_DAEMON_ROOT) not in sys.path:
     sys.path.insert(0, str(_DAEMON_ROOT))
+
+from stage.exceptions import StageTimeoutError
 
 
 def _trace(message: str, payload: dict | None = None) -> None:
@@ -340,6 +355,9 @@ def _handle_preflight(session: HardwareSession, request: dict, payload: dict) ->
     frame_cfg = request["frameProvider"]
     spectrometer_cfg = request["spectrometer"]
     details = {
+        "protocolVersion": RAMAN_RUNTIME_PROTOCOL_VERSION,
+        "driverVersion": RAMAN_RUNTIME_DRIVER_VERSION,
+        "supportedActions": SUPPORTED_ACTIONS,
         "pythonRootExists": python_root.exists(),
         "frameBridgeDirExists": Path(frame_cfg["config"]["bridgeDir"]).exists(),
         "spectrumBridgeDirExists": Path(spectrometer_cfg["config"]["bridgeDir"]).exists(),
@@ -384,7 +402,7 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
         _trace("stage_move_error", error_payload)
         session.disable_stage_axes()
         return _fail(
-            "stage_move_failed",
+            "stage_settle_timeout" if isinstance(exc, StageTimeoutError) else "stage_move_failed",
             str(exc),
             retry_safe=True,
             safe_to_resume=True,

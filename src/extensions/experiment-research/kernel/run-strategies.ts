@@ -43,6 +43,26 @@ interface FinalRetryQueueItem {
 	nextAttemptIndex: number;
 }
 
+const SYSTEMIC_RUNTIME_ERROR_CODES = new Set([
+	"unknown_python_action",
+	"python_runtime_protocol_mismatch",
+	"python_runtime_spawn_failed",
+	"python_runtime_exit_failed",
+	"python_runtime_parse_failed",
+	"python_runtime_bad_request",
+	"python_runtime_closed",
+	"python_runtime_error",
+	"invalid_runtime_contract",
+	"resource_unavailable",
+	"driver_not_loaded",
+	"driver_unavailable",
+	"bridge_unavailable",
+]);
+
+function isSystemicRuntimeFailure(failure: RuntimeError): boolean {
+	return failure.scope === "run" || SYSTEMIC_RUNTIME_ERROR_CODES.has(failure.errorCode);
+}
+
 function stopBeforeUnit(context: RunExecutionContext, unit: ExecutionUnit): boolean {
 	if (context.activeRun.abortRequested) {
 		context.abortAt(unit);
@@ -328,7 +348,7 @@ export async function executeLinearRun(
 
 		if (result.status === "failed") {
 			const failure = errorForResult(result);
-			if (activeRun.spec.stoppingRules?.stopOnError === false && failure.scope !== "run") {
+			if (activeRun.spec.stoppingRules?.stopOnError === false && !isSystemicRuntimeFailure(failure)) {
 				recordAttempt(context, unit, attempt, "failed", resultArtifacts, failure, true);
 				context.recordUnitFailureAndContinue(unit, failure, resultArtifacts, attempt);
 				continue;
@@ -454,6 +474,14 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 		}
 		if (context.deadlineExceeded()) {
 			context.failDeadline(unit, resultArtifacts);
+			return "run_failed";
+		}
+		if (
+			result.status === "failed" &&
+			isSystemicRuntimeFailure(result.error)
+		) {
+			recordAttempt(context, unit, attempt, "failed", resultArtifacts, result.error, true);
+			context.fail(unit, result.error, resultArtifacts);
 			return "run_failed";
 		}
 

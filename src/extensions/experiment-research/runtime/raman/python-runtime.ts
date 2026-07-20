@@ -29,6 +29,8 @@ export const RAMAN_PYTHON_RUNTIME_LOCAL_CONFIG_PATH = join("lab-config", "raman-
 export const RAMAN_PYTHON_RUNTIME_LAB_CONFIG_PATH = join("lab-config", "raman-runtime.lab.json");
 export const RAMAN_HARDWARE_PYTHON_DRIVER_PATH = join("lab-config", "drivers", "raman-python");
 export const RAMAN_RUNTIME_DAEMON_SCRIPT = "raman_runtime_daemon.py";
+export const RAMAN_RUNTIME_PROTOCOL_VERSION = 1;
+const RAMAN_RUNTIME_DRIVER_VERSION = "raman-python-v1";
 
 const DEFAULT_DAEMON_IDLE_SHUTDOWN_MS = 30_000;
 const DAEMON_GRACEFUL_KILL_MS = 2_000;
@@ -100,6 +102,16 @@ interface LoadedRamanPythonRuntimeConfig {
 }
 
 type PythonActionKind = "preflight" | "stage_position" | "stage_move" | "frame_capture" | "frame_capture_laser_off" | "autofocus" | "spectrum";
+
+const PYTHON_ACTION_KINDS: PythonActionKind[] = [
+	"preflight",
+	"stage_position",
+	"stage_move",
+	"frame_capture",
+	"frame_capture_laser_off",
+	"autofocus",
+	"spectrum",
+];
 
 interface PythonRequestEnvelope {
 	requestId: string;
@@ -620,11 +632,58 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				},
 				30_000,
 			);
+			if (!response.ok) {
+				return {
+					preflightReady: false,
+					controlAvailable: false,
+					details: { errorCode: response.errorCode, message: response.message },
+				};
+			}
+			const supportedActions = Array.isArray(response.payload.supportedActions)
+				? response.payload.supportedActions.filter((action): action is PythonActionKind =>
+					typeof action === "string" && PYTHON_ACTION_KINDS.includes(action as PythonActionKind)
+				)
+				: [];
+			if (
+				response.payload.protocolVersion !== RAMAN_RUNTIME_PROTOCOL_VERSION ||
+				response.payload.driverVersion !== RAMAN_RUNTIME_DRIVER_VERSION ||
+				supportedActions.length === 0
+			) {
+				return {
+					preflightReady: false,
+					controlAvailable: false,
+					details: {
+						errorCode: "python_runtime_protocol_mismatch",
+						message: `Python Raman daemon must declare protocol version ${RAMAN_RUNTIME_PROTOCOL_VERSION}, driver version ${RAMAN_RUNTIME_DRIVER_VERSION}, and supported actions.`,
+						expectedProtocolVersion: RAMAN_RUNTIME_PROTOCOL_VERSION,
+						receivedProtocolVersion: response.payload.protocolVersion,
+						expectedDriverVersion: RAMAN_RUNTIME_DRIVER_VERSION,
+						receivedDriverVersion: response.payload.driverVersion,
+					},
+				};
+			}
 			return {
-				preflightReady: response.ok,
-				controlAvailable: response.ok,
-				details: response.ok ? response.payload : { errorCode: response.errorCode, message: response.message },
+				preflightReady: true,
+				controlAvailable: true,
+				details: { ...response.payload, supportedActions },
 			};
+		},
+		validatePlanSupport: (units, preflight) => {
+			const declaredActions = preflight.details?.supportedActions;
+			if (!Array.isArray(declaredActions)) {
+				return [{ code: "runtime_capabilities_missing", message: "Live Raman runtime did not declare supported actions." }];
+			}
+			const supportedActions = new Set(declaredActions.filter((action): action is string => typeof action === "string"));
+			const requiredActions = new Set<PythonActionKind>(["preflight", "stage_position"]);
+			if (units.some((unit) => unit.positionRef !== "current" && unit.actions.some((action) => action.kind === "move_to_point"))) requiredActions.add("stage_move");
+			for (const action of units.flatMap((unit) => unit.actions)) {
+				if (action.kind === "autofocus") requiredActions.add("autofocus");
+				if (action.kind === "acquire_spectrum") requiredActions.add("spectrum");
+				if (action.kind === "capture_frame") requiredActions.add(action.laserState === "off" ? "frame_capture_laser_off" : "frame_capture");
+			}
+			return [...requiredActions]
+				.filter((action) => !supportedActions.has(action))
+				.map((action) => ({ code: "runtime_action_unsupported", message: `Live Raman runtime does not support required action ${action}.` }));
 		},
 		stage: {
 			resource: resolvedConfig.stage,

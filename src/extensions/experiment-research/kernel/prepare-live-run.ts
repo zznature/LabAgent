@@ -2,6 +2,7 @@ import type { ProcedureSpec } from "../schemas/index.ts";
 import { summarizeProcedureProposal, type ProposalRisk } from "../planner/procedure-spec-builder.ts";
 import { validateRuntimeAnchorState, type RamanLiveRuntime, type RamanLivePreflightResult } from "../runtime/raman/index.ts";
 import { validateExecutionContract, type ExecutionContractIssue } from "./validate-execution.ts";
+import { compileProcedureSpec } from "./compile-units.ts";
 
 export interface LiveRunPreparation {
 	contractIssues: ExecutionContractIssue[];
@@ -32,12 +33,14 @@ function resourceBindingIssues(spec: ProcedureSpec, runtime: RamanLiveRuntime): 
 }
 
 export async function prepareLiveRun(spec: ProcedureSpec, runtime: RamanLiveRuntime): Promise<LiveRunPreparation> {
+	const livePreflight = await runtime.preflight();
+	const compatibilityIssues = runtime.validatePlanSupport(compileProcedureSpec(spec), livePreflight);
 	const contractIssues = [
 		...validateExecutionContract(spec, "live-supervised"),
 		...resourceBindingIssues(spec, runtime),
+		...compatibilityIssues.map((issue) => ({ ...issue, level: "forbidden" as const })),
 	];
 	const forbiddenRisks = summarizeProcedureProposal(spec).risks.filter((risk) => risk.level === "forbidden");
-	const livePreflight = await runtime.preflight();
 	const anchorValidation = livePreflight.preflightReady && livePreflight.controlAvailable
 		? await validateRuntimeAnchorState(spec, runtime)
 		: { valid: false, details: { skipped: true, reason: "runtime_preflight_not_ready" } };

@@ -38,6 +38,11 @@ export interface RamanLivePreflightResult {
 	details?: Record<string, unknown>;
 }
 
+export interface RamanRuntimeCompatibilityIssue {
+	code: string;
+	message: string;
+}
+
 export interface RamanStageRuntime {
 	resource: StageResource;
 	getPosition(action: StageGetPositionAction): Promise<ActionResult> | ActionResult;
@@ -61,6 +66,7 @@ export interface RamanSpectrometerRuntime {
 
 export interface RamanLiveRuntime {
 	preflight(): Promise<RamanLivePreflightResult> | RamanLivePreflightResult;
+	validatePlanSupport(units: ExecutionUnit[], preflight: RamanLivePreflightResult): RamanRuntimeCompatibilityIssue[];
 	stage: RamanStageRuntime;
 	autofocus: RamanAutofocusRuntime;
 	frame: RamanFrameRuntime;

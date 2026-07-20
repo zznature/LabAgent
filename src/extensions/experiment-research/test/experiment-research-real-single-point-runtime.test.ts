@@ -168,6 +168,7 @@ function createLiveRuntime(
 	metrics?: { stageMoveCalls: number },
 	autofocusConfidences?: number[],
 	artifactRoot?: string,
+	supportedActions?: string[],
 ): RamanLiveRuntime {
 	let spectrumCall = 0;
 	let autofocusCall = 0;
@@ -199,8 +200,16 @@ function createLiveRuntime(
 				details: {
 					stageConnected: preflightReady,
 					controlLease: controlAvailable ? "held" : "missing",
+					...(supportedActions ? { supportedActions } : {}),
 				},
 			};
+		},
+		validatePlanSupport(units) {
+			if (!supportedActions) return [];
+			const requiresLaserOff = units.some((unit) => unit.actions.some((action) => action.kind === "capture_frame" && action.laserState === "off"));
+			return requiresLaserOff && !supportedActions.includes("frame_capture_laser_off")
+				? [{ code: "runtime_action_unsupported", message: "Live Raman runtime does not support required action frame_capture_laser_off." }]
+				: [];
 		},
 		stage: {
 			resource: {
@@ -750,6 +759,41 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(state.controlAvailable).toBe(true);
 		expect(state.readyForApproval).toBe(true);
 		expect(state.requestedModeSupported).toBe(true);
+	});
+
+	it("rejects live preflight when the runtime does not support a required laser-off frame action", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		registerRamanLiveRuntime(cwd, createLiveRuntime(
+			true,
+			true,
+			undefined,
+			undefined,
+			undefined,
+			join(cwd, "driver-artifacts"),
+			["preflight", "stage_position", "stage_move", "frame_capture", "autofocus", "spectrum"],
+		));
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		spec.plan.perPoint = [
+			{ kind: "capture_frame", laserState: "off", role: "pre_focus" },
+			{ kind: "autofocus" },
+			{ kind: "acquire_spectrum" },
+		];
+
+		const result = await extension.tools
+			.get("run_preflight")
+			?.execute("live-preflight-missing-action", { spec, executionMode: "live-supervised" }, undefined, undefined, context);
+		const details = result?.details as Record<string, unknown>;
+		const state = details.stateAfter as Record<string, unknown>;
+		const risks = state.risks as Array<Record<string, unknown>>;
+
+		expect(details.status).toBe("warning");
+		expect(state.readyForApproval).toBe(false);
+		expect(risks).toContainEqual(expect.objectContaining({
+			code: "runtime_action_unsupported",
+		}));
 	});
 
 	it("executes a live supervised single-point run, records artifacts, and persists rule-based evaluation output", async () => {

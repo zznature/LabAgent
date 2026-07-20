@@ -76,6 +76,9 @@ function createOperatorRuntime(position: MutablePosition, options: { autofocusZB
 				},
 			};
 		},
+		validatePlanSupport() {
+			return [];
+		},
 		stage: {
 			resource: {
 				resourceId: "stage-main",

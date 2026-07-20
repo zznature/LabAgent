@@ -140,6 +140,9 @@ function createNoHardwareRuntime(): RamanLiveRuntime {
 		preflight() {
 			return { preflightReady: true, controlAvailable: true };
 		},
+		validatePlanSupport() {
+			return [];
+		},
 		stage: {
 			resource: createRuntimeConfig(true).stage as RamanLiveRuntime["stage"]["resource"],
 			getPosition() {

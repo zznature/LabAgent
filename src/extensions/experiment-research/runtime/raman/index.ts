@@ -65,6 +65,7 @@ export {
 	validateRuntimeAnchorState,
 	RamanCanonicalPublicationError,
 	type RamanLivePreflightResult,
+	type RamanRuntimeCompatibilityIssue,
 	type RamanStageRuntime,
 	type RamanAutofocusRuntime,
 	type RamanFrameRuntime,

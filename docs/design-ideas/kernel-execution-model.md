@@ -139,6 +139,10 @@ MVP 策略表只启用：
 - `execution.timeout`
 - `quality.low_focus_confidence`
 
+这里的 timeout 必须来自 typed error code，例如 `spectrum_timeout` 或 `stage_settle_timeout`，不能解析
+message 猜测。协议不兼容、未知 runtime action、daemon spawn/exit/parse failure 等确定性系统错误
+不进入 retry policy；它们直接结束 run。
+
 后续可以扩展更多质量失败原因，例如 low signal-to-noise、saturation、missing peak 或 cosmic ray artifact，但不能把 retry 判断写成散落在 agent prompt 或 driver callback 里的临时逻辑。
 
 ## 5. `ExecutionUnit` 为什么是 kernel 核心对象
@@ -391,6 +395,17 @@ run 因连续失败阈值结束时，顶层错误同时保留 terminal error 和
 
 这样 `stopOnError = false` 表达的是“允许独立实验单元失败后继续”，而不是吞掉 run-level
 契约、控制或 artifact publication 失败。
+
+Linear 与 mapping scheduler 都必须将已知系统错误提升为 run terminal failure，即使 runtime adapter 暂时把
+其 scope 标成 unit。当前系统错误至少包括：`unknown_python_action`、
+`python_runtime_protocol_mismatch`、`python_runtime_spawn_failed`、`python_runtime_exit_failed`、
+`python_runtime_parse_failed`、daemon lifecycle/contract 错误、`resource_unavailable`、
+driver/bridge unavailable 与 `invalid_runtime_contract`。这是 adapter 迁移期间的 fail-closed
+保护；长期仍应由 runtime 返回准确的 `scope: run`。
+
+Operator-facing summary 聚合 point attempt error codes，返回出现次数最多的 `dominantError` 及其最新
+message。相同 count 时选择最近发生者。这样现场观察不需要扫描文件系统或等待 terminal poll 才能
+识别重复的确定性失败。
 
 ## 11. 观测、进度与 artifact 应该怎样进入 kernel
 

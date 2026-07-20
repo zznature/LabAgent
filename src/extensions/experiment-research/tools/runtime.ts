@@ -43,6 +43,13 @@ interface RetryStats {
 	finalFailedPoints: number;
 }
 
+interface ErrorSummary {
+	errorCode: string;
+	count: number;
+	latestMessage: string;
+	latestTimestamp: string;
+}
+
 function serializeRunState(runState: RunState): Record<string, unknown> {
 	return {
 		runId: runState.runId,
@@ -92,6 +99,38 @@ function summarizeRetries(runState: RunState): RetryStats {
 	};
 }
 
+function dominantError(runState: RunState): Omit<ErrorSummary, "latestTimestamp"> | undefined {
+	const counts = new Map<string, ErrorSummary>();
+	for (const attempt of runState.pointAttempts ?? []) {
+		if (attempt.status !== "failed" || !attempt.errorCode) continue;
+		const current = counts.get(attempt.errorCode);
+		const latestTimestamp = attempt.timestamp;
+		counts.set(attempt.errorCode, {
+			errorCode: attempt.errorCode,
+			count: (current?.count ?? 0) + 1,
+			latestMessage: !current || latestTimestamp >= current.latestTimestamp
+				? attempt.errorMessage ?? attempt.errorCode
+				: current.latestMessage,
+			latestTimestamp: !current || latestTimestamp >= current.latestTimestamp ? latestTimestamp : current.latestTimestamp,
+		});
+	}
+	const dominant = [...counts.values()].sort((left, right) =>
+		right.count - left.count || right.latestTimestamp.localeCompare(left.latestTimestamp)
+	)[0];
+	if (!dominant && runState.errorState) {
+		return {
+			errorCode: runState.errorState.errorCode,
+			count: 1,
+			latestMessage: runState.errorState.message,
+		};
+	}
+	return dominant && {
+		errorCode: dominant.errorCode,
+		count: dominant.count,
+		latestMessage: dominant.latestMessage,
+	};
+}
+
 function progressSummary(runState: RunState): string {
 	const progress = runState.progress;
 	const total = progress.totalUnits;
@@ -124,7 +163,11 @@ function runSummaryText(runState: RunState): string {
 				: "";
 	const retryStats = summarizeRetries(runState);
 	const retryText = `, ${retryStats.retriedPoints} retried, ${retryStats.recoveredPoints} recovered, ${retryStats.finalFailedPoints} final failures`;
-	return `Run ${runState.runId} is ${runState.status}: ${progressSummary(runState)}${retryText}, ${artifactText}${reasonText}.`;
+	const repeatedError = dominantError(runState);
+	const errorText = repeatedError
+		? `, dominant error ${repeatedError.errorCode} x${repeatedError.count}: ${repeatedError.latestMessage}`
+		: "";
+	return `Run ${runState.runId} is ${runState.status}: ${progressSummary(runState)}${retryText}, ${artifactText}${errorText}${reasonText}.`;
 }
 
 function runSummaryState(runState: RunState): Record<string, unknown> {
@@ -144,6 +187,7 @@ function runSummaryState(runState: RunState): Record<string, unknown> {
 			artifactCount: runState.artifactRefs.length,
 			artifactCountsByKind: summarizeArtifacts(runState),
 			retryStats: summarizeRetries(runState),
+			dominantError: dominantError(runState),
 			latestArtifact: runState.artifactRefs.at(-1),
 			errorState: runState.errorState,
 			pauseReason: runState.pauseReason,

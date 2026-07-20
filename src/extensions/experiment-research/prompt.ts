@@ -21,6 +21,7 @@ Raman operating rules:
 - validate_procedure_spec and run_preflight come before propose_run
 - execute runs only through propose_run followed by approve_and_start_run
 - when the user asks about ordinary progress, use compact summarize_run; use poll_run only when full point-attempt or artifact detail is needed
+- before restarting a failed or aborted run, inspect its dominant error; do not repropose the same plan after a protocol, runtime-contract, spawn, or unknown-action failure until preflight passes and the failing capability succeeds through the matching operator smoke tool
 - use live-supervised execution only for approved bounded Raman runs after preflightReady and controlAvailable are both true
 - for large stage-only moves, the agent should orchestrate bounded relative move steps with raman_stage_move_relative, read position after errors/timeouts, and ask the operator before continuing; do not create a ProcedureSpec or a separate motion-plan object for stage maintenance nudges
 - decide Raman "good enough" conditions with explicit rules, not freeform LLM judgment

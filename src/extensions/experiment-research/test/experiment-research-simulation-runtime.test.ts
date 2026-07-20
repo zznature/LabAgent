@@ -539,6 +539,76 @@ describe("experiment research simulation runtime", () => {
 		);
 	});
 
+	it("fails the run immediately on a systemic runtime error even when point failures may continue", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = {
+			...createProcedureSpec(4),
+			procedureSpecId: "proc-map-systemic-failure",
+			stoppingRules: {
+				maxRuntimeMinutes: 20,
+				maxUnits: 4,
+				stopOnError: false,
+				maxConsecutiveFailures: 4,
+			},
+		};
+
+		const runId = await proposeAndStart(extension, spec, context, {
+			perUnitDelayMs: 5,
+			systemicFailureAtUnit: 0,
+		});
+		const state = await pollUntilTerminal(extension, runId, context, ["failed"]);
+
+		expect((state.errorState as Record<string, unknown>).errorCode).toBe("unknown_python_action");
+		expect((state.progress as Record<string, unknown>).failedUnits).toBe(1);
+		expect(state.pointAttempts).toEqual([
+			expect.objectContaining({ pointUnitId: "unit-0000", finalForPoint: true }),
+		]);
+		const summaryResult = await extension.tools
+			.get("summarize_run")
+			?.execute("summarize-systemic-failure", { runId }, undefined, undefined, context);
+		const summaryState = ((summaryResult?.details as Record<string, unknown>).stateAfter as Record<string, unknown>)
+			.summary as Record<string, unknown>;
+		expect(summaryState.dominantError).toEqual({
+			errorCode: "unknown_python_action",
+			count: 1,
+			latestMessage: "Unsupported Python Raman action: frame_capture_laser_off",
+		});
+		expect(summaryResult?.content[0]).toEqual(expect.objectContaining({
+			text: expect.stringContaining("unknown_python_action x1"),
+		}));
+	});
+
+	it("retries a stage settle timeout through the approved timeout policy", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createProcedureSpec(1);
+
+		const runId = await proposeAndStart(extension, spec, context, {
+			perUnitDelayMs: 5,
+			stageSettleTimeoutFailuresBeforeSuccessByUnit: { "0": 1 },
+		});
+		const state = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(state.pointAttempts).toEqual([
+			expect.objectContaining({
+				pointUnitId: "unit-0000",
+				phase: "initial",
+				failureReason: "timeout",
+				finalForPoint: false,
+			}),
+			expect.objectContaining({
+				pointUnitId: "unit-0000",
+				phase: "immediate_retry",
+				status: "succeeded",
+			}),
+		]);
+	});
+
 	it("enforces maxRuntimeMinutes at execution-unit checkpoints", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);

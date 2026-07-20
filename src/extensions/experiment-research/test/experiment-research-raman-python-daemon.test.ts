@@ -70,6 +70,9 @@ rl.on("line", (raw) => {
       payload.stageSettleDiagnostics = { status: "settled", axes: ["z"] };
     } else if (req.action === "preflight") {
       payload.pythonRootExists = true;
+      payload.protocolVersion = 1;
+      payload.driverVersion = "raman-python-v1";
+      payload.supportedActions = ["preflight", "stage_position", "stage_move", "frame_capture", "frame_capture_laser_off", "autofocus", "spectrum"];
     }
     process.stdout.write(JSON.stringify(response) + "\n");
   }, delayMs);
@@ -99,11 +102,11 @@ afterEach(async () => {
 	}
 });
 
-function createDriverRoot(): string {
+function createDriverRoot(source = FAKE_DAEMON_SOURCE): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-exp-daemon-"));
 	tempRoots.push(root);
 	mkdirSync(root, { recursive: true });
-	writeFileSync(join(root, RAMAN_RUNTIME_DAEMON_SCRIPT), FAKE_DAEMON_SOURCE, "utf-8");
+	writeFileSync(join(root, RAMAN_RUNTIME_DAEMON_SCRIPT), source, "utf-8");
 	return root;
 }
 
@@ -165,6 +168,43 @@ function createDaemon(pythonRoot: string, idleShutdownMs = 60_000): RamanPythonD
 }
 
 describe("experiment research Raman Python daemon transport", () => {
+	it("rejects a daemon with a stale driver revision", async () => {
+		const root = createDriverRoot(FAKE_DAEMON_SOURCE.replace('payload.driverVersion = "raman-python-v1"', 'payload.driverVersion = "raman-python-v0"'));
+		const cwd = mkdtempSync(join(tmpdir(), "pi-exp-daemon-cwd-"));
+		tempRoots.push(cwd);
+		liveCwds.push(cwd);
+		const runtime = createRamanPythonRuntime(cwd, createConfig(root));
+
+		const preflight = await runtime.preflight();
+
+		expect(preflight.preflightReady).toBe(false);
+		expect(preflight.details).toMatchObject({
+			errorCode: "python_runtime_protocol_mismatch",
+			expectedDriverVersion: "raman-python-v1",
+			receivedDriverVersion: "raman-python-v0",
+		});
+	});
+
+	it("rejects a legacy daemon that does not declare its protocol and supported actions", async () => {
+		const legacySource = FAKE_DAEMON_SOURCE
+			.replace('      payload.protocolVersion = 1;\n', "")
+			.replace('      payload.driverVersion = "raman-python-v1";\n', "")
+			.replace(/^      payload\.supportedActions = .*;\n/mu, "");
+		const root = createDriverRoot(legacySource);
+		const cwd = mkdtempSync(join(tmpdir(), "pi-exp-daemon-cwd-"));
+		tempRoots.push(cwd);
+		liveCwds.push(cwd);
+		const runtime = createRamanPythonRuntime(cwd, createConfig(root));
+
+		const preflight = await runtime.preflight();
+
+		expect(preflight.preflightReady).toBe(false);
+		expect(preflight.controlAvailable).toBe(false);
+		expect(preflight.details).toMatchObject({
+			errorCode: "python_runtime_protocol_mismatch",
+		});
+	});
+
 	it("maps daemon responses to action results and emits artifacts through one persistent process", async () => {
 		const root = createDriverRoot();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-exp-daemon-cwd-"));
