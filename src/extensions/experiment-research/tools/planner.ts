@@ -200,6 +200,7 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 						zEndUm: 1550,
 						pointCount: 10,
 						framesPerZ: 1,
+						frameTimeoutMs: 30_000,
 						warmupFramesPerZ: 1,
 						finalVerificationFramesPerZ: 1,
 					},

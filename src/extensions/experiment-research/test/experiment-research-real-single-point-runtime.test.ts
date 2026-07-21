@@ -163,6 +163,7 @@ function createLiveRuntime(
 	observations?: Array<{ saturated: boolean; snr: number; targetPeakBaselineRatio: number }>,
 	metrics?: { stageMoveCalls: number },
 	capturedFrameLaserOff?: boolean[],
+	capturedFrameTimeouts?: number[],
 ): RamanLiveRuntime {
 	let spectrumCall = 0;
 	return {
@@ -247,6 +248,7 @@ function createLiveRuntime(
 			},
 			captureLatest(action) {
 				capturedFrameLaserOff?.push(action.laserOff ?? false);
+				capturedFrameTimeouts?.push(action.timeoutMs);
 				return successActionResult(
 					"Frame captured.",
 					{
@@ -469,7 +471,11 @@ describe("experiment research real supervised single-point runtime", () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
 		const capturedFrameLaserOff: boolean[] = [];
-		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true, undefined, undefined, capturedFrameLaserOff));
+		const capturedFrameTimeouts: number[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(true, true, undefined, undefined, capturedFrameLaserOff, capturedFrameTimeouts),
+		);
 		const extension = loadExperimentExtension();
 		const context = { cwd } as ExtensionContext;
 		const spec = createSinglePointSpec({ procedureId: "raman_grid_mapping" });
@@ -502,6 +508,7 @@ describe("experiment research real supervised single-point runtime", () => {
 
 		expect(terminalState.status).toBe("completed");
 		expect(capturedFrameLaserOff).toEqual([true, false]);
+		expect(capturedFrameTimeouts).toEqual([30_000, 30_000]);
 	});
 
 	it("executes live bounded parameter search and stops early once acceptable conditions are confirmed", async () => {

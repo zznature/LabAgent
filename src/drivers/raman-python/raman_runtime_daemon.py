@@ -79,6 +79,8 @@ def _fail(
 
 
 _STAGE_COMMAND_TAIL_LIMIT = 40
+_AUTOFOCUS_FRAME_TIMEOUT_DEFAULT_MS = 30000
+_AUTOFOCUS_FRAME_TIMEOUT_MIN_MS = 30000
 
 
 def _stage_move_commands(stage: Any | None) -> list[dict[str, Any]]:
@@ -459,13 +461,14 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         if effective_point_count != 10:
             effective_point_count = 10
         effective_spacing_um = abs(float(params["zStartUm"]) - float(params["zEndUm"])) / float(effective_point_count - 1)
+        requested_frame_timeout_ms = int(params.get("frameTimeoutMs", _AUTOFOCUS_FRAME_TIMEOUT_DEFAULT_MS))
         resolved_params = {
             "zStartUm": params["zStartUm"],
             "zEndUm": params["zEndUm"],
             "effectivePointCount": effective_point_count,
             "effectiveSpacingUm": effective_spacing_um,
             "stageTimeoutMs": params.get("stageTimeoutMs", 30000),
-            "frameTimeoutMs": params.get("frameTimeoutMs", 10000),
+            "frameTimeoutMs": max(requested_frame_timeout_ms, _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS),
             "settleMs": params.get("settleMs", 100),
             "warmupFramesPerZ": params.get("warmupFramesPerZ", 1),
             "scoreFramesPerZ": params.get("framesPerZ", 1),
