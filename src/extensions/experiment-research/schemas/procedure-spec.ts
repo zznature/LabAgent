@@ -81,21 +81,26 @@ export const RetryFinalOrderSchema = Type.Literal("failure_order");
 export const RetryFailureTypeSchema = Type.Union([
 	Type.Literal("execution"),
 	Type.Literal("quality"),
+	Type.Literal("data"),
 ]);
 
 export const RetryExecutionFailureReasonSchema = Type.Literal("timeout");
 
 export const RetryQualityFailureReasonSchema = Type.Literal("low_focus_confidence");
 
+export const RetryDataFailureReasonSchema = Type.Literal("source_artifact_unavailable");
+
 export const RetryFailureReasonSchema = Type.Union([
 	RetryExecutionFailureReasonSchema,
 	RetryQualityFailureReasonSchema,
+	RetryDataFailureReasonSchema,
 ]);
 
 export const RetryableFailureReasonsSchema = Type.Object(
 	{
 		execution: Type.Array(RetryExecutionFailureReasonSchema, { minItems: 1 }),
 		quality: Type.Array(RetryQualityFailureReasonSchema, { minItems: 1 }),
+		data: Type.Optional(Type.Array(RetryDataFailureReasonSchema, { minItems: 1 })),
 	},
 	{ additionalProperties: false },
 );
@@ -272,6 +277,7 @@ export type RetryFinalOrder = Static<typeof RetryFinalOrderSchema>;
 export type RetryFailureType = Static<typeof RetryFailureTypeSchema>;
 export type RetryExecutionFailureReason = Static<typeof RetryExecutionFailureReasonSchema>;
 export type RetryQualityFailureReason = Static<typeof RetryQualityFailureReasonSchema>;
+export type RetryDataFailureReason = Static<typeof RetryDataFailureReasonSchema>;
 export type RetryFailureReason = Static<typeof RetryFailureReasonSchema>;
 export type RetryableFailureReasons = Static<typeof RetryableFailureReasonsSchema>;
 export type RetryPolicy = Static<typeof RetryPolicySchema>;
@@ -295,6 +301,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 	retryableFailureReasons: {
 		execution: ["timeout"],
 		quality: ["low_focus_confidence"],
+		data: ["source_artifact_unavailable"],
 	},
 };
 

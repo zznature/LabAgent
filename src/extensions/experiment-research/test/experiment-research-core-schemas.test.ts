@@ -69,6 +69,7 @@ describe("experiment research core schemas", () => {
 				retryableFailureReasons: {
 					execution: ["timeout"],
 					quality: ["low_focus_confidence"],
+					data: ["source_artifact_unavailable"],
 				},
 			},
 			domain: {

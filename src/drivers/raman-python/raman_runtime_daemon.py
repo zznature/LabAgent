@@ -55,6 +55,7 @@ if str(_DAEMON_ROOT) not in sys.path:
     sys.path.insert(0, str(_DAEMON_ROOT))
 
 from stage.exceptions import StageTimeoutError
+from autofocus.exceptions import FrameTimeoutError, SourceArtifactUnavailableError
 
 
 def _trace(message: str, payload: dict | None = None) -> None:
@@ -127,7 +128,7 @@ def _stage_error_payload(stage: Any | None, extra: dict | None = None) -> dict:
 
 def _stable_file(path: Path) -> bool:
     try:
-        return path.exists() and path.stat().st_size > 0
+        return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
 
@@ -192,17 +193,25 @@ def _write_canonical_frame_staging(staging_dir: Path, image_array: Any, source_p
 
 def _autofocus_frame_payload(source_value: Any, staging_root: Path, name: str) -> dict[str, Any]:
     if not isinstance(source_value, str) or not source_value:
-        raise RuntimeError(f"autofocus {name} representative frame path is missing")
+        raise SourceArtifactUnavailableError(f"autofocus {name} representative frame path is missing")
     source_path = Path(source_value)
     if not source_path.exists():
-        raise RuntimeError(f"autofocus {name} representative frame does not exist: {source_path}")
-    with Image.open(source_path) as image:
-        image_array = np.asarray(image)
-    return {
+        raise SourceArtifactUnavailableError(f"autofocus {name} representative frame does not exist: {source_path}")
+    payload = {
         "sourcePath": str(source_path),
         "laserStateVerified": "unknown",
-        **_write_canonical_frame_staging(staging_root / name, image_array, source_path),
     }
+    try:
+        with Image.open(source_path) as image:
+            image_array = np.asarray(image)
+        payload.update(_write_canonical_frame_staging(staging_root / name, image_array, source_path))
+    except Exception as exc:
+        payload["canonicalizationError"] = {
+            "errorCode": "frame_canonicalization_failed",
+            "message": str(exc),
+            "exceptionType": type(exc).__name__,
+        }
+    return payload
 
 
 def parse_spectrum_points(output_path: str | None) -> list[tuple[float, float]]:
@@ -430,10 +439,37 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
     previous_artifact_dir = getattr(provider, "artifact_dir", None)
     provider.artifact_dir = None
     try:
-        if laser_off:
-            frame = provider.wait_for_next_laser_off(after_ts=0.0, timeout_ms=timeout_ms)
-        else:
-            frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
+        try:
+            if laser_off:
+                frame = provider.wait_for_next_laser_off(after_ts=0.0, timeout_ms=timeout_ms)
+            else:
+                frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
+        except SourceArtifactUnavailableError as exc:
+            return _fail(
+                "source_artifact_unavailable",
+                str(exc),
+                retry_safe=True,
+                needs_operator=False,
+                safe_to_resume=True,
+                payload={
+                    "action": "frame_capture_laser_off" if laser_off else "frame_capture",
+                    "bridgeDir": str(bridge_dir),
+                    "exceptionType": type(exc).__name__,
+                },
+            )
+        except FrameTimeoutError as exc:
+            return _fail(
+                "frame_timeout",
+                str(exc),
+                retry_safe=True,
+                needs_operator=False,
+                safe_to_resume=True,
+                payload={
+                    "action": "frame_capture_laser_off" if laser_off else "frame_capture",
+                    "bridgeDir": str(bridge_dir),
+                    "exceptionType": type(exc).__name__,
+                },
+            )
     finally:
         provider.artifact_dir = previous_artifact_dir
     source_path = Path(frame.path) if getattr(frame, "path", None) else Path(latest_frame_path(bridge_dir, image_format))
@@ -456,11 +492,20 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
                 "laserStateVerified": laser_state_verified or "unknown",
             },
         )
-    canonical_frame = _write_canonical_frame_staging(
-        bridge_dir / "canonical-staging" / f"frame_{time.time_ns()}",
-        frame.image,
-        source_path,
-    )
+    try:
+        canonical_frame = _write_canonical_frame_staging(
+            bridge_dir / "canonical-staging" / f"frame_{time.time_ns()}",
+            frame.image,
+            source_path,
+        )
+    except Exception as exc:
+        canonical_frame = {
+            "canonicalizationError": {
+                "errorCode": "frame_canonicalization_failed",
+                "message": str(exc),
+                "exceptionType": type(exc).__name__,
+            },
+        }
     return _success(
         "Frame captured through LabSpec bridge.",
         {
@@ -571,18 +616,28 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
             / "canonical-staging"
             / f"autofocus_{time.time_ns()}"
         )
-        response_payload["autofocusFrames"] = {
-            "preFocus": _autofocus_frame_payload(
-                diagnostics.get("preFocusFramePath"),
-                frame_staging_root,
-                "pre-focus",
-            ),
-            "acceptedFocus": _autofocus_frame_payload(
-                diagnostics.get("acceptedFocusFramePath"),
-                frame_staging_root,
-                "accepted-focus",
-            ),
-        }
+        try:
+            response_payload["autofocusFrames"] = {
+                "preFocus": _autofocus_frame_payload(
+                    diagnostics.get("preFocusFramePath"),
+                    frame_staging_root,
+                    "pre-focus",
+                ),
+                "acceptedFocus": _autofocus_frame_payload(
+                    diagnostics.get("acceptedFocusFramePath"),
+                    frame_staging_root,
+                    "accepted-focus",
+                ),
+            }
+        except SourceArtifactUnavailableError as exc:
+            return _fail(
+                "source_artifact_unavailable",
+                str(exc),
+                retry_safe=True,
+                needs_operator=False,
+                safe_to_resume=True,
+                payload=response_payload,
+            )
     if action_dir is not None:
         response_payload["actionStagingDir"] = str(action_dir)
         response_payload["autofocusResultPath"] = str(action_dir / "autofocus-result.json")
@@ -597,8 +652,9 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         return _success("Autofocus completed.", response_payload)
     if str(result.status.value) == "stage_error":
         _trace("autofocus_stage_error", response_payload)
+    autofocus_error_code = response_payload["confidenceDiagnostics"].get("errorCode")
     return _fail(
-        f"autofocus_{result.status.value}",
+        autofocus_error_code or f"autofocus_{result.status.value}",
         result.message or str(result.status.value),
         retry_safe=True,
         safe_to_resume=True,
@@ -656,8 +712,26 @@ def _handle_spectrum(session: HardwareSession, request: dict, payload: dict) -> 
     spectrum_plot_path = result.metadata.get("spectrum_plot_path", "")
     if spectrum_plot_path:
         result_payload["spectrumPlotPath"] = spectrum_plot_path
+    if result.ok and not _stable_file(Path(result.output_path or "")):
+        return _fail(
+            "source_artifact_unavailable",
+            "LabSpec reported successful spectrum acquisition but the saved source file is unavailable.",
+            retry_safe=True,
+            needs_operator=False,
+            safe_to_resume=True,
+            payload=result_payload,
+        )
     if result.ok:
         return _success("Spectrum acquired through LabSpec bridge.", result_payload)
+    if result.metadata.get("error_stage") == "replace_file":
+        return _fail(
+            "source_artifact_unavailable",
+            result.message or "LabSpec could not preserve the spectrum source file.",
+            retry_safe=True,
+            needs_operator=False,
+            safe_to_resume=True,
+            payload=result_payload,
+        )
     return _fail(
         "spectrum_acquisition_failed",
         result.message or "LabSpec spectrum acquisition failed.",

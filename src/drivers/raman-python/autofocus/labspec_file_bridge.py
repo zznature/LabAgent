@@ -6,7 +6,7 @@ import time
 import json
 from pathlib import Path
 
-from autofocus.exceptions import FrameTimeoutError
+from autofocus.exceptions import FrameTimeoutError, SourceArtifactUnavailableError
 from autofocus.models import Frame
 from mapping import (
     create_labspec_laser_off_video_frame_request,
@@ -240,6 +240,8 @@ class LabSpecFileBridgeFrameProvider:
                     return result
                 message = result.get("message", "LabSpec worker reported an error")
                 step = result.get("step", "worker_error")
+                if step == "replace_file":
+                    raise SourceArtifactUnavailableError(f"LabSpec worker {step}: {message}")
                 raise FrameTimeoutError(f"LabSpec worker {step}: {message}")
             time.sleep(0.05)
         raise FrameTimeoutError(

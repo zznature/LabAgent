@@ -4,7 +4,7 @@
 
 > LabAgents 如何以固定位置、固定格式保存实验产物，并通过稳定的后端 interface 让前端观察 run 进展与结果？
 
-本文整合 `docs/adr/0001` 至 `0026` 已确认的决策。ADR 保留决策历史，本文是实现时优先阅读的综合技术方案。
+本文整合 `docs/adr/0001` 至 `0027` 已确认的决策。ADR 保留决策历史，本文是实现时优先阅读的综合技术方案。
 
 本文不改变 `core-ideas.md` 的三个核心对象。`Run Observation Snapshot`、`Run Observation Event`、`Execution Attempt` 和 `Artifact Descriptor` 都是 `RunState` 周围的运行记录与观察模型，不是新的 planner/kernel 核心输入。
 
@@ -48,6 +48,7 @@ MVP 不实现：
 - progress 来自 Run Observation Snapshot / Events，不来自文件数量。
 - artifacts 是实验产物，不是 progress 计数器。
 - 只有 lifecycle 为 `complete` 的 artifact representation 可以读取或渲染。
+- Artifact lifecycle 不决定 run lifecycle；`failed` descriptor 是可观察的数据事实，不等于 run terminal failure。
 
 ### 2.3 Source 与 Canonical
 
@@ -57,6 +58,7 @@ MVP 不实现：
 - Source Artifact 保留设备原始证据；Canonical Artifact 提供前端稳定格式。
 - Canonical Artifact 必须记录其 Source Artifact provenance。
 - 正式 representations 全部记录 byte size 与 SHA-256。
+- Source Artifact 归档失败使当前 attempt 成为 point-level data failure；Canonical Artifact 失败只降低结构化分析能力。
 
 ### 2.4 Operator operation
 
@@ -287,6 +289,12 @@ pending -> producing -> complete
 - restart 不根据文件存在猜测成功
 - resume/retry 创建新 attempt 与新 artifact IDs
 
+这里的 fail-closed 只作用于单个 Artifact：失败或中断的 Artifact 不能被读取为完整证据。
+Runtime 不得把 `failed` canonical descriptor 抛成 run-control 异常。若 Source Artifact 未能归档，
+kernel 将 attempt 记录为 `data.source_artifact_unavailable` 并按冻结 retry policy 处理；重试耗尽后 point
+失败但 mapping 继续。若 Source Artifact 已完整保存而 canonicalization 因列语义、格式、schema 或
+representation 失败，attempt 仍可被接受，其 `canonicalArtifactIds` 只包含实际 `complete` 的 Canonical Artifacts。
+
 ### 5.3 固定目录
 
 ```text
@@ -490,7 +498,8 @@ const spectrum = records.publishArtifact({
 
 `publishArtifact()` 完成 staging、profile validation、复制或生成 representations、byte size、SHA-256、
 descriptor、原子发布、event 和 index 更新。返回 `failed` descriptor 时，调用者不得把该 artifact
-加入 `attempt_accepted.canonicalArtifactIds`。
+加入 `attempt_accepted.canonicalArtifactIds`，也不得仅因该 canonical descriptor 失败而终止 run。
+Source descriptor 失败则由 runtime 返回 typed `source_artifact_unavailable`，由 kernel 记录、重试并继续调度。
 
 ### 7.3 后端读取 run 进展
 

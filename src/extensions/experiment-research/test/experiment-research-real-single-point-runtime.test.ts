@@ -79,6 +79,7 @@ function createSinglePointSpec(overrides?: {
 	limits: Record<string, unknown>;
 	plan: Record<string, unknown>;
 	stoppingRules: Record<string, unknown>;
+	retryPolicy?: Record<string, unknown>;
 	domain: Record<string, unknown>;
 } {
 	specSequence += 1;
@@ -497,6 +498,126 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(observation?.units.map((unit) => unit.status)).toEqual(["succeeded", "failed", "succeeded"]);
 	});
 
+	it("retries a missing source artifact once and continues the mapping after the point fails", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const acquireSpectrum = runtime.spectrometer.acquireSpectrum.bind(runtime.spectrometer);
+		let spectrumCalls = 0;
+		runtime.spectrometer.acquireSpectrum = async (action) => {
+			spectrumCalls += 1;
+			if (spectrumCalls <= 2) {
+				const result = await acquireSpectrum(action);
+				return {
+					...result,
+					artifacts: result.artifacts.map((artifact) => ({
+						...artifact,
+						path: join(cwd, `missing-spectrum-${spectrumCalls}.txt`),
+					})),
+				};
+			}
+			return acquireSpectrum(action);
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ procedureId: "raman_grid_mapping" });
+		spec.plan.points = Array.from({ length: 3 }, () => ({ xUm: 1000, yUm: 2000, zUm: 250 }));
+		spec.stoppingRules = { maxRuntimeMinutes: 20, maxUnits: 3, stopOnError: true, maxConsecutiveFailures: 1 };
+		spec.retryPolicy = {
+			mode: "immediate_then_final",
+			maxImmediateRetriesPerPoint: 1,
+			maxFinalRetriesPerPoint: 1,
+			finalRetryOrder: "failure_order",
+			retryableFailureReasons: {
+				execution: ["timeout"],
+				quality: ["low_focus_confidence"],
+				data: ["source_artifact_unavailable"],
+			},
+		};
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-missing-source",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(spectrumCalls).toBe(4);
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 2, failedUnits: 1 }));
+		expect(terminalState.qualityState).toBe("completed_with_failures");
+		const attempts = terminalState.pointAttempts as Array<Record<string, unknown>>;
+		expect(attempts.filter((attempt) => attempt.pointUnitId === "unit-0000")).toEqual([
+			expect.objectContaining({ attemptIndex: 0, status: "failed", failureType: "data", finalForPoint: false }),
+			expect.objectContaining({ attemptIndex: 1, status: "failed", failureType: "data", finalForPoint: true }),
+		]);
+	});
+
+	it("retries a single-point source artifact once and then completes with diagnostics", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const acquireSpectrum = runtime.spectrometer.acquireSpectrum.bind(runtime.spectrometer);
+		let spectrumCalls = 0;
+		runtime.spectrometer.acquireSpectrum = async (action) => {
+			spectrumCalls += 1;
+			const result = await acquireSpectrum(action);
+			return {
+				...result,
+				artifacts: result.artifacts.map((artifact) => ({
+					...artifact,
+					path: join(cwd, "missing-single-point-spectrum.txt"),
+				})),
+			};
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-single-point-missing-source",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(spectrumCalls).toBe(2);
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 0, failedUnits: 1 }));
+		expect(terminalState.qualityState).toBe("completed_with_failures");
+		expect(createRunRecords(cwd).readRun(runId)?.units[0]?.status).toBe("failed");
+		expect(terminalState.pointAttempts).toEqual([
+			expect.objectContaining({
+				attemptIndex: 0,
+				status: "failed",
+				errorCode: "source_artifact_unavailable",
+				finalForPoint: false,
+			}),
+			expect.objectContaining({
+				attemptIndex: 1,
+				status: "failed",
+				errorCode: "source_artifact_unavailable",
+				finalForPoint: true,
+			}),
+		]);
+	});
+
 	it("captures distinct laser-off pre-focus and post-focus frame artifacts in one attempt", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
@@ -620,7 +741,7 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(spectrumAcquisitionCalls).toBe(0);
 	});
 
-	it("fails the active attempt when required autofocus evidence is malformed", async () => {
+	it("continues the experiment when canonical autofocus evidence is malformed", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
 		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
@@ -647,15 +768,17 @@ describe("experiment research real supervised single-point runtime", () => {
 			context,
 		);
 		const runId = (started?.details as Record<string, unknown>).runId as string;
-		await pollUntilTerminal(extension, runId, context, ["failed"]);
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
 
 		const observation = createRunRecords(cwd).readRun(runId);
-		expect(observation?.units[0]?.status).toBe("failed");
+		expect(observation?.units[0]?.status).toBe("succeeded");
 		expect(observation?.units[0]?.activeAttemptId).toBeUndefined();
-		expect(observation?.errorState?.errorCode).toBe("live_runtime_error");
+		expect(observation?.errorState).toBeUndefined();
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 1, failedUnits: 0 }));
+		expect(createRunRecords(cwd).listArtifacts(runId).filter((artifact) => artifact.status === "failed").length).toBeGreaterThan(0);
 	});
 
-	it("fails closed when a required canonical representation cannot be published", async () => {
+	it("continues the experiment when a canonical representation cannot be published", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
 		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
@@ -664,7 +787,15 @@ describe("experiment research real supervised single-point runtime", () => {
 			const result = await originalFrameCapture(action);
 			return {
 				...result,
-				payload: { ...result.payload, canonicalDisplayPath: join(cwd, "missing-canonical-frame.png") },
+				payload: {
+					...result.payload,
+					canonicalDisplayPath: join(cwd, "missing-canonical-frame.png"),
+					canonicalizationError: {
+						errorCode: "frame_canonicalization_failed",
+						message: "PNG conversion failed.",
+						exceptionType: "OSError",
+					},
+				},
 			};
 		};
 		registerRamanLiveRuntime(cwd, runtime);
@@ -685,12 +816,12 @@ describe("experiment research real supervised single-point runtime", () => {
 			context,
 		);
 		const runId = (started?.details as Record<string, unknown>).runId as string;
-		const terminalState = await pollUntilTerminal(extension, runId, context, ["failed"]);
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
 
 		const observation = createRunRecords(cwd).readRun(runId);
-		expect(observation?.units[0]?.status).toBe("failed");
-		expect(observation?.errorState?.errorCode).toBe("canonical_artifact_publication_failed");
-		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 0, failedUnits: 1 }));
+		expect(observation?.units[0]?.status).toBe("succeeded");
+		expect(observation?.errorState).toBeUndefined();
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 1, failedUnits: 0 }));
 		const recordArtifacts = createRunRecords(cwd).listArtifacts(runId, {
 			unitId: "unit-0000",
 			attemptId: "attempt-0000-initial",
@@ -699,6 +830,11 @@ describe("experiment research real supervised single-point runtime", () => {
 			(terminalState.artifactRefs as Array<{ artifactId: string }>).map((artifact) => artifact.artifactId),
 		);
 		expect(recordArtifacts.some((artifact) => artifact.status === "failed")).toBe(true);
+		expect(recordArtifacts.find((artifact) => artifact.status === "failed")?.data?.canonicalizationError).toEqual({
+			errorCode: "frame_canonicalization_failed",
+			message: "PNG conversion failed.",
+			exceptionType: "OSError",
+		});
 		expect(recordArtifacts.every((artifact) => stateArtifactIds.has(artifact.artifactId))).toBe(true);
 		const summary = await extension.tools.get("summarize_run")?.execute(
 			"summarize-canonical-failure",
@@ -708,7 +844,96 @@ describe("experiment research real supervised single-point runtime", () => {
 			context,
 		);
 		expect(summary?.content[0]).toEqual(expect.objectContaining({
-			text: expect.stringContaining("canonical_artifact_publication_failed"),
+			text: expect.stringContaining("2 artifact publication failed"),
+		}));
+	});
+
+	it("keeps the LabSpec source spectrum when column semantics are unknown", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const acquireSpectrum = runtime.spectrometer.acquireSpectrum.bind(runtime.spectrometer);
+		runtime.spectrometer.acquireSpectrum = async (action) => {
+			const result = await acquireSpectrum(action);
+			return {
+				...result,
+				payload: {
+					...result.payload,
+					canonicalSpectrum: {
+						xAxis: { kind: "unknown", unit: "unknown", values: [100, 200] },
+						yAxis: { kind: "intensity", unit: "unknown", values: [12, 18] },
+					},
+				},
+			};
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-unknown-spectrum-semantics",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 1, failedUnits: 0 }));
+		const artifacts = createRunRecords(cwd).listArtifacts(runId);
+		const sourceSpectrum = artifacts.find((artifact) => artifact.layer === "source" && artifact.artifactId.startsWith("spectrum-live"));
+		const canonicalSpectrum = artifacts.find((artifact) => artifact.profile === "raman-spectrum");
+		expect(sourceSpectrum?.status).toBe("complete");
+		expect(canonicalSpectrum).toEqual(expect.objectContaining({
+			status: "failed",
+			error: expect.objectContaining({
+				message: expect.stringContaining("raman spectrum requires xAxis kind raman_shift with unit cm^-1"),
+			}),
+		}));
+		expect(createRunRecords(cwd).readRun(runId)?.units[0]?.canonicalArtifactIds).not.toContain(canonicalSpectrum?.artifactId);
+	});
+
+	it("keeps running when derived Raman evaluation metrics are unavailable", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true, undefined, undefined, undefined, join(cwd, "driver-artifacts"));
+		const acquireSpectrum = runtime.spectrometer.acquireSpectrum.bind(runtime.spectrometer);
+		runtime.spectrometer.acquireSpectrum = async (action) => {
+			const result = await acquireSpectrum(action);
+			return { ...result, payload: { ...result.payload, snr: undefined } };
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-missing-analysis-metrics",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 1, failedUnits: 0 }));
+		const diagnostic = createRunRecords(cwd).listArtifacts(runId).find((artifact) => artifact.layer === "diagnostic");
+		expect(diagnostic).toEqual(expect.objectContaining({
+			status: "complete",
+			data: expect.objectContaining({ errorCode: "missing_evaluation_metrics" }),
 		}));
 	});
 
@@ -999,6 +1224,64 @@ describe("experiment research real supervised single-point runtime", () => {
 			expect.objectContaining({ laserPowerPercent: 0.01, integrationTimeMs: 1000, accumulations: 1 }),
 			expect.objectContaining({ laserPowerPercent: 0.1, integrationTimeMs: 2000, accumulations: 2 }),
 		]);
+	});
+
+	it("retries an unavailable parameter-search source artifact before advancing the search", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(
+			true,
+			true,
+			[{ saturated: false, snr: 12, targetPeakBaselineRatio: 1.8 }],
+			undefined,
+			undefined,
+			join(cwd, "driver-artifacts"),
+		);
+		const acquireSpectrum = runtime.spectrometer.acquireSpectrum.bind(runtime.spectrometer);
+		let spectrumCalls = 0;
+		runtime.spectrometer.acquireSpectrum = async (action) => {
+			spectrumCalls += 1;
+			const result = await acquireSpectrum(action);
+			return spectrumCalls === 1
+				? {
+						...result,
+						artifacts: result.artifacts.map((artifact) => ({
+							...artifact,
+							path: join(cwd, "missing-parameter-search-spectrum.txt"),
+						})),
+					}
+				: result;
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ procedureId: "raman_parameter_search", maxAttempts: 2 });
+		const proposalId = await proposeRun(extension, spec, context);
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-search-source-retry",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(spectrumCalls).toBe(3);
+		expect(terminalState.progress).toEqual(expect.objectContaining({ completedUnits: 2, failedUnits: 0 }));
+		expect(terminalState.pointAttempts).toEqual(expect.arrayContaining([
+			expect.objectContaining({
+				attemptIndex: 0,
+				status: "failed",
+				failureType: "data",
+				finalForPoint: false,
+			}),
+		]));
 	});
 
 	it("rechecks live admission instead of trusting caller flags and blocks forbidden proposals", async () => {

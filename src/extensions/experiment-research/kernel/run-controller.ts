@@ -10,7 +10,6 @@ import { appendRunEvent, type RunEvent } from "../store/event-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
 import {
 	getRamanLiveRuntime,
-	RamanCanonicalPublicationError,
 	runLiveRamanUnit,
 	type LiveRamanUnitOptions,
 	type LiveRamanUnitResult,
@@ -393,16 +392,14 @@ function failActiveRun(
 }
 
 function failUnexpectedRun(activeRun: ActiveRun, cause: unknown): void {
-	const failure: RuntimeError = cause instanceof RamanCanonicalPublicationError
-		? cause.runtimeError
-		: {
-				errorCode: activeRun.mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error",
-				message: cause instanceof Error ? cause.message : String(cause),
-				retrySafe: false,
-				needsOperator: true,
-				safeToResume: false,
-				scope: "run",
-			};
+	const failure: RuntimeError = {
+		errorCode: activeRun.mode === "simulation" ? "simulation_runtime_error" : "live_runtime_error",
+		message: cause instanceof Error ? cause.message : String(cause),
+		retrySafe: false,
+		needsOperator: true,
+		safeToResume: false,
+		scope: "run",
+	};
 	const records = createRunRecords(activeRun.cwd);
 	const observation = records.readRun(activeRun.runId);
 	const activeUnitObservation = observation?.units.find(

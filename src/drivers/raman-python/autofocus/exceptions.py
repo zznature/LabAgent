@@ -25,3 +25,7 @@ class StageTimeoutError(AutofocusError):
 
 class FrameTimeoutError(AutofocusError):
     """No fresh frame arrived within the allowed timeout."""
+
+
+class SourceArtifactUnavailableError(AutofocusError):
+    """The instrument action completed but its source file was not preserved."""

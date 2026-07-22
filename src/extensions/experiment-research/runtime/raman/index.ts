@@ -63,7 +63,6 @@ export {
 	clearRamanLiveRuntime,
 	runLiveRamanUnit,
 	validateRuntimeAnchorState,
-	RamanCanonicalPublicationError,
 	type RamanLivePreflightResult,
 	type RamanRuntimeCompatibilityIssue,
 	type RamanStageRuntime,

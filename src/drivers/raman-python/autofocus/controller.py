@@ -10,7 +10,7 @@ from autofocus.models import (
     FocusPoint, ScanCurve, FocusStatus, FocusResult, ScoredZPoint,
 )
 from autofocus.exceptions import (
-    OutOfRangeError, StageTimeoutError, FrameTimeoutError,
+    OutOfRangeError, SourceArtifactUnavailableError, StageTimeoutError, FrameTimeoutError,
 )
 from autofocus.scanner import ZScanner
 from autofocus.metrics import MetricStrategy
@@ -40,6 +40,7 @@ class AutofocusController:
         message: str,
         coarse: Optional[ScanCurve] = None,
         fine: Optional[ScanCurve] = None,
+        error_code: str | None = None,
     ) -> FocusResult:
         """Build and log a failed FocusResult."""
         log.warning("Autofocus aborted: %s - %s", status.value, message)
@@ -47,6 +48,7 @@ class AutofocusController:
             status=status, z_best_um=None, final_score=None,
             confidence=0.0, coarse=coarse, fine=fine, message=message,
             quality="bad", recommendation="operator_review",
+            diagnostics={"errorCode": error_code} if error_code else {},
         )
 
     def run_single(
@@ -219,6 +221,12 @@ class AutofocusController:
         controller = FixedRangeAutofocusController(self.stage, self.frames, self._strategy)
         try:
             result = controller.run(roi, params, on_progress=on_progress)
+        except SourceArtifactUnavailableError as e:
+            return self._result_error(
+                FocusStatus.FRAME_ERROR,
+                f"Fixed-range scan: {e}",
+                error_code="source_artifact_unavailable",
+            )
         except FrameTimeoutError as e:
             return self._result_error(FocusStatus.FRAME_ERROR, f"Fixed-range scan: {e}")
         except (StageTimeoutError, StageError) as e:

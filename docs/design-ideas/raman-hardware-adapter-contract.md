@@ -606,8 +606,10 @@ Runtime 再将 source evidence 规范化为四种 canonical profiles：
 
 - daemon/bridge 目录只作 staging；run action request 使用 `artifactContext = { runId, unitId, attemptId, actionId, stagingDir }`，但 daemon 不持久化这些 workflow IDs，也不能根据最近一次 stage move 推断正式 artifact scope
 - runtime 通过 Run Records Module 归档、校验并登记正式 artifacts
-- `raman-frame` 缺少合法 `capturedAt`、尺寸、source bit depth、color model、source provenance 或 verified laser state 时 fail closed
+- `raman-frame` 缺少合法 `capturedAt`、尺寸、source bit depth、color model、source provenance 或 verified laser state 时，该 canonical artifact fail closed，但实验继续
 - `raman-autofocus` 只有在 pre-focus / accepted-focus 都已发布为同一 attempt 下的 complete canonical `raman-frame` 后才能 complete
+- Source Artifact 未能保存或归档时，runtime 返回 point-level `source_artifact_unavailable`；kernel 按 data retry policy 重试，耗尽后记录 point failure 并继续 mapping
+- canonical semantics、schema、PNG/WebP 转换或派生 representation 失败只保留 failed descriptor 和诊断，不改变硬件 action 的成功状态
 - spectrum plot 由前端从 canonical spectrum JSON 绘制，不是权威 canonical result
 - requested laser state 不是 verified state；worker 未返回关闭验证证据时，不得把 laser-off frame 标为已验证 `off`
 - 不能靠 message 文本或裸 path 告诉上层“文件大概在某个目录里”
@@ -627,6 +629,8 @@ MVP 最小错误模型至少区分：
 - `spectrum_timeout`
 - `worker_result_error`
 - `bridge_protocol_error`
+- `source_artifact_unavailable`
+- `frame_canonicalization_failed`
 - `unknown_python_action`
 - `python_runtime_protocol_mismatch`
 
@@ -650,6 +654,13 @@ MVP 最小错误模型至少区分：
 中出现时间描述而自动重试。`unknown_python_action`、`python_runtime_protocol_mismatch`、daemon
 spawn/exit/parse failure 和 invalid runtime contract 属于系统性错误，必须结束 bounded run，不能被
 `stopOnError: false` 或 point-level consecutive failure threshold 吞掉。
+
+LabSpec worker 明确返回 `step=replace_file`，或 worker 报告成功但目标 source file 不存在/为空时，adapter
+映射为 `source_artifact_unavailable`，不得降级成笼统的 `python_runtime_error`。该 data failure 可重试、
+不需要立即人工介入、允许安全继续，并且不计入 mapping 连续硬件失败阈值。列名/单位未知、canonical
+schema 不匹配或派生格式转换失败不产生 runtime failure；它们通过 failed Artifact Descriptor 和 operator
+summary 暴露。派生 evaluation metrics 缺失时发布 `raman-analysis-diagnostic`，保留 typed error 后跳过
+该次结构化 evaluation，不把硬件 action 改写为失败。
 
 ## 12. 为什么 mapping runner 只能作为参考
 

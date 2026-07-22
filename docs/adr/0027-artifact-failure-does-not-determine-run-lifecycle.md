@@ -1,0 +1,3 @@
+# Artifact failure does not determine run lifecycle
+
+Artifact publication remains fail-closed at the individual Artifact level: missing source files, invalid scientific semantics, malformed canonical data, and failed representations produce observable `failed` descriptors and are never presented as complete evidence. These data failures do not by themselves fail a Bounded Run. A missing Source Artifact fails the affected Execution Attempt, follows the approved data retry policy, and then allows the scheduler to continue; a failed Canonical Artifact degrades structured analysis capability while the Execution Attempt may still be accepted. Only safety, control-integrity, or systemic hardware/runtime failures determine terminal run failure.

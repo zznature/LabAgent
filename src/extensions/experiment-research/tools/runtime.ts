@@ -50,6 +50,11 @@ interface ErrorSummary {
 	latestTimestamp: string;
 }
 
+interface ArtifactPublicationSummary {
+	failedCount: number;
+	errorCounts: Record<string, number>;
+}
+
 function serializeRunState(runState: RunState): Record<string, unknown> {
 	return {
 		runId: runState.runId,
@@ -76,6 +81,22 @@ function summarizeArtifacts(runState: RunState): Record<string, number> {
 		counts[artifact.kind] = (counts[artifact.kind] ?? 0) + 1;
 	}
 	return counts;
+}
+
+function summarizeArtifactPublications(runState: RunState): ArtifactPublicationSummary {
+	const failedArtifacts = runState.artifactRefs.filter(
+		(artifact) => artifact.metadata?.publicationStatus === "failed",
+	);
+	const errorCounts: Record<string, number> = {};
+	for (const artifact of failedArtifacts) {
+		const publicationError = artifact.metadata?.publicationError;
+		const errorCode = typeof publicationError === "object" && publicationError !== null && "errorCode" in publicationError &&
+			typeof publicationError.errorCode === "string"
+			? publicationError.errorCode
+			: "artifact_publication_failed";
+		errorCounts[errorCode] = (errorCounts[errorCode] ?? 0) + 1;
+	}
+	return { failedCount: failedArtifacts.length, errorCounts };
 }
 
 function summarizeRetries(runState: RunState): RetryStats {
@@ -167,7 +188,11 @@ function runSummaryText(runState: RunState): string {
 	const errorText = repeatedError
 		? `, dominant error ${repeatedError.errorCode} x${repeatedError.count}: ${repeatedError.latestMessage}`
 		: "";
-	return `Run ${runState.runId} is ${runState.status}: ${progressSummary(runState)}${retryText}, ${artifactText}${errorText}${reasonText}.`;
+	const publicationSummary = summarizeArtifactPublications(runState);
+	const publicationText = publicationSummary.failedCount > 0
+		? `, ${publicationSummary.failedCount} artifact publication failed`
+		: "";
+	return `Run ${runState.runId} is ${runState.status}: ${progressSummary(runState)}${retryText}, ${artifactText}${publicationText}${errorText}${reasonText}.`;
 }
 
 function runSummaryState(runState: RunState): Record<string, unknown> {
@@ -186,6 +211,7 @@ function runSummaryState(runState: RunState): Record<string, unknown> {
 			progressText: progressSummary(runState),
 			artifactCount: runState.artifactRefs.length,
 			artifactCountsByKind: summarizeArtifacts(runState),
+			artifactPublications: summarizeArtifactPublications(runState),
 			retryStats: summarizeRetries(runState),
 			dominantError: dominantError(runState),
 			latestArtifact: runState.artifactRefs.at(-1),

@@ -367,6 +367,7 @@ type ProcedureSpec = {
     retryableFailureReasons: {
       execution: ["timeout"]
       quality: ["low_focus_confidence"]
+      data?: ["source_artifact_unavailable"]
     }
   }
 }
@@ -414,8 +415,8 @@ type RunState = {
     attemptIndex: number
     phase: "initial" | "immediate_retry" | "final_retry"
     status: "succeeded" | "failed"
-    failureType?: "execution" | "quality"
-    failureReason?: "timeout" | "low_focus_confidence"
+    failureType?: "execution" | "quality" | "data"
+    failureReason?: "timeout" | "low_focus_confidence" | "source_artifact_unavailable"
     errorCode?: string
     errorMessage?: string
     finalForPoint?: boolean
