@@ -274,6 +274,15 @@ describe("experiment research Raman Python daemon transport", () => {
 		});
 		expect(configuredTemperature?.status).toBe("success");
 		expect(configuredTemperature?.payload?.setpointK).toBe(200);
+		const mismatchedTemperature = await runtime.temperature?.configureTarget({
+			action: "temperature.configure_target",
+			resourceId: "temperature-other",
+			targetK: 200,
+			rampKPerMin: 2,
+			timeoutMs: 5000,
+		});
+		expect(mismatchedTemperature?.status).toBe("failed");
+		expect(mismatchedTemperature?.errorCode).toBe("temperature_resource_mismatch");
 
 		const temperatureSnapshot = await runtime.temperature?.readSnapshot({
 			action: "temperature.read_snapshot",

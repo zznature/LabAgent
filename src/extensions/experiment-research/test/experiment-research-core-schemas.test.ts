@@ -152,11 +152,6 @@ describe("experiment research core schemas", () => {
 				kind: "temperature_series",
 				targetsK: [200, 100],
 			},
-			stoppingRules: {
-				maxRuntimeMinutes: 120,
-				maxUnits: 2,
-				stopOnError: false,
-			},
 			domain: {
 				raman: {
 					autofocus: {
@@ -187,6 +182,19 @@ describe("experiment research core schemas", () => {
 		};
 
 		expect(ProcedureSpecValidator.Check(spec)).toBe(true);
+		expect(ProcedureSpecValidator.Check({
+			...spec,
+			stoppingRules: { maxUnits: 1 },
+		})).toBe(false);
+		expect(ProcedureSpecValidator.Check({ ...spec, procedureId: "raman_grid_mapping" })).toBe(false);
+		expect(ProcedureSpecValidator.Check({
+			...spec,
+			plan: { kind: "current_position", perPoint: [{ kind: "acquire_spectrum" }] },
+		})).toBe(false);
+		expect(ProcedureSpecValidator.Check({
+			...spec,
+			domain: { raman: spec.domain.raman },
+		})).toBe(false);
 	});
 
 	it("rejects procedure spec shapes that are explicitly out of MVP scope", () => {

@@ -162,6 +162,7 @@ interPointDelayMs: number
 变温 Raman 的等待不是普通固定 delay，而是 `temperature_series` procedure 的确定性协议语义：
 
 - 每个 `targetsK` 编译为一个带 `temperatureTargetK` 的 step unit。
+- `targetsK` 本身是完整且有限的 unit 边界；temperature-series 不暴露通用 `stoppingRules`，其边界由目标列表、每目标 timeout 和一次 drift reacquisition 共同定义，避免声明未执行的约束或静默截断目标。
 - unit 先配置目标，再等待温度连续处于 `target ± toleranceK` 达到 `continuousHoldS`，随后完成 `postStableDwellS`。
 - hold 或 dwell 期间一旦越界，完整的 hold + dwell 重新计时。
 - 采谱前立即读取温度；若已越界，重新执行完整稳定流程后再采谱。

@@ -2,13 +2,14 @@
 
 The TypeScript live runtime spawns this script once and talks to it over a
 newline-delimited JSON protocol on stdin/stdout. The daemon holds long-lived
-stage and frame-provider sessions, so a multi-point mapping run connects to the
-hardware once instead of reconnecting on every action.
+stage, frame-provider, and optional temperature-controller sessions, so a run
+connects to each device once instead of reconnecting on every action.
 
 Protocol (one JSON object per line):
 
   request:  {"requestId": str, "action": str, "pythonRoot": str,
              "stage": {...}, "frameProvider": {...}, "spectrometer": {...},
+             "temperatureController": {...} | omitted,
              "payload": {...}}
   response: {"requestId": str, "ok": bool, ...}
 
@@ -198,7 +199,7 @@ def parse_spectrum_metrics(
 
 
 class HardwareSession:
-    """Lazily-created, long-lived stage and frame-provider sessions.
+    """Lazily-created, long-lived hardware sessions.
 
     The sessions are opened on first use and reused across every action for the
     lifetime of the daemon. Stage channels are disabled after each motion so no
@@ -679,9 +680,41 @@ def _handle_temperature_configure(session: HardwareSession, request: dict, paylo
 def _handle_temperature_stop(session: HardwareSession, request: dict) -> dict:
     temperature_cfg = _temperature_config(request)
     controller = session.temperature(temperature_cfg)
-    controller.stop()
+    controller.set_output_range("OFF")
     result = _temperature_snapshot_payload(controller, temperature_cfg["config"]["channel"])
+    if result["outputRange"] != "OFF":
+        return _fail(
+            "temperature_stop_not_confirmed",
+            f"Temperature controller reported output range {result['outputRange']!r} after OFF was requested.",
+            needs_operator=True,
+            safe_to_resume=True,
+            payload=result,
+        )
     return _success("Temperature output stopped and read back.", result)
+
+
+def _temperature_exception_failure(action: str, exc: Exception) -> dict:
+    exception_name = type(exc).__name__
+    if exception_name == "TemperatureConnectionError":
+        error_code = "temperature_connection_error"
+    elif exception_name == "TemperatureTimeoutError":
+        error_code = "temperature_timeout"
+    elif action == "temperature_snapshot":
+        error_code = "temperature_snapshot_failed"
+    elif action == "temperature_configure":
+        error_code = "temperature_configure_failed"
+    elif action == "temperature_stop":
+        error_code = "temperature_stop_failed"
+    else:
+        error_code = "temperature_runtime_error"
+    return _fail(
+        error_code,
+        str(exc),
+        retry_safe=action == "temperature_snapshot",
+        needs_operator=True,
+        safe_to_resume=action != "temperature_configure",
+        payload={"action": action, "exceptionType": exception_name},
+    )
 
 
 def handle(session: HardwareSession, request: dict) -> dict:
@@ -748,17 +781,20 @@ def main() -> int:
                         "stageSettleDiagnostics": settle_diagnostics,
                     },
                 )
-                result = _fail(
-                    "python_runtime_error",
-                    str(exc),
-                    payload={
-                        "action": action,
-                        "exceptionType": type(exc).__name__,
-                        "traceback": traceback.format_exc(),
-                        "stageMoveCommands": stage_commands,
-                        "stageSettleDiagnostics": settle_diagnostics,
-                    },
-                )
+                if isinstance(action, str) and action.startswith("temperature_"):
+                    result = _temperature_exception_failure(action, exc)
+                else:
+                    result = _fail(
+                        "python_runtime_error",
+                        str(exc),
+                        payload={
+                            "action": action,
+                            "exceptionType": type(exc).__name__,
+                            "traceback": traceback.format_exc(),
+                            "stageMoveCommands": stage_commands,
+                            "stageSettleDiagnostics": settle_diagnostics,
+                        },
+                    )
             emit({"requestId": request_id, **result})
     finally:
         session.close()

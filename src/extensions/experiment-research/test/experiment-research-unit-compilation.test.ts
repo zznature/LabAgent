@@ -143,23 +143,27 @@ describe("experiment research unit compilation", () => {
 	});
 
 	it("compiles temperature targets into current-position step units with fixed semantic actions", () => {
-		const spec = {
-			...createBaseProcedureSpec(),
+		const base = createBaseProcedureSpec();
+		const spec: ProcedureSpec = {
+			procedureSpecId: base.procedureSpecId,
+			experimentId: base.experimentId,
+			intentId: base.intentId,
 			procedureId: "raman_temperature_series",
+			procedureVersion: base.procedureVersion,
 			resources: [
-				...createBaseProcedureSpec().resources,
+				...base.resources,
 				{ resourceId: "temperature-main", role: "temperature_controller" },
 			],
+			limits: base.limits,
 			plan: {
 				kind: "temperature_series",
 				targetsK: [200, 100],
 			},
 			domain: {
-				...createBaseProcedureSpec().domain,
 				raman: {
-					...createBaseProcedureSpec().domain.raman,
+					...base.domain.raman,
 					autofocus: {
-						...createBaseProcedureSpec().domain.raman.autofocus,
+						...base.domain.raman.autofocus,
 						enabled: false,
 					},
 				},
@@ -180,7 +184,7 @@ describe("experiment research unit compilation", () => {
 			},
 		};
 
-		const units = compileProcedureSpec(spec as ProcedureSpec);
+		const units = compileProcedureSpec(spec);
 
 		expect(units).toHaveLength(2);
 		expect(units.map((unit) => unit.unitKind)).toEqual(["step", "step"]);

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
 import {
 	clearRamanLiveRuntime,
+	failedActionResult,
 	registerRamanLiveRuntime,
 	successActionResult,
 	type RamanLiveRuntime,
@@ -72,12 +73,12 @@ function createTemperatureSeriesSpec() {
 		],
 		limits: { maxLaserPowerPercent: 1 },
 		plan: { kind: "temperature_series", targetsK: [200, 100] },
-		stoppingRules: { maxRuntimeMinutes: 10, maxUnits: 2, stopOnError: false },
 		domain: {
 			raman: {
 				autofocus: {
 					enabled: false,
 					roi: { x: 100, y: 100, width: 64, height: 64 },
+					params: {},
 				},
 				acquisition: {
 					integrationTimeMs: 1,
@@ -269,6 +270,7 @@ describe("experiment research temperature series runtime", () => {
 		const artifacts = readArtifactRecords(cwd, runId);
 
 		expect(terminal.status).toBe("completed");
+		expect(asRecord(terminal.progress).completedUnits).toBe(2);
 		expect(artifacts.filter((record) => record.artifact.kind === "temperature-evidence")).toHaveLength(2);
 		expect(artifacts.filter((record) => record.artifact.kind === "spectrum")).toHaveLength(2);
 	});
@@ -280,6 +282,7 @@ describe("experiment research temperature series runtime", () => {
 		const metrics: RuntimeMetrics = { autofocusCalls: 0, configureCalls: 0, spectrumCalls: 0, stopCalls: 0 };
 		registerRamanLiveRuntime(cwd, createRuntime(metrics));
 		const spec = createTemperatureSeriesSpec();
+		spec.domain.raman.autofocus.params = { zStartUm: 1_450, zEndUm: 1_550 };
 
 		const readyResult = await extension.tools.get("run_preflight")?.execute(
 			"preflight",
@@ -292,6 +295,7 @@ describe("experiment research temperature series runtime", () => {
 		const readyState = asRecord(readyDetails.stateAfter);
 		expect(readyDetails.status).toBe("success");
 		expect(asRecord(readyState.temperaturePreflight).ready).toBe(true);
+		expect(asRecord(readyState.stageAnchorDetails).reason).toBe("temperature_series_autofocus_disabled");
 
 		spec.plan.targetsK = [400];
 		const rejectedResult = await extension.tools.get("run_preflight")?.execute(
@@ -363,7 +367,6 @@ describe("experiment research temperature series runtime", () => {
 		registerRamanLiveRuntime(cwd, runtime);
 		const spec = createTemperatureSeriesSpec();
 		spec.plan.targetsK = [200];
-		spec.stoppingRules.maxUnits = 1;
 		spec.domain.temperature.stability.timeoutPerTargetS = 0.02;
 
 		const proposed = await extension.tools.get("propose_run")?.execute("propose", { spec }, undefined, undefined, context);
@@ -390,6 +393,103 @@ describe("experiment research temperature series runtime", () => {
 		expect(metrics.stopCalls).toBe(0);
 	});
 
+	it("restarts both continuous hold and dwell after a tolerance deviation", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const metrics: RuntimeMetrics = { autofocusCalls: 0, configureCalls: 0, spectrumCalls: 0, stopCalls: 0 };
+		const runtime = createRuntime(metrics);
+		const samples = [200, 200, 200, 201, 200, 200, 200, 200, 200, 200, 200];
+		let snapshotCalls = 0;
+		runtime.temperature!.readSnapshot = () => {
+			const temperatureK = samples[snapshotCalls] ?? 200;
+			snapshotCalls += 1;
+			return successActionResult("Temperature read.", {
+				temperatureK,
+				setpointK: 200,
+				timestamp: new Date().toISOString(),
+			});
+		};
+		registerRamanLiveRuntime(cwd, runtime);
+		const spec = createTemperatureSeriesSpec();
+		spec.plan.targetsK = [200];
+		spec.domain.temperature.stability = {
+			toleranceK: 0.2,
+			continuousHoldS: 0.01,
+			postStableDwellS: 0.01,
+			pollIntervalS: 0.005,
+			timeoutPerTargetS: 1,
+		};
+
+		const proposed = await extension.tools.get("propose_run")?.execute("propose", { spec }, undefined, undefined, context);
+		const proposalId = ((proposed?.details as Record<string, unknown>).stateAfter as Record<string, unknown>).proposalId;
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminal = await pollUntilTerminal(extension, runId, context);
+
+		expect(terminal.status).toBe("completed");
+		expect(snapshotCalls).toBeGreaterThanOrEqual(10);
+		expect(metrics.spectrumCalls).toBe(1);
+	});
+
+	it("persists the pre-spectrum temperature when spectrum acquisition fails", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const metrics: RuntimeMetrics = { autofocusCalls: 0, configureCalls: 0, spectrumCalls: 0, stopCalls: 0 };
+		const runtime = createRuntime(metrics);
+		const readSnapshot = runtime.temperature!.readSnapshot;
+		let snapshotCalls = 0;
+		runtime.temperature!.readSnapshot = (action) => {
+			snapshotCalls += 1;
+			return readSnapshot(action);
+		};
+		runtime.spectrometer.acquireSpectrum = () => failedActionResult("Spectrum failed.", {
+			errorCode: "spectrum_timeout",
+			message: "Spectrum failed after the pre-temperature snapshot.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		});
+		registerRamanLiveRuntime(cwd, runtime);
+		const spec = createTemperatureSeriesSpec();
+		spec.plan.targetsK = [200];
+
+		const proposed = await extension.tools.get("propose_run")?.execute("propose", { spec }, undefined, undefined, context);
+		const proposalId = ((proposed?.details as Record<string, unknown>).stateAfter as Record<string, unknown>).proposalId;
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: { preflightReady: true, controlAvailable: true },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminal = await pollUntilTerminal(extension, runId, context);
+		const artifacts = readArtifactRecords(cwd, runId);
+
+		expect(terminal.status).toBe("failed");
+		expect(artifacts.filter((record) => record.artifact.kind === "temperature-evidence")).toHaveLength(1);
+		expect(snapshotCalls).toBeGreaterThanOrEqual(3);
+		expect(metrics.stopCalls).toBe(0);
+	});
+
 	it.each([
 		["pause_run", "paused"],
 		["abort_run", "aborted"],
@@ -401,7 +501,6 @@ describe("experiment research temperature series runtime", () => {
 		registerRamanLiveRuntime(cwd, createRuntime(metrics));
 		const spec = createTemperatureSeriesSpec();
 		spec.plan.targetsK = [200];
-		spec.stoppingRules.maxUnits = 1;
 		spec.domain.temperature.stability.continuousHoldS = 1;
 
 		const proposed = await extension.tools.get("propose_run")?.execute("propose", { spec }, undefined, undefined, context);

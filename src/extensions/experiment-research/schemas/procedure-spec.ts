@@ -280,6 +280,12 @@ export const ProcedurePlanSchema = Type.Union([
 	TemperatureSeriesPlanSchema,
 ]);
 
+export const NonTemperatureProcedurePlanSchema = Type.Union([
+	GridScanPlanSchema,
+	PointListPlanSchema,
+	CurrentPositionPlanSchema,
+]);
+
 export const ProcedureIdSchema = Type.Union([
 	Type.Literal("raman_single_point_probe"),
 	Type.Literal("raman_parameter_search"),
@@ -287,22 +293,52 @@ export const ProcedureIdSchema = Type.Union([
 	Type.Literal("raman_temperature_series"),
 ]);
 
-export const ProcedureSpecSchema = Type.Object(
+export const NonTemperatureProcedureIdSchema = Type.Union([
+	Type.Literal("raman_single_point_probe"),
+	Type.Literal("raman_parameter_search"),
+	Type.Literal("raman_grid_mapping"),
+]);
+
+export const TemperatureProcedureDomainSchema = Type.Object(
 	{
-		procedureSpecId: Type.String({ minLength: 1 }),
-		experimentId: Type.String({ minLength: 1 }),
-		intentId: Type.String({ minLength: 1 }),
-		procedureId: ProcedureIdSchema,
-		procedureVersion: Type.String({ minLength: 1 }),
-		resources: Type.Array(ResourceRefSchema, { minItems: 1 }),
-		limits: ProcedureLimitsSchema,
-		plan: ProcedurePlanSchema,
-		stoppingRules: Type.Optional(StoppingRulesSchema),
-		retryPolicy: Type.Optional(RetryPolicySchema),
-		domain: ProcedureDomainSchema,
+		raman: RamanDomainSchema,
+		temperature: TemperatureDomainSchema,
 	},
 	{ additionalProperties: false },
 );
+
+const ProcedureSpecCommonFields = {
+	procedureSpecId: Type.String({ minLength: 1 }),
+	experimentId: Type.String({ minLength: 1 }),
+	intentId: Type.String({ minLength: 1 }),
+	procedureVersion: Type.String({ minLength: 1 }),
+	resources: Type.Array(ResourceRefSchema, { minItems: 1 }),
+	limits: ProcedureLimitsSchema,
+	retryPolicy: Type.Optional(RetryPolicySchema),
+};
+
+export const ProcedureSpecSchema = Type.Union([
+	Type.Object(
+		{
+			...ProcedureSpecCommonFields,
+			procedureId: NonTemperatureProcedureIdSchema,
+			plan: NonTemperatureProcedurePlanSchema,
+			stoppingRules: Type.Optional(StoppingRulesSchema),
+			domain: ProcedureDomainSchema,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			...ProcedureSpecCommonFields,
+			procedureId: Type.Literal("raman_temperature_series"),
+			plan: TemperatureSeriesPlanSchema,
+			stoppingRules: Type.Optional(Type.Never()),
+			domain: TemperatureProcedureDomainSchema,
+		},
+		{ additionalProperties: false },
+	),
+]);
 
 export type ResourceRef = Static<typeof ResourceRefSchema>;
 export type Point = Static<typeof PointSchema>;

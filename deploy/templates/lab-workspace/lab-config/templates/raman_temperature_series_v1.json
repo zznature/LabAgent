@@ -31,12 +31,6 @@
     "limits": {
       "maxLaserPowerPercent": 25
     },
-    "stoppingRules": {
-      "maxRuntimeMinutes": 180,
-      "maxUnits": 32,
-      "stopOnError": false,
-      "maxConsecutiveFailures": 32
-    },
     "domain": {
       "raman": {
         "autofocus": {

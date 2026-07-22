@@ -317,27 +317,42 @@ export async function executeTemperatureSeriesRun(context: RunExecutionContext):
 			context.abortAt(unit);
 			return;
 		}
-		context.markUnitStarted(unit);
-		const result = await context.executeUnit(unit);
-		const resultArtifacts = artifactRefsForResult(result);
-		if (activeRun.abortRequested) {
-			context.abortAt(unit);
-			return;
-		}
-		if (activeRun.pauseRequested || result.status === "paused") {
-			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
-			return;
-		}
-		if (result.status === "failed") {
-			const failure = errorForResult(result);
-			if (failure.errorCode === "temperature_drift_exceeded") {
-				context.recordUnitFailureAndContinue(unit, failure, resultArtifacts);
-				continue;
+		const maxAttempts = (activeRun.spec.domain.temperature?.driftPolicy.maxReacquisitionsPerTarget ?? 0) + 1;
+		const unitArtifacts: RunState["artifactRefs"] = [];
+		for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
+			const attempt: UnitAttemptContext = {
+				attemptIndex,
+				phase: attemptIndex === 0 ? "initial" : "immediate_retry",
+			};
+			context.markUnitStarted(unit, attempt);
+			const result = await context.executeUnit(unit, {
+				temperatureAttemptIndex: attemptIndex,
+				configureTemperatureTarget: attemptIndex === 0,
+			});
+			unitArtifacts.push(...artifactRefsForResult(result));
+			if (activeRun.abortRequested) {
+				context.abortAt(unit);
+				return;
 			}
-			context.fail(unit, failure, resultArtifacts);
-			return;
+			if (activeRun.pauseRequested || result.status === "paused") {
+				context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", unitArtifacts);
+				return;
+			}
+			if (result.status === "failed") {
+				const failure = errorForResult(result);
+				if (failure.errorCode === "temperature_drift_exceeded" && attemptIndex + 1 < maxAttempts) {
+					continue;
+				}
+				if (failure.errorCode === "temperature_drift_exceeded") {
+					context.recordUnitFailureAndContinue(unit, failure, unitArtifacts, attempt);
+					break;
+				}
+				context.fail(unit, failure, unitArtifacts);
+				return;
+			}
+			context.completeUnit(unit, unitArtifacts, {}, attempt);
+			break;
 		}
-		context.completeUnit(unit, resultArtifacts);
 	}
 	context.complete();
 }

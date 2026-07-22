@@ -90,6 +90,9 @@ function isParameterSearchRun(spec: ProcedureSpec): boolean {
 }
 
 function maxUnitsForSpec(spec: ProcedureSpec, units: ExecutionUnit[]): number {
+	if (spec.procedureId === "raman_temperature_series") {
+		return units.length;
+	}
 	const stoppingMaxUnits = spec.stoppingRules?.maxUnits ?? units.length;
 	if (!isParameterSearchRun(spec)) {
 		return Math.min(units.length, stoppingMaxUnits);

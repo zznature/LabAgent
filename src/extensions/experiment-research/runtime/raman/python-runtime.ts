@@ -175,6 +175,22 @@ function asArtifact(path: unknown, kind: string, label: string): ArtifactRef[] {
 	];
 }
 
+function temperatureResourceIdMismatch(actionResourceId: string, registeredResourceId: string): ActionResult | undefined {
+	if (actionResourceId === registeredResourceId) {
+		return undefined;
+	}
+	return failedActionResult(
+		`Action references temperature resource ${actionResourceId}, but the registered resource is ${registeredResourceId}.`,
+		{
+			errorCode: "temperature_resource_mismatch",
+			message: "The approved ProcedureSpec temperature resource does not match the registered runtime resource.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		},
+	);
+}
+
 function toActionFailure(response: PythonFailure): ActionResult {
 	const error: ActionError = {
 		errorCode: response.errorCode,
@@ -718,11 +734,20 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 			? {
 					temperature: {
 						resource: resolvedConfig.temperatureController,
-						readSnapshot: async (action: TemperatureReadSnapshotAction): Promise<ActionResult> =>
-							createActionResult(
+						readSnapshot: async (action: TemperatureReadSnapshotAction): Promise<ActionResult> => {
+							const mismatch = temperatureResourceIdMismatch(action.resourceId, resolvedConfig.temperatureController!.resourceId);
+							if (mismatch) {
+								return mismatch;
+							}
+							return createActionResult(
 								await daemon.request("temperature_snapshot", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000),
-							),
+							);
+						},
 						configureTarget: async (action: TemperatureConfigureTargetAction): Promise<ActionResult> => {
+							const mismatch = temperatureResourceIdMismatch(action.resourceId, resolvedConfig.temperatureController!.resourceId);
+							if (mismatch) {
+								return mismatch;
+							}
 							const range = resolvedConfig.temperatureController!.operatingRange;
 							if (action.targetK < range.minTargetK || action.targetK > range.maxTargetK) {
 								return failedActionResult(
@@ -756,10 +781,15 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 								),
 							);
 						},
-						stop: async (action: TemperatureStopAction): Promise<ActionResult> =>
-							createActionResult(
+						stop: async (action: TemperatureStopAction): Promise<ActionResult> => {
+							const mismatch = temperatureResourceIdMismatch(action.resourceId, resolvedConfig.temperatureController!.resourceId);
+							if (mismatch) {
+								return mismatch;
+							}
+							return createActionResult(
 								await daemon.request("temperature_stop", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000),
-							),
+							);
+						},
 					},
 				}
 			: {}),

@@ -164,8 +164,12 @@ function previewState(spec: ProcedureSpec, templateApplication?: TemplateApplica
 
 function hasRequiredRamanRoles(spec: ProcedureSpec): boolean {
 	const roles = new Set(spec.resources.map((resource) => resource.role));
-	const ramanRolesPresent = roles.has("stage") && roles.has("frame_provider") && roles.has("spectrometer");
-	return ramanRolesPresent && (spec.procedureId !== "raman_temperature_series" || roles.has("temperature_controller"));
+	if (spec.procedureId === "raman_temperature_series") {
+		const autofocusRolesPresent =
+			!spec.domain.raman.autofocus.enabled || (roles.has("stage") && roles.has("frame_provider"));
+		return roles.has("spectrometer") && roles.has("temperature_controller") && autofocusRolesPresent;
+	}
+	return roles.has("stage") && roles.has("frame_provider") && roles.has("spectrometer");
 }
 
 function templateForProcedure(procedureId: ProcedureId): Record<string, unknown> {
@@ -186,12 +190,6 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 			xRangeUm: { minUm: 0, maxUm: 50_000 },
 			yRangeUm: { minUm: 0, maxUm: 50_000 },
 			zRangeUm: { minUm: 200, maxUm: 5_000 },
-		},
-		stoppingRules: {
-			maxRuntimeMinutes: 180,
-			maxUnits: 1,
-			stopOnError: true,
-			maxConsecutiveFailures: 1,
 		},
 		domain: {
 			raman: {
@@ -226,12 +224,6 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 				...common.resources,
 				{ resourceId: "temperature-main", role: "temperature_controller" },
 			],
-			stoppingRules: {
-				maxRuntimeMinutes: 180,
-				maxUnits: 2,
-				stopOnError: false,
-				maxConsecutiveFailures: 2,
-			},
 			plan: {
 				kind: "temperature_series",
 				targetsK: [200, 100],
@@ -265,6 +257,12 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 	if (procedureId === "raman_single_point_probe") {
 		return {
 			...common,
+			stoppingRules: {
+				maxRuntimeMinutes: 180,
+				maxUnits: 1,
+				stopOnError: true,
+				maxConsecutiveFailures: 1,
+			},
 			plan: {
 				kind: "current_position",
 				perPoint: [
@@ -444,9 +442,12 @@ async function buildPreflightState(
 	}
 	const temperaturePreflightReady = temperaturePreflight.ready === true;
 	const liveModeSupported = requestedModeSupported && temperatureRuntimeAvailable;
-	const anchorValidation = livePreflight.preflightReady && livePreflight.controlAvailable && temperaturePreflightReady
-		? await validateRuntimeAnchorState(spec, runtime)
-		: { valid: false, details: { skipped: true, reason: "runtime_preflight_not_ready" } };
+	const stageAnchorRequired = spec.procedureId !== "raman_temperature_series" || spec.domain.raman.autofocus.enabled;
+	const anchorValidation = !stageAnchorRequired
+		? { valid: true, details: { skipped: true, reason: "temperature_series_autofocus_disabled" } }
+		: livePreflight.preflightReady && livePreflight.controlAvailable && temperaturePreflightReady
+			? await validateRuntimeAnchorState(spec, runtime)
+			: { valid: false, details: { skipped: true, reason: "runtime_preflight_not_ready" } };
 	return {
 		mode: executionMode,
 		procedureSpecId: spec.procedureSpecId,

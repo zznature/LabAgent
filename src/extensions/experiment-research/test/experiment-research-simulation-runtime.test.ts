@@ -55,7 +55,7 @@ function loadExperimentExtension(): CapturedExtension {
 	return { tools, handlers, getActiveTools: () => activeTools };
 }
 
-function createProcedureSpec(pointCount = 3): ProcedureSpec {
+function createProcedureSpec(pointCount = 3): ProcedureSpec & { procedureId: "raman_grid_mapping" } {
 	return {
 		procedureSpecId: `proc-spec-${pointCount}`,
 		experimentId: "exp-sim-001",

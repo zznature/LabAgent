@@ -113,6 +113,7 @@ export interface TemperatureSeriesBuilderInput extends BaseProcedureBuilderInput
 	procedureId: "raman_temperature_series";
 	targetsK: number[];
 	temperature: TemperatureDomain;
+	stoppingRules?: never;
 }
 
 export type ProcedureSpecBuilderInput =
@@ -120,6 +121,9 @@ export type ProcedureSpecBuilderInput =
 	| ParameterSearchBuilderInput
 	| GridMappingBuilderInput
 	| TemperatureSeriesBuilderInput;
+
+type NonTemperatureProcedureSpecBuilderInput = Exclude<ProcedureSpecBuilderInput, TemperatureSeriesBuilderInput>;
+type NonTemperaturePlan = Exclude<ProcedureSpec["plan"], { kind: "temperature_series" }>;
 
 const PER_ACTION_RUNTIME_MS: Record<SemanticStep["kind"], number> = {
 	move_to_point: 2_000,
@@ -166,14 +170,7 @@ function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
 	};
 }
 
-function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
-	if (input.procedureId === "raman_temperature_series") {
-		return {
-			kind: "temperature_series",
-			targetsK: input.targetsK,
-		};
-	}
-
+function createNonTemperaturePlan(input: NonTemperatureProcedureSpecBuilderInput): NonTemperaturePlan {
 	if (input.procedureId === "raman_grid_mapping") {
 		return {
 			kind: "grid_scan",
@@ -211,15 +208,32 @@ function createSpec(input: ProcedureSpecBuilderInput): ProcedureSpec {
 	if (input.procedureId === "raman_temperature_series" && !input.resources.temperatureControllerResourceId) {
 		throw new Error("raman_temperature_series requires temperatureControllerResourceId");
 	}
-	return {
+	const common = {
 		procedureSpecId: input.procedureSpecId ?? generatedId("procedure-spec"),
 		experimentId: input.intent.experimentId,
 		intentId: input.intent.intentId,
-		procedureId: input.procedureId,
 		procedureVersion: input.procedureVersion ?? "0.1.0",
 		resources: toResourceRefs(input.resources),
 		limits: input.limits,
-		plan: createPlan(input),
+	};
+	if (input.procedureId === "raman_temperature_series") {
+		return {
+			...common,
+			procedureId: input.procedureId,
+			plan: { kind: "temperature_series", targetsK: input.targetsK },
+			domain: {
+				raman: {
+					autofocus: input.autofocus,
+					acquisition: input.acquisition,
+				},
+				temperature: input.temperature,
+			},
+		};
+	}
+	return {
+		...common,
+		procedureId: input.procedureId,
+		plan: createNonTemperaturePlan(input),
 		stoppingRules: input.stoppingRules,
 		domain: toDomain(input),
 	};

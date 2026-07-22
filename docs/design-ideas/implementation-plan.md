@@ -676,6 +676,7 @@ docs freeze
 
 - [x] 定义 `temperature_controller` resource 与 `temperature.read_snapshot` / `temperature.configure_target` / `temperature.stop` actions
 - [x] `temperature_series.targetsK` 编译为每个目标一个稳定 step unit
+- [x] 目标列表本身定义 bounded unit count，不允许 `maxUnits` 静默截断目标
 - [x] 稳定默认值为 ±0.2 K 连续 30 s，随后 dwell 120 s，且 planner 可按用户要求覆盖
 - [x] 稳定或 dwell 期间越界时重新开始完整 hold + dwell
 - [x] autofocus 默认关闭，仅按用户设置启用
