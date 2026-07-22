@@ -1,0 +1,83 @@
+{
+  "templateId": "raman_temperature_series",
+  "templateVersion": "1.0.0",
+  "procedureId": "raman_temperature_series",
+  "label": "Raman temperature series",
+  "description": "Default stability, dwell, drift-reacquisition, and Raman acquisition parameters for a bounded temperature series.",
+  "match": {
+    "intentKeywords": ["temperature", "temperature series", "温度", "变温"],
+    "intentTags": ["temperature_series"],
+    "defaultForProcedure": true
+  },
+  "defaults": {
+    "resources": [
+      {
+        "resourceId": "stage-main",
+        "role": "stage"
+      },
+      {
+        "resourceId": "frame-main",
+        "role": "frame_provider"
+      },
+      {
+        "resourceId": "spectrometer-main",
+        "role": "spectrometer"
+      },
+      {
+        "resourceId": "temperature-main",
+        "role": "temperature_controller"
+      }
+    ],
+    "limits": {
+      "maxLaserPowerPercent": 25
+    },
+    "stoppingRules": {
+      "maxRuntimeMinutes": 180,
+      "maxUnits": 32,
+      "stopOnError": false,
+      "maxConsecutiveFailures": 32
+    },
+    "domain": {
+      "raman": {
+        "autofocus": {
+          "enabled": false,
+          "roi": {
+            "x": 492,
+            "y": 353,
+            "width": 225,
+            "height": 225
+          }
+        },
+        "acquisition": {
+          "integrationTimeMs": 180000,
+          "laserPowerPercent": 25,
+          "accumulations": 1,
+          "timeoutMs": 240000,
+          "saveFormat": "txt"
+        }
+      },
+      "temperature": {
+        "stability": {
+          "toleranceK": 0.2,
+          "continuousHoldS": 30,
+          "postStableDwellS": 120,
+          "pollIntervalS": 1,
+          "timeoutPerTargetS": 3600
+        },
+        "driftPolicy": {
+          "maxDeltaK": 0.5,
+          "maxReacquisitionsPerTarget": 1,
+          "exhaustedAction": "continue"
+        }
+      }
+    }
+  },
+  "source": {
+    "kind": "user_workspace"
+  },
+  "notes": [
+    "The planner must insert user-requested targetsK into the ProcedureSpec plan.",
+    "Autofocus is disabled unless the user explicitly enables it.",
+    "Run completion, failure, pause, and abort keep the current temperature target; only an explicit stop action turns output off."
+  ]
+}

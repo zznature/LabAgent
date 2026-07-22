@@ -61,6 +61,32 @@ rl.on("line", (raw) => {
       payload.scanPoints = [{ zUm: 260, score: 1.2, saturationRatio: 0 }];
       payload.stageMoveCommands = [{ axis: "z", target_um: 260, method: "fake.move" }];
       payload.stageSettleDiagnostics = { status: "settled", axes: ["z"] };
+	} else if (req.action === "temperature_snapshot") {
+	  Object.assign(payload, {
+		channel: "A",
+		temperatureK: 200.1,
+		setpointK: 200,
+		rampKPerMin: 2,
+		heaterPowerPercent: 12,
+		heaterCurrentA: 0.2,
+		heaterVoltageV: 1.2,
+		outputRange: "LOW",
+		loopChannel: "A",
+		controlMode: "A",
+		timestamp: "2026-07-22T00:00:00.000Z"
+	  });
+	} else if (req.action === "temperature_configure") {
+	  Object.assign(payload, {
+		channel: "A",
+		temperatureK: 201,
+		setpointK: req.payload.targetK,
+		rampKPerMin: req.payload.rampKPerMin,
+		outputRange: "LOW",
+		loopChannel: "A",
+		controlMode: "A"
+	  });
+	} else if (req.action === "temperature_stop") {
+	  Object.assign(payload, { outputRange: "OFF", setpointK: 200 });
     } else if (req.action === "preflight") {
       payload.pythonRootExists = true;
     }
@@ -137,6 +163,23 @@ function createConfig(pythonRoot: string): RamanPythonRuntimeConfig {
 			},
 			leasePolicy: "exclusive",
 			simulationAvailable: false,
+		},
+		temperatureController: {
+			resourceId: "temperature-main",
+			kind: "temperature_controller",
+			runtime: "raman_python",
+			driver: "kelvinion_mini",
+			config: {
+				port: "COM6",
+				baudrate: 115200,
+				channel: "A",
+				controlMode: "A",
+				outputRange: "LOW",
+				defaultRampKPerMin: 2,
+			},
+			leasePolicy: "exclusive",
+			simulationAvailable: true,
+			operatingRange: { minTargetK: 50, maxTargetK: 350, maxRampKPerMin: 10 },
 		},
 	};
 }
@@ -221,6 +264,30 @@ describe("experiment research Raman Python daemon transport", () => {
 		expect(autofocus.status).toBe("success");
 		expect((autofocus.payload?.params as Record<string, unknown>).effectivePointCount).toBe(10);
 		expect(autofocus.payload?.stageSettleDiagnostics).toEqual({ status: "settled", axes: ["z"] });
+
+		const configuredTemperature = await runtime.temperature?.configureTarget({
+			action: "temperature.configure_target",
+			resourceId: "temperature-main",
+			targetK: 200,
+			rampKPerMin: 2,
+			timeoutMs: 5000,
+		});
+		expect(configuredTemperature?.status).toBe("success");
+		expect(configuredTemperature?.payload?.setpointK).toBe(200);
+
+		const temperatureSnapshot = await runtime.temperature?.readSnapshot({
+			action: "temperature.read_snapshot",
+			resourceId: "temperature-main",
+			timeoutMs: 5000,
+		});
+		expect(temperatureSnapshot?.payload?.temperatureK).toBe(200.1);
+
+		const stoppedTemperature = await runtime.temperature?.stop({
+			action: "temperature.stop",
+			resourceId: "temperature-main",
+			timeoutMs: 5000,
+		});
+		expect(stoppedTemperature?.payload?.outputRange).toBe("OFF");
 	});
 
 	it("serializes concurrent actions so the single hardware session is never touched in parallel", async () => {

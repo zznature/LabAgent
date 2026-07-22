@@ -285,6 +285,10 @@ export async function executeLinearRun(
 		context.markUnitStarted(unit);
 		const result = await context.executeUnit(unit, unitOptions(unit));
 		const resultArtifacts = artifactRefsForResult(result);
+		if (activeRun.abortRequested) {
+			context.abortAt(unit);
+			return;
+		}
 
 		if (activeRun.pauseRequested || result.status === "paused") {
 			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
@@ -303,6 +307,38 @@ export async function executeLinearRun(
 		}
 	}
 
+	context.complete();
+}
+
+export async function executeTemperatureSeriesRun(context: RunExecutionContext): Promise<void> {
+	const { activeRun } = context;
+	for (const unit of activeRun.units) {
+		if (activeRun.abortRequested) {
+			context.abortAt(unit);
+			return;
+		}
+		context.markUnitStarted(unit);
+		const result = await context.executeUnit(unit);
+		const resultArtifacts = artifactRefsForResult(result);
+		if (activeRun.abortRequested) {
+			context.abortAt(unit);
+			return;
+		}
+		if (activeRun.pauseRequested || result.status === "paused") {
+			context.pause(unit, result.status === "paused" ? result.reason : "operator_requested", resultArtifacts);
+			return;
+		}
+		if (result.status === "failed") {
+			const failure = errorForResult(result);
+			if (failure.errorCode === "temperature_drift_exceeded") {
+				context.recordUnitFailureAndContinue(unit, failure, resultArtifacts);
+				continue;
+			}
+			context.fail(unit, failure, resultArtifacts);
+			return;
+		}
+		context.completeUnit(unit, resultArtifacts);
+	}
 	context.complete();
 }
 

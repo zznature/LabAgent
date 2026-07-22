@@ -136,15 +136,46 @@ describe("experiment research planner proposal flow", () => {
 				order: "snake",
 			},
 		});
+		const temperatureSeries = buildProcedureProposal({
+			...commonBuilderInput(),
+			procedureId: "raman_temperature_series",
+			resources: {
+				...commonBuilderInput().resources,
+				temperatureControllerResourceId: "temperature-main",
+			},
+			autofocus: {
+				...commonBuilderInput().autofocus,
+				enabled: false,
+			},
+			targetsK: [200, 100],
+			temperature: {
+				stability: {
+					toleranceK: 0.2,
+					continuousHoldS: 30,
+					postStableDwellS: 120,
+					pollIntervalS: 1,
+					timeoutPerTargetS: 3_600,
+				},
+				driftPolicy: {
+					maxDeltaK: 0.5,
+					maxReacquisitionsPerTarget: 1,
+					exhaustedAction: "continue",
+				},
+			},
+		});
 
 		expect(ProcedureSpecValidator.Check(singlePoint.spec)).toBe(true);
 		expect(ProcedureSpecValidator.Check(parameterSearch.spec)).toBe(true);
 		expect(ProcedureSpecValidator.Check(gridMapping.spec)).toBe(true);
+		expect(ProcedureSpecValidator.Check(temperatureSeries.spec)).toBe(true);
 		expect(parameterSearch.spec.domain.raman.parameterSearch?.maxAttempts).toBe(3);
 		expect(singlePoint.preview.requiresConfirmation).toBe(true);
 		expect(parameterSearch.preview.unitCount).toBe(3);
 		expect(gridMapping.preview.unitCount).toBe(6);
 		expect(gridMapping.preview.risks.some((risk) => risk.code === "multi_point_mapping")).toBe(true);
+		expect(temperatureSeries.preview.unitCount).toBe(2);
+		expect(temperatureSeries.preview.risks.some((risk) => risk.code === "temperature_control")).toBe(true);
+		expect(temperatureSeries.preview.risks.some((risk) => risk.code === "stage_motion")).toBe(false);
 	});
 
 	it("builds current-position single-point proposals without placeholder coordinates", () => {
@@ -248,6 +279,25 @@ describe("experiment research planner proposal flow", () => {
 		expect(autofocusParams.frameTimeoutMs).toBe(30_000);
 		expect(asRecord(template.stoppingRules).maxUnits).toBe(256);
 		expect(templateState.notes).toEqual(expect.arrayContaining([expect.stringContaining("Line scans should use point_list")]));
+
+		const temperatureTemplateResult = await extension.tools
+			.get("get_procedure_spec_template")
+			?.execute("temperature-template", { procedureId: "raman_temperature_series" }, undefined, undefined, context);
+		const temperatureTemplateState = asRecord(asRecord(temperatureTemplateResult?.details).stateAfter);
+		const temperatureTemplate = asRecord(temperatureTemplateState.template);
+		const temperaturePlan = asRecord(temperatureTemplate.plan);
+		const temperatureDomain = asRecord(asRecord(temperatureTemplate.domain).temperature);
+		const stability = asRecord(temperatureDomain.stability);
+		const drift = asRecord(temperatureDomain.driftPolicy);
+		expect(temperaturePlan).toEqual({ kind: "temperature_series", targetsK: [200, 100] });
+		expect(stability.toleranceK).toBe(0.2);
+		expect(stability.continuousHoldS).toBe(30);
+		expect(stability.postStableDwellS).toBe(120);
+		expect(drift.maxDeltaK).toBe(0.5);
+		expect(drift.maxReacquisitionsPerTarget).toBe(1);
+		expect(asRecord(asRecord(temperatureTemplate.domain).raman).autofocus).toEqual(
+			expect.objectContaining({ enabled: false }),
+		);
 	});
 
 	it("allows a full 16x16 bounded grid mapping through planner preflight when hard limits are satisfied", async () => {

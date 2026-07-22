@@ -6,7 +6,7 @@ Current status:
 
 - prompt layering is fixed as:
   `core lab agent prompt -> Raman extension prompt -> lab-local user prompts`
-- Phase 10 bounded Raman parameter search and bounded Raman mapping execution are implemented on top of the planner proposal flow, explicit evaluation rules, simulation runtime, registered live runtime contract, and approval gate
+- bounded Raman parameter search, mapping, and temperature-series execution are implemented on top of the planner proposal flow, explicit evaluation rules, simulation runtime, registered live runtime contract, and approval gate
 - planner-facing tools:
   - `get_lab_capabilities`
   - `get_lab_state`
@@ -16,6 +16,9 @@ Current status:
   - `raman_get_hardware_status`
   - `raman_get_stage_position`
   - `raman_stage_move_relative`
+  - `raman_get_temperature_status`
+  - `raman_set_temperature_target`
+  - `raman_stop_temperature_control`
 - core schema modules available under `schemas/`:
   - `experiment-intent.ts`
   - `procedure-spec.ts`
@@ -45,6 +48,7 @@ Current status:
   - live-supervised Raman single-point bounded runs when a live runtime is registered
   - live-supervised Raman parameter-search bounded runs when a live runtime is registered
   - live-supervised Raman grid-mapping bounded runs when a live runtime is registered
+  - live-supervised Raman temperature-series bounded runs when a temperature controller is registered
 - bounded parameter search now enforces:
   - approved search envelope only
   - max attempts
@@ -53,6 +57,13 @@ Current status:
   - compiled `grid_scan` point execution
   - progress with completed and failed point counts
   - configurable consecutive-failure stop without auto-expanding the grid or auto-changing parameters
+- bounded temperature series now supports:
+  - one stable execution unit per target temperature
+  - user-overridable stability tolerance, continuous hold, post-stable dwell, and timeout
+  - temperature evidence immediately before and after each spectrum
+  - one bounded reacquisition after excessive drift, followed by `completed_with_failures` while later targets continue
+  - autofocus only when explicitly enabled; its default is off
+  - persistent target/output across completion, failure, pause, abort, and daemon shutdown; only `raman_stop_temperature_control` turns output off
 - `run_procedure` remains registered as a deprecated blocked entrypoint that returns `approval_required`
 - planner builders available under `planner/`:
   - `intent-builder.ts`
@@ -166,6 +177,27 @@ Current lab default:
     "leasePolicy": "exclusive",
     "simulationAvailable": false
   },
+  "temperatureController": {
+    "resourceId": "temperature-main",
+    "kind": "temperature_controller",
+    "runtime": "raman_python",
+    "driver": "kelvinion_mini",
+    "config": {
+      "port": "COM6",
+      "baudrate": 115200,
+      "channel": "A",
+      "controlMode": "A",
+      "outputRange": "LOW",
+      "defaultRampKPerMin": 5
+    },
+    "leasePolicy": "exclusive",
+    "simulationAvailable": true,
+    "operatingRange": {
+      "minTargetK": 50,
+      "maxTargetK": 350,
+      "maxRampKPerMin": 10
+    }
+  },
   "preflight": {
     "requirePythonRoot": true,
     "requireBridgeDirs": false,
@@ -179,6 +211,10 @@ renders it as `<workspace>\\.venv\\Scripts\\python.exe`; local config can still
 override it for a machine-specific environment. Without an enabled registered
 runtime, live-supervised `approve_and_start_run` returns `live_runtime_unavailable`;
 simulation remains available.
+
+Edit `temperatureController.config.port` for the connected controller. The
+configured operating range and ramp ceiling are device-capability admission
+bounds and should also be adjusted to the installed controller/cryostat.
 
 The committed lab default lives at:
 
@@ -213,8 +249,9 @@ action. Properties relevant to mapping reliability:
   laser power) are still enforced in TypeScript before each action regardless of
   transport.
 - **Idle release.** After `daemon.idleShutdownMs` (default 30000 ms) with no
-  action, the daemon shuts down cleanly and releases the serial port so other
-  lab software can use it; the next action respawns it.
+  action, the daemon shuts down cleanly and releases serial ports so other lab
+  software can use them; the next action respawns it. Disconnecting never sends
+  temperature OFF, so the controller retains its current target and output.
 
 Optional config (in `raman-runtime.lab.json` / `raman-runtime.local.json`):
 
@@ -232,10 +269,10 @@ Rebuild-specific tests live in:
 src/extensions/experiment-research/test/
 ```
 
-Run them from the repository root with:
+Run only this extension's tests from `src/extensions/experiment-research` with:
 
 ```bash
-npm test
+node ../../../node_modules/vitest/dist/cli.js --run test
 ```
 
 The previous reference implementation has been deleted. This extension is the sole MVP implementation baseline.

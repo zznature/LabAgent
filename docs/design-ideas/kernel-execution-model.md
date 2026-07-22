@@ -157,6 +157,20 @@ interPointDelayMs: number
 - `current_position` 单点 plan 不使用该字段。
 - 该字段只表达 unit 边界上的确定性等待，不允许表达任意循环、条件分支或 driver 命令序列。
 
+### 4.3 温度稳定与漂移重采策略
+
+变温 Raman 的等待不是普通固定 delay，而是 `temperature_series` procedure 的确定性协议语义：
+
+- 每个 `targetsK` 编译为一个带 `temperatureTargetK` 的 step unit。
+- unit 先配置目标，再等待温度连续处于 `target ± toleranceK` 达到 `continuousHoldS`，随后完成 `postStableDwellS`。
+- hold 或 dwell 期间一旦越界，完整的 hold + dwell 重新计时。
+- 采谱前立即读取温度；若已越界，重新执行完整稳定流程后再采谱。
+- 采谱后立即读取温度，`abs(T_after - T_before)` 超过 `maxDeltaK` 时，重新稳定并最多重采一次。
+- 重采仍超限时，该 unit 失败但后续温度继续执行；run 最终进入 `completed_with_failures`。
+- autofocus 是 unit 内可选动作，默认关闭，只有 `domain.raman.autofocus.enabled=true` 才编译进入 action list。
+
+温度输出生命周期与 run 生命周期解耦：completed、failed、paused、aborted 以及 runtime disconnect 都保持当前 target/output；只有 operator 显式调用 temperature stop action 才设置 OFF。
+
 ## 5. `ExecutionUnit` 为什么是 kernel 核心对象
 
 `ExecutionUnit` 是 kernel 的核心，不是附属实现细节。
@@ -211,6 +225,7 @@ MVP 阶段优先选择**point-level** 或 **step-sequence-level** unit。
 2. **展开声明式结构**
    - `grid_scan -> point units`
    - `step_sequence -> step units`
+   - `temperature_series -> one step unit per targetK`
 
 3. **绑定语义动作模板**
    - 为每个 unit 生成固定 action 列表
@@ -237,6 +252,8 @@ MVP 阶段优先选择**point-level** 或 **step-sequence-level** unit。
 
 - `move_to_point`
 - `autofocus`
+- `set_temperature`
+- `wait_for_temperature`
 - `acquire_spectrum`
 
 不允许：

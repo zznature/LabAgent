@@ -73,6 +73,7 @@
 - 步骤类型必须来自受控的 `procedure/step` 库
 - 可以有受控的重复结构，例如 `grid_scan`、`point_list`、`repeat_n`
 - Raman 单点当前位置采集使用显式 `current_position` plan，不用 `{xUm: 0, yUm: 0, zUm: 200}` 这类占位绝对坐标表达当前位置
+- Raman 变温采集使用显式 `temperature_series` plan；目标温度属于 plan，稳定、dwell 与漂移重采规则属于 typed `domain.temperature`
 - 不允许任意 `for / while / if` 之类通用脚本控制流
 - 用户确认整次 bounded run 后，`ProcedureSpec` 会被冻结为本次 run 的唯一执行输入
 
@@ -354,6 +355,10 @@ type ProcedureSpec = {
         kind: "step_sequence"
         steps: SemanticStep[]
       }
+    | {
+        kind: "temperature_series"
+        targetsK: number[]
+      }
   stoppingRules?: {
     maxRuntimeMinutes?: number
     maxUnits?: number
@@ -374,19 +379,21 @@ type ProcedureSpec = {
 type SemanticStep =
   | { kind: "move_to_point" }
   | { kind: "autofocus"; strategy?: string }
+  | { kind: "set_temperature" }
+  | { kind: "wait_for_temperature" }
   | {
       kind: "acquire_spectrum"
       laserPowerPercent: number
       integrationTimeMs: number
     }
   | { kind: "capture_frame" }
-  | { kind: "wait_for_temperature"; targetC: number; toleranceC?: number }
 
 type ExecutionUnit = {
   unitId: string
   index: number
   unitKind: "point" | "step" | "batch"
   point?: { row?: number; col?: number; xUm: number; yUm: number; zUm?: number }
+  temperatureTargetK?: number
   actions: SemanticStep[]
 }
 

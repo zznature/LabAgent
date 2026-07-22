@@ -48,6 +48,27 @@
 		"leasePolicy": "exclusive",
 		"simulationAvailable": false
 	},
+	"temperatureController": {
+		"resourceId": "temperature-main",
+		"kind": "temperature_controller",
+		"runtime": "raman_python",
+		"driver": "kelvinion_mini",
+		"config": {
+			"port": "COM6",
+			"baudrate": 115200,
+			"channel": "A",
+			"controlMode": "A",
+			"outputRange": "LOW",
+			"defaultRampKPerMin": 5
+		},
+		"leasePolicy": "exclusive",
+		"simulationAvailable": true,
+		"operatingRange": {
+			"minTargetK": 50,
+			"maxTargetK": 350,
+			"maxRampKPerMin": 10
+		}
+	},
 	"preflight": {
 		"requirePythonRoot": true,
 		"requireBridgeDirs": false,

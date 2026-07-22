@@ -35,6 +35,7 @@ export const ExecutionUnitSchema = Type.Object(
 		unitKind: ExecutionUnitKindSchema,
 		positionRef: Type.Optional(ExecutionUnitPositionRefSchema),
 		point: Type.Optional(ExecutionUnitPointSchema),
+		temperatureTargetK: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 		actions: Type.Array(SemanticStepSchema, { minItems: 1 }),
 		limits: ProcedureLimitsSchema,
 		interUnitDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),

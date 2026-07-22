@@ -18,6 +18,7 @@ docs freeze
 -> real supervised single-point Raman
 -> bounded parameter search
 -> bounded Raman mapping
+-> bounded Raman temperature series
 ```
 
 ## Planning Principles
@@ -656,6 +657,44 @@ docs freeze
 ### Suggested Codex Goal
 
 `Add operator-facing Raman hardware status, position read, and confirmed stage relative move tools to the MVP rebuild.`
+
+## Phase 11: Add Bounded Raman Temperature Series
+
+### Objective
+
+把 Kelvinion mini 温控能力接入同一条 `ProcedureSpec -> ExecutionUnit[] -> RunState` 主链路，并完成稳定后采谱、采谱前后温度证据与有界漂移重采。
+
+### Scope
+
+- temperature controller resource/action contract
+- Python daemon persistent session
+- `raman_temperature_series` compilation and execution
+- temperature operator tools
+- planner template and deployment config
+
+### Checklist
+
+- [x] 定义 `temperature_controller` resource 与 `temperature.read_snapshot` / `temperature.configure_target` / `temperature.stop` actions
+- [x] `temperature_series.targetsK` 编译为每个目标一个稳定 step unit
+- [x] 稳定默认值为 ±0.2 K 连续 30 s，随后 dwell 120 s，且 planner 可按用户要求覆盖
+- [x] 稳定或 dwell 期间越界时重新开始完整 hold + dwell
+- [x] autofocus 默认关闭，仅按用户设置启用
+- [x] 每条光谱前后各保存一次温度证据
+- [x] 前置读数越界时先重新稳定；前后漂移默认超过 0.5 K 时重新采集一次
+- [x] 重采仍失败时记录该温度失败并继续后续计划，最终状态为 `completed_with_failures`
+- [x] run 完成、失败、暂停、终止与 daemon disconnect 均保持当前 target/output
+- [x] 只有显式 `raman_stop_temperature_control` 将输出设为 OFF
+- [x] 配置中的串口、目标区间与 ramp capability 可由 lab/local config 调整
+
+### Exit Criteria
+
+- approved bounded temperature series 能在 live runtime 中确定性运行。
+- 每次 acquisition 都能关联 before/after 温度 evidence。
+- 所有非显式 stop 路径都不会关闭温控输出。
+
+### Suggested Codex Goal
+
+`Implement bounded Raman temperature-series control with stability, dwell, before/after evidence, and one drift reacquisition.`
 
 ## Open Issues
 

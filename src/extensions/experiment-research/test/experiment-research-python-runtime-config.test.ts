@@ -114,6 +114,27 @@ function createRuntimeConfig(enabled: boolean, port = "COM5"): Record<string, un
 			leasePolicy: "exclusive",
 			simulationAvailable: false,
 		},
+		temperatureController: {
+			resourceId: "temperature-main",
+			kind: "temperature_controller",
+			runtime: "raman_python",
+			driver: "kelvinion_mini",
+			config: {
+				port: "COM6",
+				baudrate: 115200,
+				channel: "A",
+				controlMode: "A",
+				outputRange: "LOW",
+				defaultRampKPerMin: 5,
+			},
+			leasePolicy: "exclusive",
+			simulationAvailable: true,
+			operatingRange: {
+				minTargetK: 50,
+				maxTargetK: 350,
+				maxRampKPerMin: 10,
+			},
+		},
 	};
 }
 
@@ -205,6 +226,11 @@ describe("experiment research Python Raman runtime config", () => {
 					port: "COM17",
 				},
 			},
+			temperatureController: {
+				config: {
+					port: "COM18",
+				},
+			},
 		});
 		const extension = loadExperimentExtension();
 		const [sessionStart] = extension.handlers.get("session_start") ?? [];
@@ -215,6 +241,7 @@ describe("experiment research Python Raman runtime config", () => {
 		expect(runtime?.stage.resource.config.port).toBe("COM17");
 		expect(runtime?.stage.resource.config.xChannel).toBe(1);
 		expect(runtime?.frame.resource.config.bridgeDir).toBe("D:\\RamanLab\\SpecBridge");
+		expect(runtime?.temperature?.resource.config.port).toBe("COM18");
 		expect(getRamanPythonRuntimeConfigInfo(cwd)).toEqual(
 			expect.objectContaining({
 				source: "local",
@@ -252,6 +279,7 @@ describe("experiment research Python Raman runtime config", () => {
 		const details = labState?.details as Record<string, unknown>;
 		const stateAfter = details.stateAfter as Record<string, unknown>;
 		expect(stateAfter.canExecuteLiveSinglePointRuns).toBe(false);
+		expect(stateAfter.canExecuteLiveTemperatureSeriesRuns).toBe(false);
 		expect(stateAfter.runtimeConfig).toEqual(
 			expect.objectContaining({
 				source: "local",

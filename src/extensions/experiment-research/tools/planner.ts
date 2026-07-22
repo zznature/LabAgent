@@ -21,6 +21,7 @@ const ProcedureSpecTemplateParamsSchema = Type.Object(
 			Type.Literal("raman_single_point_probe"),
 			Type.Literal("raman_parameter_search"),
 			Type.Literal("raman_grid_mapping"),
+			Type.Literal("raman_temperature_series"),
 		]),
 	},
 	{ additionalProperties: false },
@@ -32,6 +33,7 @@ const ExperimentProcedureTemplateMatchParamsSchema = Type.Object(
 			Type.Literal("raman_single_point_probe"),
 			Type.Literal("raman_parameter_search"),
 			Type.Literal("raman_grid_mapping"),
+			Type.Literal("raman_temperature_series"),
 		]),
 		sampleId: Type.Optional(Type.String({ minLength: 1 })),
 		sampleClass: Type.Optional(Type.String({ minLength: 1 })),
@@ -162,7 +164,8 @@ function previewState(spec: ProcedureSpec, templateApplication?: TemplateApplica
 
 function hasRequiredRamanRoles(spec: ProcedureSpec): boolean {
 	const roles = new Set(spec.resources.map((resource) => resource.role));
-	return roles.has("stage") && roles.has("frame_provider") && roles.has("spectrometer");
+	const ramanRolesPresent = roles.has("stage") && roles.has("frame_provider") && roles.has("spectrometer");
+	return ramanRolesPresent && (spec.procedureId !== "raman_temperature_series" || roles.has("temperature_controller"));
 }
 
 function templateForProcedure(procedureId: ProcedureId): Record<string, unknown> {
@@ -215,6 +218,49 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 			},
 		},
 	};
+
+	if (procedureId === "raman_temperature_series") {
+		return {
+			...common,
+			resources: [
+				...common.resources,
+				{ resourceId: "temperature-main", role: "temperature_controller" },
+			],
+			stoppingRules: {
+				maxRuntimeMinutes: 180,
+				maxUnits: 2,
+				stopOnError: false,
+				maxConsecutiveFailures: 2,
+			},
+			plan: {
+				kind: "temperature_series",
+				targetsK: [200, 100],
+			},
+			domain: {
+				raman: {
+					...common.domain.raman,
+					autofocus: {
+						...common.domain.raman.autofocus,
+						enabled: false,
+					},
+				},
+				temperature: {
+					stability: {
+						toleranceK: 0.2,
+						continuousHoldS: 30,
+						postStableDwellS: 120,
+						pollIntervalS: 1,
+						timeoutPerTargetS: 3_600,
+					},
+					driftPolicy: {
+						maxDeltaK: 0.5,
+						maxReacquisitionsPerTarget: 1,
+						exhaustedAction: "continue",
+					},
+				},
+			},
+		};
+	}
 
 	if (procedureId === "raman_single_point_probe") {
 		return {
@@ -358,7 +404,47 @@ async function buildPreflightState(
 	}
 
 	const livePreflight = await runtime.preflight();
-	const anchorValidation = livePreflight.preflightReady && livePreflight.controlAvailable
+	const temperatureRuntimeAvailable = spec.procedureId !== "raman_temperature_series" || runtime.temperature !== undefined;
+	const unsupportedTemperatureTargetsK = spec.plan.kind === "temperature_series" && runtime.temperature
+		? spec.plan.targetsK.filter(
+				(targetK) =>
+					targetK < runtime.temperature!.resource.operatingRange.minTargetK ||
+					targetK > runtime.temperature!.resource.operatingRange.maxTargetK,
+			)
+		: [];
+	let temperaturePreflight: Record<string, unknown> = { required: false, ready: true };
+	if (spec.procedureId === "raman_temperature_series") {
+		if (!runtime.temperature) {
+			temperaturePreflight = { required: true, ready: false, reason: "temperature_runtime_unavailable" };
+		} else if (unsupportedTemperatureTargetsK.length > 0) {
+			temperaturePreflight = {
+				required: true,
+				ready: false,
+				reason: "temperature_target_unsupported",
+				unsupportedTargetsK: unsupportedTemperatureTargetsK,
+				operatingRange: runtime.temperature.resource.operatingRange,
+			};
+		} else if (livePreflight.preflightReady && livePreflight.controlAvailable) {
+			const snapshotResult = await runtime.temperature.readSnapshot({
+				action: "temperature.read_snapshot",
+				resourceId: runtime.temperature.resource.resourceId,
+				timeoutMs: 10_000,
+			});
+			temperaturePreflight = {
+				required: true,
+				ready: snapshotResult.status === "success",
+				status: snapshotResult.status,
+				summary: snapshotResult.summary,
+				errorCode: snapshotResult.errorCode,
+				payload: snapshotResult.payload,
+			};
+		} else {
+			temperaturePreflight = { required: true, ready: false, reason: "runtime_preflight_not_ready" };
+		}
+	}
+	const temperaturePreflightReady = temperaturePreflight.ready === true;
+	const liveModeSupported = requestedModeSupported && temperatureRuntimeAvailable;
+	const anchorValidation = livePreflight.preflightReady && livePreflight.controlAvailable && temperaturePreflightReady
 		? await validateRuntimeAnchorState(spec, runtime)
 		: { valid: false, details: { skipped: true, reason: "runtime_preflight_not_ready" } };
 	return {
@@ -371,11 +457,12 @@ async function buildPreflightState(
 		readyForApproval:
 			forbiddenRisks.length === 0 &&
 			requiredRolesPresent &&
-			requestedModeSupported &&
+			liveModeSupported &&
 			livePreflight.preflightReady &&
 			livePreflight.controlAvailable &&
+			temperaturePreflightReady &&
 			anchorValidation.valid,
-		preflightReady: livePreflight.preflightReady,
+		preflightReady: livePreflight.preflightReady && temperaturePreflightReady,
 		controlAvailable: livePreflight.controlAvailable,
 		requiresConfirmation: preview.requiresConfirmation,
 		risks: preview.risks,
@@ -383,7 +470,9 @@ async function buildPreflightState(
 		templateApplication: templateApplicationState(templateApplication),
 		savePath: preview.savePath,
 		requiredRolesPresent,
-		requestedModeSupported,
+		requestedModeSupported: liveModeSupported,
+		temperatureRuntimeAvailable,
+		temperaturePreflight,
 		realRuntimeRegistered: true,
 		livePreflightDetails: livePreflight.details ?? {},
 		stageAnchorValid: anchorValidation.valid,
@@ -406,15 +495,17 @@ export const getLabCapabilitiesTool = {
 		return success("LabAgents MVP rebuild planner capabilities loaded.", {
 			source: "experiment-research",
 			stage: "phase10-bounded-search-and-mapping",
-			supportedProcedures: [
-				"raman_single_point_probe",
-				"raman_parameter_search",
-				"raman_grid_mapping",
+				supportedProcedures: [
+					"raman_single_point_probe",
+					"raman_parameter_search",
+					"raman_grid_mapping",
+					"raman_temperature_series",
 			],
 			liveSupportedProceduresWhenRuntimeRegistered: [
 				"raman_single_point_probe",
 				"raman_parameter_search",
 				"raman_grid_mapping",
+				"raman_temperature_series",
 			],
 			plannerTools: [
 				"get_lab_capabilities",
@@ -443,6 +534,7 @@ export const getLabCapabilitiesTool = {
 				liveSinglePointExecutionRequiresRegisteredRuntime: true,
 				liveParameterSearchExecutionRequiresRegisteredRuntime: true,
 				liveGridMappingExecutionRequiresRegisteredRuntime: true,
+				liveTemperatureSeriesExecutionRequiresRegisteredRuntime: true,
 			},
 		});
 	},
@@ -559,7 +651,8 @@ export const getProcedureSpecTemplateTool = {
 			schemaVersion: "0.1.0",
 			template: templateForProcedure(params.procedureId),
 			notes: [
-				"ProcedureSpec supports plan.kind values current_position, point_list, and grid_scan.",
+				"ProcedureSpec supports plan.kind values current_position, point_list, grid_scan, and temperature_series.",
+				"Temperature series defaults to ±0.2 K for 30 seconds, then 120 seconds dwell; autofocus defaults off and drift above 0.5 K is reacquired once before continuing.",
 				"Line scans should use point_list when one axis is fixed and pitchYUm would be zero.",
 				"Use plan.interPointDelayMs on point_list or grid_scan when repeated points need a fixed wait between completed units.",
 				"Use limits only for maxLaserPowerPercent, minObjectiveClearanceUm, xRangeUm, yRangeUm, and zRangeUm.",
@@ -581,7 +674,8 @@ export const getLabStateTool = {
 	executionMode: "sequential",
 	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 		const runtimeConfig = getRamanPythonRuntimeConfigInfo(ctx.cwd);
-		const liveRuntimeRegistered = getRamanLiveRuntime(ctx.cwd) !== undefined;
+		const liveRuntime = getRamanLiveRuntime(ctx.cwd);
+		const liveRuntimeRegistered = liveRuntime !== undefined;
 		return success("LabAgents planner proposal flow is active.", {
 			source: "experiment-research",
 			stage: "phase10-bounded-search-and-mapping",
@@ -591,6 +685,7 @@ export const getLabStateTool = {
 			canExecuteLiveSinglePointRuns: liveRuntimeRegistered,
 			canExecuteLiveParameterSearchRuns: liveRuntimeRegistered,
 			canExecuteLiveGridMappingRuns: liveRuntimeRegistered,
+			canExecuteLiveTemperatureSeriesRuns: liveRuntime?.temperature !== undefined,
 			runtimeConfig: {
 				source: runtimeConfig.source,
 				path: runtimeConfig.path,

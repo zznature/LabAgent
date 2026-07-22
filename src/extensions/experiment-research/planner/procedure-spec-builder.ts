@@ -13,6 +13,7 @@ import type {
 	RamanParameterSearch,
 	SemanticStep,
 	StoppingRules,
+	TemperatureDomain,
 } from "../schemas/index.ts";
 
 export type ProposalRiskLevel = "notice" | "confirm_required" | "forbidden";
@@ -36,6 +37,7 @@ interface RamanResourceBindings {
 	stageResourceId: string;
 	frameProviderResourceId: string;
 	spectrometerResourceId: string;
+	temperatureControllerResourceId?: string;
 }
 
 interface RamanAcquisitionInput {
@@ -107,14 +109,23 @@ export interface GridMappingBuilderInput extends BaseProcedureBuilderInput {
 	};
 }
 
+export interface TemperatureSeriesBuilderInput extends BaseProcedureBuilderInput {
+	procedureId: "raman_temperature_series";
+	targetsK: number[];
+	temperature: TemperatureDomain;
+}
+
 export type ProcedureSpecBuilderInput =
 	| SinglePointProbeBuilderInput
 	| ParameterSearchBuilderInput
-	| GridMappingBuilderInput;
+	| GridMappingBuilderInput
+	| TemperatureSeriesBuilderInput;
 
 const PER_ACTION_RUNTIME_MS: Record<SemanticStep["kind"], number> = {
 	move_to_point: 2_000,
 	autofocus: 3_000,
+	set_temperature: 1_000,
+	wait_for_temperature: 0,
 	capture_frame: 750,
 	acquire_spectrum: 1_000,
 };
@@ -133,11 +144,15 @@ function defaultActions(): SemanticStep[] {
 }
 
 function toResourceRefs(resources: RamanResourceBindings): ResourceRef[] {
-	return [
+	const refs: ResourceRef[] = [
 		{ resourceId: resources.stageResourceId, role: "stage" },
 		{ resourceId: resources.frameProviderResourceId, role: "frame_provider" },
 		{ resourceId: resources.spectrometerResourceId, role: "spectrometer" },
 	];
+	if (resources.temperatureControllerResourceId) {
+		refs.push({ resourceId: resources.temperatureControllerResourceId, role: "temperature_controller" });
+	}
+	return refs;
 }
 
 function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
@@ -147,10 +162,18 @@ function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
 			acquisition: input.acquisition,
 			parameterSearch: input.procedureId === "raman_parameter_search" ? input.parameterSearch : undefined,
 		},
+		temperature: input.procedureId === "raman_temperature_series" ? input.temperature : undefined,
 	};
 }
 
 function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
+	if (input.procedureId === "raman_temperature_series") {
+		return {
+			kind: "temperature_series",
+			targetsK: input.targetsK,
+		};
+	}
+
 	if (input.procedureId === "raman_grid_mapping") {
 		return {
 			kind: "grid_scan",
@@ -185,6 +208,9 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 }
 
 function createSpec(input: ProcedureSpecBuilderInput): ProcedureSpec {
+	if (input.procedureId === "raman_temperature_series" && !input.resources.temperatureControllerResourceId) {
+		throw new Error("raman_temperature_series requires temperatureControllerResourceId");
+	}
 	return {
 		procedureSpecId: input.procedureSpecId ?? generatedId("procedure-spec"),
 		experimentId: input.intent.experimentId,
@@ -200,6 +226,10 @@ function createSpec(input: ProcedureSpecBuilderInput): ProcedureSpec {
 }
 
 function actionRuntimeMs(spec: ProcedureSpec, actionKind: SemanticStep["kind"]): number {
+	if (actionKind === "wait_for_temperature") {
+		const stability = spec.domain.temperature?.stability;
+		return stability ? (stability.continuousHoldS + stability.postStableDwellS) * 1_000 : 0;
+	}
 	if (actionKind !== "acquire_spectrum") {
 		return PER_ACTION_RUNTIME_MS[actionKind];
 	}
@@ -304,16 +334,27 @@ export function defaultProposalSavePath(spec: ProcedureSpec): string {
 
 export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedureProposalPreview {
 	const units = compileProcedureSpec(spec);
-	const risks: ProposalRisk[] = [
-		{
+	const hasStageMotion = units.some((unit) =>
+		unit.actions.some((action) => action.kind === "move_to_point" || action.kind === "autofocus"),
+	);
+	const risks: ProposalRisk[] = hasStageMotion
+		? [{
 			level: "notice",
 			code: "stage_motion",
 			message:
 				units.length > 1
 					? "The stage will perform multiple real point visits during this bounded run."
 					: "The stage will perform real motion during this bounded run.",
-		},
-	];
+		}]
+		: [];
+
+	if (spec.procedureId === "raman_temperature_series") {
+		risks.push({
+			level: "notice",
+			code: "temperature_control",
+			message: "The run will change and hold the temperature controller target; output remains enabled after the run.",
+		});
+	}
 
 	const laserRisk = classifyLaserRisk(spec);
 	if (laserRisk) {
@@ -368,5 +409,7 @@ export function procedureDisplayName(procedureId: ProcedureId): string {
 			return "bounded Raman parameter search";
 		case "raman_grid_mapping":
 			return "bounded Raman grid mapping";
+		case "raman_temperature_series":
+			return "bounded Raman temperature series";
 	}
 }

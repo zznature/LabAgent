@@ -20,7 +20,12 @@ import {
 	type SimulationUnitResult,
 } from "../runtime/simulation-runtime.ts";
 import { compileProcedureSpec } from "./compile-units.ts";
-import { executeLinearRun, executeMappingRun, executeParameterSearchRun } from "./run-strategies.ts";
+import {
+	executeLinearRun,
+	executeMappingRun,
+	executeParameterSearchRun,
+	executeTemperatureSeriesRun,
+} from "./run-strategies.ts";
 
 type ExecutionMode = "simulation" | "live-supervised";
 export type ManagedUnitResult = SimulationUnitResult | LiveRamanUnitResult;
@@ -146,7 +151,14 @@ async function executeUnit(
 		throw new Error(`live Raman runtime not registered for cwd ${activeRun.cwd}`);
 	}
 
-	return runLiveRamanUnit(activeRun.cwd, activeRun.runId, unit, activeRun.spec, runtime, currentState, options);
+	return runLiveRamanUnit(activeRun.cwd, activeRun.runId, unit, activeRun.spec, runtime, currentState, {
+		...options,
+		control: {
+			shouldPause: () => activeRun.pauseRequested,
+			shouldAbort: () => activeRun.abortRequested,
+			heartbeat: () => refreshHeartbeat(activeRun),
+		},
+	});
 }
 
 function appendRunStartedEvent(activeRun: ActiveRun): void {
@@ -511,6 +523,11 @@ async function executeManagedRun(activeRun: ActiveRun): Promise<void> {
 
 	if (isParameterSearchRun(spec)) {
 		await executeParameterSearchRun(context);
+		return;
+	}
+
+	if (spec.procedureId === "raman_temperature_series") {
+		await executeTemperatureSeriesRun(context);
 		return;
 	}
 

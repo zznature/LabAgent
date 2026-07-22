@@ -125,12 +125,44 @@ export const SpectrometerAcquireSpectrumActionSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const TemperatureReadSnapshotActionSchema = Type.Object(
+	{
+		action: Type.Literal("temperature.read_snapshot"),
+		resourceId: Type.String({ minLength: 1 }),
+		timeoutMs: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const TemperatureConfigureTargetActionSchema = Type.Object(
+	{
+		action: Type.Literal("temperature.configure_target"),
+		resourceId: Type.String({ minLength: 1 }),
+		targetK: Type.Number({ exclusiveMinimum: 0 }),
+		rampKPerMin: Type.Number({ exclusiveMinimum: 0 }),
+		timeoutMs: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const TemperatureStopActionSchema = Type.Object(
+	{
+		action: Type.Literal("temperature.stop"),
+		resourceId: Type.String({ minLength: 1 }),
+		timeoutMs: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const RamanRuntimeActionSchema = Type.Union([
 	StageGetPositionActionSchema,
 	StageMoveAbsoluteAndWaitActionSchema,
 	AutofocusRunSingleActionSchema,
 	FrameCaptureLatestActionSchema,
 	SpectrometerAcquireSpectrumActionSchema,
+	TemperatureReadSnapshotActionSchema,
+	TemperatureConfigureTargetActionSchema,
+	TemperatureStopActionSchema,
 ]);
 
 export type ActionStatus = Static<typeof ActionStatusSchema>;
@@ -141,6 +173,9 @@ export type StageMoveAbsoluteAndWaitAction = Static<typeof StageMoveAbsoluteAndW
 export type AutofocusRunSingleAction = Static<typeof AutofocusRunSingleActionSchema>;
 export type FrameCaptureLatestAction = Static<typeof FrameCaptureLatestActionSchema>;
 export type SpectrometerAcquireSpectrumAction = Static<typeof SpectrometerAcquireSpectrumActionSchema>;
+export type TemperatureReadSnapshotAction = Static<typeof TemperatureReadSnapshotActionSchema>;
+export type TemperatureConfigureTargetAction = Static<typeof TemperatureConfigureTargetActionSchema>;
+export type TemperatureStopAction = Static<typeof TemperatureStopActionSchema>;
 export type RamanRuntimeAction = Static<typeof RamanRuntimeActionSchema>;
 
 export const ActionResultValidator = compileSchema(ActionResultSchema);
@@ -149,6 +184,9 @@ export const StageMoveAbsoluteAndWaitActionValidator = compileSchema(StageMoveAb
 export const AutofocusRunSingleActionValidator = compileSchema(AutofocusRunSingleActionSchema);
 export const FrameCaptureLatestActionValidator = compileSchema(FrameCaptureLatestActionSchema);
 export const SpectrometerAcquireSpectrumActionValidator = compileSchema(SpectrometerAcquireSpectrumActionSchema);
+export const TemperatureReadSnapshotActionValidator = compileSchema(TemperatureReadSnapshotActionSchema);
+export const TemperatureConfigureTargetActionValidator = compileSchema(TemperatureConfigureTargetActionSchema);
+export const TemperatureStopActionValidator = compileSchema(TemperatureStopActionSchema);
 export const RamanRuntimeActionValidator = compileSchema(RamanRuntimeActionSchema);
 
 export function successActionResult(

@@ -209,6 +209,7 @@ class HardwareSession:
     def __init__(self) -> None:
         self._stage: Any | None = None
         self._frame: Any | None = None
+        self._temperature: Any | None = None
         self._run_artifact_dir: Path | None = None
         self._point_artifact_dir: Path | None = None
         self._point_index = -1
@@ -246,6 +247,18 @@ class HardwareSession:
             self._frame = provider
         return self._frame
 
+    def temperature(self, temperature_cfg: dict) -> Any:
+        from temperature.kelvinion_mini_controller import KelvinionMiniTemperatureController
+
+        if self._temperature is None:
+            controller = KelvinionMiniTemperatureController(
+                temperature_cfg["config"]["port"],
+                baudrate=temperature_cfg["config"]["baudrate"],
+            )
+            controller.connect()
+            self._temperature = controller
+        return self._temperature
+
     def begin_point(self, bridge_dir: Path, position: dict[str, float]) -> Path:
         if self._run_artifact_dir is None:
             self._run_artifact_dir = bridge_dir / "mapping-point-folders" / time.strftime("run_%Y%m%d_%H%M%S")
@@ -281,6 +294,15 @@ class HardwareSession:
                 pass
 
     def close(self) -> None:
+        # Temperature output is intentionally independent from daemon lifetime.
+        # Disconnecting the serial session must not change the configured target
+        # or output range; only the explicit temperature_stop action does that.
+        if self._temperature is not None:
+            try:
+                self._temperature.disconnect()
+            except Exception:
+                pass
+            self._temperature = None
         if self._frame is not None:
             try:
                 self._frame.disconnect()
@@ -592,6 +614,76 @@ def _handle_spectrum(session: HardwareSession, request: dict, payload: dict) -> 
     )
 
 
+def _temperature_snapshot_payload(controller: Any, channel: str) -> dict[str, Any]:
+    snapshot = controller.read_snapshot(channel)
+    return {
+        "channel": snapshot.channel,
+        "temperatureK": snapshot.temperature_k,
+        "setpointK": snapshot.setpoint_k,
+        "rampKPerMin": snapshot.ramp_k_per_min,
+        "heaterPowerPercent": snapshot.heater_power_pct,
+        "heaterCurrentA": snapshot.heater_current_a,
+        "heaterVoltageV": snapshot.heater_voltage_v,
+        "outputRange": snapshot.output_range,
+        "loopChannel": snapshot.loop_channel,
+        "controlMode": controller.read_control_mode(),
+        "timestamp": snapshot.timestamp.isoformat(),
+    }
+
+
+def _temperature_config(request: dict) -> dict:
+    temperature_cfg = request.get("temperatureController")
+    if not isinstance(temperature_cfg, dict):
+        raise ValueError("Temperature controller resource is not configured.")
+    return temperature_cfg
+
+
+def _handle_temperature_snapshot(session: HardwareSession, request: dict) -> dict:
+    temperature_cfg = _temperature_config(request)
+    controller = session.temperature(temperature_cfg)
+    payload = _temperature_snapshot_payload(controller, temperature_cfg["config"]["channel"])
+    return _success("Temperature snapshot read.", payload)
+
+
+def _handle_temperature_configure(session: HardwareSession, request: dict, payload: dict) -> dict:
+    temperature_cfg = _temperature_config(request)
+    target_k = float(payload["targetK"])
+    ramp_k_per_min = float(payload["rampKPerMin"])
+    operating_range = temperature_cfg["operatingRange"]
+    if target_k < float(operating_range["minTargetK"]) or target_k > float(operating_range["maxTargetK"]):
+        return _fail(
+            "temperature_target_unsupported",
+            f"Temperature target {target_k:.3f} K is outside the configured operating range.",
+            needs_operator=True,
+            safe_to_resume=False,
+        )
+    if ramp_k_per_min > float(operating_range["maxRampKPerMin"]):
+        return _fail(
+            "temperature_ramp_unsupported",
+            f"Temperature ramp {ramp_k_per_min:.3f} K/min exceeds the configured operating range.",
+            needs_operator=True,
+            safe_to_resume=False,
+        )
+
+    controller = session.temperature(temperature_cfg)
+    config = temperature_cfg["config"]
+    controller.set_loop_channel(config["channel"])
+    controller.set_control_mode(config["controlMode"])
+    controller.set_ramp_k_per_min(ramp_k_per_min)
+    controller.set_temperature_k(target_k)
+    controller.set_output_range(config["outputRange"])
+    result = _temperature_snapshot_payload(controller, config["channel"])
+    return _success("Temperature target configured and read back.", result)
+
+
+def _handle_temperature_stop(session: HardwareSession, request: dict) -> dict:
+    temperature_cfg = _temperature_config(request)
+    controller = session.temperature(temperature_cfg)
+    controller.stop()
+    result = _temperature_snapshot_payload(controller, temperature_cfg["config"]["channel"])
+    return _success("Temperature output stopped and read back.", result)
+
+
 def handle(session: HardwareSession, request: dict) -> dict:
     action = request["action"]
     payload = request.get("payload", {})
@@ -607,6 +699,12 @@ def handle(session: HardwareSession, request: dict) -> dict:
         return _handle_autofocus(session, request, payload)
     if action == "spectrum":
         return _handle_spectrum(session, request, payload)
+    if action == "temperature_snapshot":
+        return _handle_temperature_snapshot(session, request)
+    if action == "temperature_configure":
+        return _handle_temperature_configure(session, request, payload)
+    if action == "temperature_stop":
+        return _handle_temperature_stop(session, request)
     return _fail("unknown_python_action", f"Unsupported Python Raman action: {action}")
 
 

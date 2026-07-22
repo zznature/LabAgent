@@ -3,7 +3,15 @@ import type {
 	ExecutionUnitPoint,
 } from "../schemas/execution-unit.ts";
 import { ExecutionUnitValidator } from "../schemas/execution-unit.ts";
-import type { CurrentPositionPlan, GridScanPlan, Point, PointListPlan, ProcedureSpec } from "../schemas/procedure-spec.ts";
+import type {
+	CurrentPositionPlan,
+	GridScanPlan,
+	Point,
+	PointListPlan,
+	ProcedureSpec,
+	SemanticStep,
+	TemperatureSeriesPlan,
+} from "../schemas/procedure-spec.ts";
 import { formatValidationErrors } from "../schemas/validation.ts";
 
 function formatUnitIndex(index: number): string {
@@ -104,6 +112,31 @@ function buildCurrentPositionUnit(spec: ProcedureSpec, plan: CurrentPositionPlan
 	];
 }
 
+function buildTemperatureSeriesUnits(spec: ProcedureSpec, plan: TemperatureSeriesPlan): ExecutionUnit[] {
+	if (!spec.domain.temperature) {
+		throw new Error(`raman_temperature_series requires domain.temperature: ${spec.procedureSpecId}`);
+	}
+	const actions: SemanticStep[] = [
+		{ kind: "set_temperature" },
+		{ kind: "wait_for_temperature" },
+		...(spec.domain.raman.autofocus.enabled ? [{ kind: "autofocus" } satisfies SemanticStep] : []),
+		{ kind: "acquire_spectrum" },
+	];
+	return plan.targetsK.map((temperatureTargetK, index) => ({
+		unitId: createUnitId(spec.procedureSpecId, index),
+		index,
+		unitKind: "step",
+		positionRef: "current",
+		temperatureTargetK,
+		actions,
+		limits: spec.limits,
+		resumeKey: createResumeKey(spec.procedureSpecId, index),
+		artifactScope: {
+			artifactPathPrefix: createArtifactPrefix(spec.procedureSpecId, index),
+		},
+	}));
+}
+
 function assertCompiledUnits(units: ExecutionUnit[]): ExecutionUnit[] {
 	for (const [index, unit] of units.entries()) {
 		const candidate: unknown = unit;
@@ -121,6 +154,8 @@ export function compileProcedureSpec(spec: ProcedureSpec): ExecutionUnit[] {
 			? buildPointListUnits(spec, spec.plan)
 			: spec.plan.kind === "grid_scan"
 				? buildGridScanUnits(spec, spec.plan)
-				: buildCurrentPositionUnit(spec, spec.plan);
+				: spec.plan.kind === "temperature_series"
+					? buildTemperatureSeriesUnits(spec, spec.plan)
+					: buildCurrentPositionUnit(spec, spec.plan);
 	return assertCompiledUnits(units);
 }

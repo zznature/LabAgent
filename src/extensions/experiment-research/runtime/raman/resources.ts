@@ -96,10 +96,46 @@ export const SpectrometerResourceSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const TemperatureResourceConfigSchema = Type.Object(
+	{
+		port: Type.String({ minLength: 1 }),
+		baudrate: Type.Integer({ minimum: 1 }),
+		channel: Type.Union([Type.Literal("A"), Type.Literal("B")]),
+		controlMode: Type.Literal("A"),
+		outputRange: Type.Literal("LOW"),
+		defaultRampKPerMin: Type.Number({ exclusiveMinimum: 0 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const TemperatureOperatingRangeSchema = Type.Object(
+	{
+		minTargetK: Type.Number({ exclusiveMinimum: 0 }),
+		maxTargetK: Type.Number({ exclusiveMinimum: 0 }),
+		maxRampKPerMin: Type.Number({ exclusiveMinimum: 0 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const TemperatureResourceSchema = Type.Object(
+	{
+		resourceId: Type.String({ minLength: 1 }),
+		kind: Type.Literal("temperature_controller"),
+		runtime: RamanRuntimeKindSchema,
+		driver: Type.Literal("kelvinion_mini"),
+		config: TemperatureResourceConfigSchema,
+		leasePolicy: Type.Literal("exclusive"),
+		simulationAvailable: Type.Boolean(),
+		operatingRange: TemperatureOperatingRangeSchema,
+	},
+	{ additionalProperties: false },
+);
+
 export const RamanResourceSchema = Type.Union([
 	StageResourceSchema,
 	FrameProviderResourceSchema,
 	SpectrometerResourceSchema,
+	TemperatureResourceSchema,
 ]);
 
 export type RamanRuntimeKind = Static<typeof RamanRuntimeKindSchema>;
@@ -111,9 +147,13 @@ export type FrameProviderResourceConfig = Static<typeof FrameProviderResourceCon
 export type FrameProviderResource = Static<typeof FrameProviderResourceSchema>;
 export type SpectrometerResourceConfig = Static<typeof SpectrometerResourceConfigSchema>;
 export type SpectrometerResource = Static<typeof SpectrometerResourceSchema>;
+export type TemperatureResourceConfig = Static<typeof TemperatureResourceConfigSchema>;
+export type TemperatureOperatingRange = Static<typeof TemperatureOperatingRangeSchema>;
+export type TemperatureResource = Static<typeof TemperatureResourceSchema>;
 export type RamanResource = Static<typeof RamanResourceSchema>;
 
 export const StageResourceValidator = compileSchema(StageResourceSchema);
 export const FrameProviderResourceValidator = compileSchema(FrameProviderResourceSchema);
 export const SpectrometerResourceValidator = compileSchema(SpectrometerResourceSchema);
+export const TemperatureResourceValidator = compileSchema(TemperatureResourceSchema);
 export const RamanResourceValidator = compileSchema(RamanResourceSchema);

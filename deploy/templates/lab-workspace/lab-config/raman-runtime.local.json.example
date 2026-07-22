@@ -5,5 +5,10 @@
 		"config": {
 			"port": "COM17"
 		}
+	},
+	"temperatureController": {
+		"config": {
+			"port": "COM6"
+		}
 	}
 }

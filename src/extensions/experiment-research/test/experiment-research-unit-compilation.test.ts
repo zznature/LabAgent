@@ -141,4 +141,56 @@ describe("experiment research unit compilation", () => {
 		expect(units.every((unit) => unit.artifactScope.artifactPathPrefix.includes("proc-spec-compile"))).toBe(true);
 		expect(units.every((unit) => ExecutionUnitValidator.Check(unit))).toBe(true);
 	});
+
+	it("compiles temperature targets into current-position step units with fixed semantic actions", () => {
+		const spec = {
+			...createBaseProcedureSpec(),
+			procedureId: "raman_temperature_series",
+			resources: [
+				...createBaseProcedureSpec().resources,
+				{ resourceId: "temperature-main", role: "temperature_controller" },
+			],
+			plan: {
+				kind: "temperature_series",
+				targetsK: [200, 100],
+			},
+			domain: {
+				...createBaseProcedureSpec().domain,
+				raman: {
+					...createBaseProcedureSpec().domain.raman,
+					autofocus: {
+						...createBaseProcedureSpec().domain.raman.autofocus,
+						enabled: false,
+					},
+				},
+				temperature: {
+					stability: {
+						toleranceK: 0.2,
+						continuousHoldS: 30,
+						postStableDwellS: 120,
+						pollIntervalS: 1,
+						timeoutPerTargetS: 1800,
+					},
+					driftPolicy: {
+						maxDeltaK: 0.5,
+						maxReacquisitionsPerTarget: 1,
+						exhaustedAction: "continue",
+					},
+				},
+			},
+		};
+
+		const units = compileProcedureSpec(spec as ProcedureSpec);
+
+		expect(units).toHaveLength(2);
+		expect(units.map((unit) => unit.unitKind)).toEqual(["step", "step"]);
+		expect(units.map((unit) => unit.positionRef)).toEqual(["current", "current"]);
+		expect(units.map((unit) => unit.temperatureTargetK)).toEqual([200, 100]);
+		expect(units[0]?.actions).toEqual([
+			{ kind: "set_temperature" },
+			{ kind: "wait_for_temperature" },
+			{ kind: "acquire_spectrum" },
+		]);
+		expect(units.every((unit) => ExecutionUnitValidator.Check(unit))).toBe(true);
+	});
 });

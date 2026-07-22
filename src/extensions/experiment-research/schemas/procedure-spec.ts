@@ -30,6 +30,8 @@ export const GridPointSchema = Type.Object(
 export const SemanticStepSchema = Type.Union([
 	Type.Object({ kind: Type.Literal("move_to_point") }, { additionalProperties: false }),
 	Type.Object({ kind: Type.Literal("autofocus") }, { additionalProperties: false }),
+	Type.Object({ kind: Type.Literal("set_temperature") }, { additionalProperties: false }),
+	Type.Object({ kind: Type.Literal("wait_for_temperature") }, { additionalProperties: false }),
 	Type.Object(
 		{
 			kind: Type.Literal("capture_frame"),
@@ -189,9 +191,38 @@ export const RamanDomainSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const TemperatureStabilitySchema = Type.Object(
+	{
+		toleranceK: Type.Number({ exclusiveMinimum: 0 }),
+		continuousHoldS: Type.Number({ minimum: 0 }),
+		postStableDwellS: Type.Number({ minimum: 0 }),
+		pollIntervalS: Type.Number({ exclusiveMinimum: 0 }),
+		timeoutPerTargetS: Type.Number({ exclusiveMinimum: 0 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const TemperatureDriftPolicySchema = Type.Object(
+	{
+		maxDeltaK: Type.Number({ exclusiveMinimum: 0 }),
+		maxReacquisitionsPerTarget: Type.Integer({ minimum: 0, maximum: 1 }),
+		exhaustedAction: Type.Literal("continue"),
+	},
+	{ additionalProperties: false },
+);
+
+export const TemperatureDomainSchema = Type.Object(
+	{
+		stability: TemperatureStabilitySchema,
+		driftPolicy: TemperatureDriftPolicySchema,
+	},
+	{ additionalProperties: false },
+);
+
 export const ProcedureDomainSchema = Type.Object(
 	{
 		raman: RamanDomainSchema,
+		temperature: Type.Optional(TemperatureDomainSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -234,12 +265,26 @@ export const CurrentPositionPlanSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-export const ProcedurePlanSchema = Type.Union([GridScanPlanSchema, PointListPlanSchema, CurrentPositionPlanSchema]);
+export const TemperatureSeriesPlanSchema = Type.Object(
+	{
+		kind: Type.Literal("temperature_series"),
+		targetsK: Type.Array(Type.Number({ exclusiveMinimum: 0 }), { minItems: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
+export const ProcedurePlanSchema = Type.Union([
+	GridScanPlanSchema,
+	PointListPlanSchema,
+	CurrentPositionPlanSchema,
+	TemperatureSeriesPlanSchema,
+]);
 
 export const ProcedureIdSchema = Type.Union([
 	Type.Literal("raman_single_point_probe"),
 	Type.Literal("raman_parameter_search"),
 	Type.Literal("raman_grid_mapping"),
+	Type.Literal("raman_temperature_series"),
 ]);
 
 export const ProcedureSpecSchema = Type.Object(
@@ -276,10 +321,14 @@ export type RamanAutofocus = Static<typeof RamanAutofocusSchema>;
 export type RamanAcquisition = Static<typeof RamanAcquisitionSchema>;
 export type RamanParameterSearch = Static<typeof RamanParameterSearchSchema>;
 export type RamanDomain = Static<typeof RamanDomainSchema>;
+export type TemperatureStability = Static<typeof TemperatureStabilitySchema>;
+export type TemperatureDriftPolicy = Static<typeof TemperatureDriftPolicySchema>;
+export type TemperatureDomain = Static<typeof TemperatureDomainSchema>;
 export type ProcedureDomain = Static<typeof ProcedureDomainSchema>;
 export type GridScanPlan = Static<typeof GridScanPlanSchema>;
 export type PointListPlan = Static<typeof PointListPlanSchema>;
 export type CurrentPositionPlan = Static<typeof CurrentPositionPlanSchema>;
+export type TemperatureSeriesPlan = Static<typeof TemperatureSeriesPlanSchema>;
 export type ProcedurePlan = Static<typeof ProcedurePlanSchema>;
 export type ProcedureId = Static<typeof ProcedureIdSchema>;
 export type ProcedureSpec = Static<typeof ProcedureSpecSchema>;

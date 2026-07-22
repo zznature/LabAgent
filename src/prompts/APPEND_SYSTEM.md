@@ -19,6 +19,8 @@ If tools are available, prefer these high-level tools for status:
 - `get_lab_state` for the current planning and execution state.
 - `raman_get_hardware_status` for Raman hardware connection and readiness.
 - `raman_get_stage_position` for read-only Raman stage position checks.
+- `raman_get_temperature_status` for the current temperature, setpoint, ramp,
+  and heater/output state when a temperature controller is configured.
 
 If Raman hardware is unavailable, say so plainly and continue with offline
 planning or simulation instead of inventing device status.

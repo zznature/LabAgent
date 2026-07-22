@@ -10,6 +10,9 @@ import {
 	ramanGetStagePositionTool,
 	ramanRunAutofocusTool,
 	ramanStageMoveRelativeTool,
+	ramanGetTemperatureStatusTool,
+	ramanSetTemperatureTargetTool,
+	ramanStopTemperatureControlTool,
 } from "./tools/operator.ts";
 import {
 	findExperimentProcedureTemplateTool,
@@ -52,6 +55,9 @@ const PLANNER_TOOL_NAMES = [
 	"raman_run_autofocus",
 	"raman_acquire_smoke_spectrum",
 	"raman_stage_move_relative",
+	"raman_get_temperature_status",
+	"raman_set_temperature_target",
+	"raman_stop_temperature_control",
 ];
 
 const LAB_LOCAL_PROMPT_PATH = join("lab-config", "user-prompts.md");
@@ -83,6 +89,9 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(ramanRunAutofocusTool);
 	pi.registerTool(ramanAcquireSmokeSpectrumTool);
 	pi.registerTool(ramanStageMoveRelativeTool);
+	pi.registerTool(ramanGetTemperatureStatusTool);
+	pi.registerTool(ramanSetTemperatureTargetTool);
+	pi.registerTool(ramanStopTemperatureControlTool);
 	pi.registerTool(proposeRunTool);
 	pi.registerTool(approveAndStartRunTool);
 	pi.registerTool(runProcedureTool);

@@ -134,6 +134,61 @@ describe("experiment research core schemas", () => {
 		).toBe(true);
 	});
 
+	it("accepts a bounded Raman temperature series with configurable stability and drift policy", () => {
+		const spec = {
+			procedureSpecId: "proc-spec-temperature-series",
+			experimentId: "exp-temperature-series",
+			intentId: "intent-temperature-series",
+			procedureId: "raman_temperature_series",
+			procedureVersion: "0.1.0",
+			resources: [
+				{ resourceId: "stage-main", role: "stage" },
+				{ resourceId: "frame-main", role: "frame_provider" },
+				{ resourceId: "spectrometer-main", role: "spectrometer" },
+				{ resourceId: "temperature-main", role: "temperature_controller" },
+			],
+			limits: { maxLaserPowerPercent: 1 },
+			plan: {
+				kind: "temperature_series",
+				targetsK: [200, 100],
+			},
+			stoppingRules: {
+				maxRuntimeMinutes: 120,
+				maxUnits: 2,
+				stopOnError: false,
+			},
+			domain: {
+				raman: {
+					autofocus: {
+						enabled: false,
+						roi: { x: 100, y: 100, width: 64, height: 64 },
+					},
+					acquisition: {
+						integrationTimeMs: 1000,
+						laserPowerPercent: 0.1,
+						accumulations: 1,
+					},
+				},
+				temperature: {
+					stability: {
+						toleranceK: 0.1,
+						continuousHoldS: 30,
+						postStableDwellS: 180,
+						pollIntervalS: 1,
+						timeoutPerTargetS: 1800,
+					},
+					driftPolicy: {
+						maxDeltaK: 0.5,
+						maxReacquisitionsPerTarget: 1,
+						exhaustedAction: "continue",
+					},
+				},
+			},
+		};
+
+		expect(ProcedureSpecValidator.Check(spec)).toBe(true);
+	});
+
 	it("rejects procedure spec shapes that are explicitly out of MVP scope", () => {
 		const invalidSpec = {
 			procedureSpecId: "proc-spec-003",

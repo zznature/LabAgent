@@ -27,6 +27,8 @@ interface MutablePosition {
 interface OperatorRuntimeOptions {
 	autofocusZBestUm?: number;
 	capturedLaserOffValues?: boolean[];
+	temperatureConfigureCalls?: Array<{ targetK: number; rampKPerMin: number }>;
+	temperatureStopCalls?: number[];
 }
 
 const tempRoots: string[] = [];
@@ -200,6 +202,46 @@ function createOperatorRuntime(position: MutablePosition, options: OperatorRunti
 						},
 					],
 				);
+			},
+		},
+		temperature: {
+			resource: {
+				resourceId: "temperature-main",
+				kind: "temperature_controller",
+				runtime: "raman_python",
+				driver: "kelvinion_mini",
+				config: {
+					port: "COM6",
+					baudrate: 115200,
+					channel: "A",
+					controlMode: "A",
+					outputRange: "LOW",
+					defaultRampKPerMin: 2,
+				},
+				leasePolicy: "exclusive",
+				simulationAvailable: true,
+				operatingRange: { minTargetK: 50, maxTargetK: 350, maxRampKPerMin: 10 },
+			},
+			readSnapshot() {
+				return successActionResult("Temperature read.", {
+					temperatureK: 200.1,
+					setpointK: 200,
+					rampKPerMin: 2,
+					outputRange: "LOW",
+				});
+			},
+			configureTarget(action) {
+				options.temperatureConfigureCalls?.push({ targetK: action.targetK, rampKPerMin: action.rampKPerMin });
+				return successActionResult("Temperature configured.", {
+					temperatureK: 200.1,
+					setpointK: action.targetK,
+					rampKPerMin: action.rampKPerMin,
+					outputRange: "LOW",
+				});
+			},
+			stop() {
+				options.temperatureStopCalls?.push(1);
+				return successActionResult("Temperature stopped.", { outputRange: "OFF", setpointK: 200 });
 			},
 		},
 	};
@@ -440,5 +482,41 @@ describe("experiment research operator tools", () => {
 		expect(moveDetails.errorCode).toBe("motion_out_of_bounds");
 		expect(moveState.target).toEqual({ xUm: 2040, yUm: 200, zUm: 300 });
 		expect(position.xUm).toBe(1_990);
+	});
+
+	it("reads, configures, and explicitly stops temperature through semantic operator tools", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const temperatureConfigureCalls: Array<{ targetK: number; rampKPerMin: number }> = [];
+		const temperatureStopCalls: number[] = [];
+		registerRamanLiveRuntime(cwd, createOperatorRuntime(
+			{ xUm: 100, yUm: 200, zUm: 300 },
+			{ temperatureConfigureCalls, temperatureStopCalls },
+		));
+		const context = { cwd } as ExtensionContext;
+
+		const status = await extension.tools
+			.get("raman_get_temperature_status")
+			?.execute("temperature-status", {}, undefined, undefined, context);
+		expect(asRecord(status?.details).status).toBe("success");
+		expect(asRecord(asRecord(status?.details).stateAfter).temperatureK).toBe(200.1);
+
+		const configured = await extension.tools
+			.get("raman_set_temperature_target")
+			?.execute("temperature-set", { targetK: 100 }, undefined, undefined, context);
+		expect(asRecord(configured?.details).status).toBe("success");
+		expect(temperatureConfigureCalls).toEqual([{ targetK: 100, rampKPerMin: 2 }]);
+
+		const unsupported = await extension.tools
+			.get("raman_set_temperature_target")
+			?.execute("temperature-set-unsupported", { targetK: 20 }, undefined, undefined, context);
+		expect(asRecord(unsupported?.details).errorCode).toBe("temperature_target_unsupported");
+		expect(temperatureConfigureCalls).toHaveLength(1);
+
+		const stopped = await extension.tools
+			.get("raman_stop_temperature_control")
+			?.execute("temperature-stop", {}, undefined, undefined, context);
+		expect(asRecord(stopped?.details).status).toBe("success");
+		expect(temperatureStopCalls).toHaveLength(1);
 	});
 });

@@ -11,6 +11,10 @@ import {
 	StageGetPositionActionValidator,
 	StageMoveAbsoluteAndWaitActionValidator,
 	StageResourceValidator,
+	TemperatureConfigureTargetActionValidator,
+	TemperatureReadSnapshotActionValidator,
+	TemperatureResourceValidator,
+	TemperatureStopActionValidator,
 	successActionResult,
 } from "../runtime/raman/index.ts";
 
@@ -69,6 +73,31 @@ describe("experiment research Raman runtime contract", () => {
 		expect(RamanResourceValidator.Check(stage)).toBe(true);
 		expect(RamanResourceValidator.Check(frameProvider)).toBe(true);
 		expect(RamanResourceValidator.Check(spectrometer)).toBe(true);
+
+		const temperatureController = {
+			resourceId: "temperature-main",
+			kind: "temperature_controller",
+			runtime: "raman_python",
+			driver: "kelvinion_mini",
+			config: {
+				port: "COM6",
+				baudrate: 115200,
+				channel: "A",
+				controlMode: "A",
+				outputRange: "LOW",
+				defaultRampKPerMin: 2,
+			},
+			leasePolicy: "exclusive",
+			simulationAvailable: true,
+			operatingRange: {
+				minTargetK: 50,
+				maxTargetK: 350,
+				maxRampKPerMin: 10,
+			},
+		};
+
+		expect(TemperatureResourceValidator.Check(temperatureController)).toBe(true);
+		expect(RamanResourceValidator.Check(temperatureController)).toBe(true);
 	});
 
 	it("accepts the MVP runtime actions for motion, autofocus, frame capture, and spectrum acquisition", () => {
@@ -134,6 +163,31 @@ describe("experiment research Raman runtime contract", () => {
 		expect(RamanRuntimeActionValidator.Check(autofocusAction)).toBe(true);
 		expect(RamanRuntimeActionValidator.Check(frameAction)).toBe(true);
 		expect(RamanRuntimeActionValidator.Check(spectrumAction)).toBe(true);
+
+		const readTemperatureAction = {
+			action: "temperature.read_snapshot",
+			resourceId: "temperature-main",
+			timeoutMs: 2000,
+		};
+		const configureTemperatureAction = {
+			action: "temperature.configure_target",
+			resourceId: "temperature-main",
+			targetK: 200,
+			rampKPerMin: 2,
+			timeoutMs: 2000,
+		};
+		const stopTemperatureAction = {
+			action: "temperature.stop",
+			resourceId: "temperature-main",
+			timeoutMs: 2000,
+		};
+
+		expect(TemperatureReadSnapshotActionValidator.Check(readTemperatureAction)).toBe(true);
+		expect(TemperatureConfigureTargetActionValidator.Check(configureTemperatureAction)).toBe(true);
+		expect(TemperatureStopActionValidator.Check(stopTemperatureAction)).toBe(true);
+		expect(RamanRuntimeActionValidator.Check(readTemperatureAction)).toBe(true);
+		expect(RamanRuntimeActionValidator.Check(configureTemperatureAction)).toBe(true);
+		expect(RamanRuntimeActionValidator.Check(stopTemperatureAction)).toBe(true);
 	});
 
 	it("normalizes action results into one unified action result contract", () => {

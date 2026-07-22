@@ -89,6 +89,30 @@ function createUnitArtifacts(cwd: string, runId: string, unit: ExecutionUnit): A
 			const artifact = createArtifactRef(runId, `${prefix}-spectrum.txt`, "spectrum", "Simulated spectrum");
 			persistArtifact(cwd, runId, artifact, `simulated spectrum for ${unit.unitId}\n`);
 			artifacts.push(artifact);
+			if (unit.temperatureTargetK !== undefined) {
+				const evidence = createArtifactRef(
+					runId,
+					`${prefix}-temperature-attempt-0.json`,
+					"temperature-evidence",
+					`Simulated temperature evidence for ${unit.temperatureTargetK} K`,
+				);
+				evidence.metadata = {
+					targetK: unit.temperatureTargetK,
+					attemptIndex: 0,
+					driftK: 0,
+					withinDriftLimit: true,
+				};
+				persistArtifact(cwd, runId, evidence, `${JSON.stringify({
+					targetK: unit.temperatureTargetK,
+					attemptIndex: 0,
+					phase: "simulation",
+					temperatureBefore: { temperatureK: unit.temperatureTargetK },
+					temperatureAfter: { temperatureK: unit.temperatureTargetK },
+					driftK: 0,
+					withinDriftLimit: true,
+				}, null, 2)}\n`);
+				artifacts.push(evidence);
+			}
 		}
 	}
 

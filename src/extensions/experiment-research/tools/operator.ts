@@ -67,9 +67,19 @@ const AutofocusParamsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const TemperatureTargetParamsSchema = Type.Object(
+	{
+		targetK: Type.Number({ exclusiveMinimum: 0 }),
+		rampKPerMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+		timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+	},
+	{ additionalProperties: false },
+);
+
 type StageRelativeMoveParams = Static<typeof StageRelativeMoveParamsSchema>;
 type SmokeSpectrumParams = Static<typeof SmokeSpectrumParamsSchema>;
 type OperatorAutofocusParams = Static<typeof AutofocusParamsSchema>;
+type TemperatureTargetParams = Static<typeof TemperatureTargetParamsSchema>;
 type StageAxis = Static<typeof StageAxisSchema>;
 
 const DEFAULT_SMOKE_SPECTRUM_INTEGRATION_TIME_MS = 1000;
@@ -694,3 +704,135 @@ export const ramanStageMoveRelativeTool = {
 		});
 	},
 } satisfies ToolDefinition<typeof StageRelativeMoveParamsSchema, OperatorToolDetails>;
+
+export const ramanGetTemperatureStatusTool = {
+	name: "raman_get_temperature_status",
+	label: "Raman Temperature Status",
+	description: "Read the configured temperature controller snapshot through the registered live runtime.",
+	promptSnippet: "Read current temperature, setpoint, ramp, heater output, and controller mode",
+	promptGuidelines: [
+		"Use this for read-only temperature status questions.",
+		"Do not construct a ProcedureSpec merely to read the current temperature.",
+	],
+	parameters: EmptyParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		const runtime = getRamanLiveRuntime(ctx.cwd);
+		if (!runtime) {
+			return runtimeUnavailableState();
+		}
+		if (!runtime.temperature) {
+			return error("No temperature controller is configured for this Raman runtime.", "temperature_runtime_unavailable");
+		}
+		const result = await runtime.temperature.readSnapshot({
+			action: "temperature.read_snapshot",
+			resourceId: runtime.temperature.resource.resourceId,
+			timeoutMs: 10_000,
+		});
+		const payload = isRecord(result.payload) ? result.payload : {};
+		if (result.status !== "success") {
+			return error(result.summary, result.errorCode ?? "temperature_snapshot_failed", payload, result.retrySafe);
+		}
+		const temperatureK = readNumber(payload, "temperatureK");
+		return success(
+			temperatureK === undefined ? "Temperature snapshot read." : `Temperature snapshot read: ${temperatureK} K.`,
+			{
+				temperatureResourceId: runtime.temperature.resource.resourceId,
+				...payload,
+			},
+		);
+	},
+} satisfies ToolDefinition<typeof EmptyParamsSchema, OperatorToolDetails>;
+
+export const ramanSetTemperatureTargetTool = {
+	name: "raman_set_temperature_target",
+	label: "Raman Set Temperature Target",
+	description: "Set an explicit automatic-mode temperature target and ramp through the registered live runtime.",
+	promptSnippet: "Set a user-requested Raman temperature target in Kelvin",
+	promptGuidelines: [
+		"Use this only when the user explicitly requests a temperature target.",
+		"Use a bounded raman_temperature_series ProcedureSpec when temperature stabilization is part of an experiment.",
+		"Do not expose manual heater power, control mode, output range, or serial commands.",
+	],
+	parameters: TemperatureTargetParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, params: TemperatureTargetParams, _signal, _onUpdate, ctx) {
+		const runtime = getRamanLiveRuntime(ctx.cwd);
+		if (!runtime) {
+			return runtimeUnavailableState();
+		}
+		if (!runtime.temperature) {
+			return error("No temperature controller is configured for this Raman runtime.", "temperature_runtime_unavailable");
+		}
+		const resource = runtime.temperature.resource;
+		const rampKPerMin = params.rampKPerMin ?? resource.config.defaultRampKPerMin;
+		if (params.targetK < resource.operatingRange.minTargetK || params.targetK > resource.operatingRange.maxTargetK) {
+			return error(
+				`Temperature target ${params.targetK} K is outside the configured operating range.`,
+				"temperature_target_unsupported",
+				{ targetK: params.targetK, operatingRange: resource.operatingRange },
+				false,
+			);
+		}
+		if (rampKPerMin > resource.operatingRange.maxRampKPerMin) {
+			return error(
+				`Temperature ramp ${rampKPerMin} K/min exceeds the configured operating range.`,
+				"temperature_ramp_unsupported",
+				{ rampKPerMin, operatingRange: resource.operatingRange },
+				false,
+			);
+		}
+		const result = await runtime.temperature.configureTarget({
+			action: "temperature.configure_target",
+			resourceId: resource.resourceId,
+			targetK: params.targetK,
+			rampKPerMin,
+			timeoutMs: params.timeoutMs ?? 10_000,
+		});
+		const payload = isRecord(result.payload) ? result.payload : {};
+		if (result.status !== "success") {
+			return error(result.summary, result.errorCode ?? "temperature_configure_failed", payload, result.retrySafe);
+		}
+		return success(`Temperature target configured: ${params.targetK} K at ${rampKPerMin} K/min.`, {
+			temperatureResourceId: resource.resourceId,
+			targetK: params.targetK,
+			rampKPerMin,
+			...payload,
+		});
+	},
+} satisfies ToolDefinition<typeof TemperatureTargetParamsSchema, OperatorToolDetails>;
+
+export const ramanStopTemperatureControlTool = {
+	name: "raman_stop_temperature_control",
+	label: "Raman Stop Temperature Control",
+	description: "Explicitly set the configured temperature controller output range to OFF.",
+	promptSnippet: "Explicitly stop Raman temperature output when the user requests it",
+	promptGuidelines: [
+		"Only this explicit tool turns temperature output OFF.",
+		"Run completion, failure, pause, abort, or daemon shutdown must not call this tool implicitly.",
+	],
+	parameters: EmptyParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		const runtime = getRamanLiveRuntime(ctx.cwd);
+		if (!runtime) {
+			return runtimeUnavailableState();
+		}
+		if (!runtime.temperature) {
+			return error("No temperature controller is configured for this Raman runtime.", "temperature_runtime_unavailable");
+		}
+		const result = await runtime.temperature.stop({
+			action: "temperature.stop",
+			resourceId: runtime.temperature.resource.resourceId,
+			timeoutMs: 10_000,
+		});
+		const payload = isRecord(result.payload) ? result.payload : {};
+		if (result.status !== "success") {
+			return error(result.summary, result.errorCode ?? "temperature_stop_failed", payload, result.retrySafe);
+		}
+		return success("Temperature output stopped explicitly.", {
+			temperatureResourceId: runtime.temperature.resource.resourceId,
+			...payload,
+		});
+	},
+} satisfies ToolDefinition<typeof EmptyParamsSchema, OperatorToolDetails>;

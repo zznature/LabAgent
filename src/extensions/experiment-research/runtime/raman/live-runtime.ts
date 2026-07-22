@@ -10,6 +10,7 @@ import type {
 	RamanSearchEnvelope,
 	RunState,
 	RuntimeError,
+	TemperatureDomain,
 } from "../../schemas/index.ts";
 import { appendArtifactRecord } from "../../store/artifact-store.ts";
 import { runRoot } from "../../store/layout.ts";
@@ -22,8 +23,11 @@ import {
 	type SpectrometerAcquireSpectrumAction,
 	type StageGetPositionAction,
 	type StageMoveAbsoluteAndWaitAction,
+	type TemperatureConfigureTargetAction,
+	type TemperatureReadSnapshotAction,
+	type TemperatureStopAction,
 } from "./actions.ts";
-import type { FrameProviderResource, SpectrometerResource, StageResource } from "./resources.ts";
+import type { FrameProviderResource, SpectrometerResource, StageResource, TemperatureResource } from "./resources.ts";
 
 export interface RamanLivePreflightResult {
 	preflightReady: boolean;
@@ -51,12 +55,20 @@ export interface RamanSpectrometerRuntime {
 	acquireSpectrum(action: SpectrometerAcquireSpectrumAction): Promise<ActionResult> | ActionResult;
 }
 
+export interface RamanTemperatureRuntime {
+	resource: TemperatureResource;
+	readSnapshot(action: TemperatureReadSnapshotAction): Promise<ActionResult> | ActionResult;
+	configureTarget(action: TemperatureConfigureTargetAction): Promise<ActionResult> | ActionResult;
+	stop(action: TemperatureStopAction): Promise<ActionResult> | ActionResult;
+}
+
 export interface RamanLiveRuntime {
 	preflight(): Promise<RamanLivePreflightResult> | RamanLivePreflightResult;
 	stage: RamanStageRuntime;
 	autofocus: RamanAutofocusRuntime;
 	frame: RamanFrameRuntime;
 	spectrometer: RamanSpectrometerRuntime;
+	temperature?: RamanTemperatureRuntime;
 }
 
 export interface LiveRamanUnitSuccess {
@@ -88,6 +100,11 @@ export interface LiveRamanUnitOptions {
 		envelope?: RamanSearchEnvelope;
 		singlePointAcceptance?: boolean;
 	};
+	control?: {
+		shouldPause(): boolean;
+		shouldAbort(): boolean;
+		heartbeat(): void;
+	};
 }
 
 interface StagePosition {
@@ -100,6 +117,7 @@ const liveRuntimeRegistry = new Map<string, RamanLiveRuntime>();
 const DEFAULT_STAGE_MOVE_TIMEOUT_MS = 120_000;
 const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
 const DEFAULT_FRAME_CAPTURE_TIMEOUT_MS = 30_000;
+const DEFAULT_TEMPERATURE_ACTION_TIMEOUT_MS = 10_000;
 
 function toRuntimeError(actionResult: ActionResult, fallbackCode: string, scope: RuntimeError["scope"] = "unit"): RuntimeError {
 	return {
@@ -386,6 +404,295 @@ function persistAutofocusArtifact(
 	};
 }
 
+interface TemperatureSnapshotPayload extends Record<string, unknown> {
+	temperatureK: number;
+	setpointK?: number;
+	timestamp?: string;
+}
+
+function temperatureSnapshotFromResult(result: ActionResult): TemperatureSnapshotPayload | undefined {
+	const payload = result.payload;
+	if (!payload || typeof payload.temperatureK !== "number") {
+		return undefined;
+	}
+	return payload as TemperatureSnapshotPayload;
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForTemperatureStability(
+	runtime: RamanLiveRuntime,
+	targetK: number,
+	domain: TemperatureDomain,
+	options: LiveRamanUnitOptions,
+	deadlineMs = Date.now() + domain.stability.timeoutPerTargetS * 1_000,
+): Promise<ActionResult> {
+	if (!runtime.temperature) {
+		return failedActionResult("Temperature controller runtime is unavailable.", {
+			errorCode: "temperature_runtime_unavailable",
+			message: "The approved temperature series requires a configured temperature controller resource.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		});
+	}
+	const stability = domain.stability;
+	let stableSince: number | undefined;
+	let dwellSince: number | undefined;
+	while (Date.now() <= deadlineMs) {
+		options.control?.heartbeat();
+		if (options.control?.shouldPause() || options.control?.shouldAbort()) {
+			return {
+				status: "paused",
+				artifacts: [],
+				retrySafe: true,
+				needsOperator: true,
+				safeToResume: true,
+				summary: "Temperature stability wait interrupted at a kernel checkpoint.",
+			};
+		}
+		const snapshotResult = await runtime.temperature.readSnapshot({
+			action: "temperature.read_snapshot",
+			resourceId: runtime.temperature.resource.resourceId,
+			timeoutMs: DEFAULT_TEMPERATURE_ACTION_TIMEOUT_MS,
+		});
+		if (snapshotResult.status !== "success") {
+			return snapshotResult;
+		}
+		const snapshot = temperatureSnapshotFromResult(snapshotResult);
+		if (!snapshot) {
+			return failedActionResult("Temperature snapshot did not include temperatureK.", {
+				errorCode: "invalid_temperature_snapshot",
+				message: "Temperature stability evaluation requires a numeric temperatureK value.",
+				retrySafe: false,
+				needsOperator: true,
+				safeToResume: false,
+			});
+		}
+		const now = Date.now();
+		if (Math.abs(snapshot.temperatureK - targetK) > stability.toleranceK) {
+			stableSince = undefined;
+			dwellSince = undefined;
+		} else {
+			stableSince ??= now;
+			if (now - stableSince >= stability.continuousHoldS * 1000) {
+				dwellSince ??= now;
+				if (now - dwellSince >= stability.postStableDwellS * 1000) {
+					return {
+						...snapshotResult,
+						summary: `Temperature stabilized at ${targetK} K and completed the post-stability dwell.`,
+					};
+				}
+			}
+		}
+		await sleep(stability.pollIntervalS * 1000);
+	}
+	return failedActionResult(`Temperature did not stabilize at ${targetK} K before timeout.`, {
+		errorCode: "temperature_stability_timeout",
+		message: "Temperature stability and dwell conditions were not met within timeoutPerTargetS.",
+		retrySafe: true,
+		needsOperator: true,
+		safeToResume: true,
+	});
+}
+
+function persistTemperatureEvidenceArtifact(
+	cwd: string,
+	runId: string,
+	unit: ExecutionUnit,
+	attemptIndex: number,
+	evidence: Record<string, unknown>,
+): ArtifactRef {
+	const relativePath = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}-temperature-attempt-${attemptIndex}.json`;
+	const absolutePath = join(runRoot(cwd, runId), relativePath);
+	mkdirSync(dirname(absolutePath), { recursive: true });
+	writeFileSync(absolutePath, `${JSON.stringify(evidence, null, 2)}\n`, "utf-8");
+	return {
+		artifactId: `${runId}-temperature-${unit.index}-${attemptIndex}`,
+		kind: "temperature-evidence",
+		path: relativePath.replace(/\\/gu, "/"),
+		label: `Temperature evidence for ${unit.temperatureTargetK} K attempt ${attemptIndex + 1}`,
+		metadata: {
+			targetK: unit.temperatureTargetK,
+			attemptIndex,
+			driftK: evidence.driftK,
+			withinDriftLimit: evidence.withinDriftLimit,
+		},
+	};
+}
+
+async function runLiveTemperatureSeriesUnit(
+	cwd: string,
+	runId: string,
+	unit: ExecutionUnit,
+	spec: ProcedureSpec,
+	runtime: RamanLiveRuntime,
+	options: LiveRamanUnitOptions,
+): Promise<LiveRamanUnitResult> {
+	const artifactRefs: ArtifactRef[] = [];
+	const targetK = unit.temperatureTargetK;
+	const temperatureDomain = spec.domain.temperature;
+	const temperatureRuntime = runtime.temperature;
+	if (targetK === undefined || !temperatureDomain || !temperatureRuntime) {
+		return {
+			status: "failed",
+			error: {
+				errorCode: "temperature_series_contract_invalid",
+				message: "Temperature series execution requires a target, domain settings, and a registered temperature runtime.",
+				retrySafe: false,
+				needsOperator: true,
+				safeToResume: false,
+				scope: "unit",
+			},
+			artifactRefs,
+		};
+	}
+
+	const configureResult = await temperatureRuntime.configureTarget({
+		action: "temperature.configure_target",
+		resourceId: findResourceId(spec, "temperature_controller"),
+		targetK,
+		rampKPerMin: temperatureRuntime.resource.config.defaultRampKPerMin,
+		timeoutMs: DEFAULT_TEMPERATURE_ACTION_TIMEOUT_MS,
+	});
+	if (configureResult.status !== "success") {
+		return {
+			status: configureResult.status === "paused" ? "paused" : "failed",
+			...(configureResult.status === "paused"
+				? { reason: configureResult.summary }
+				: { error: toRuntimeError(configureResult, "temperature_configure_failed") }),
+			artifactRefs,
+		} as LiveRamanUnitResult;
+	}
+
+	const acquisition = spec.domain.raman.acquisition;
+	const laserGuard = enforceLaserHardLimit(spec, acquisition, runtime.spectrometer.resource);
+	if (laserGuard) {
+		return { status: "failed", error: toRuntimeError(laserGuard, "laser_power_limit_exceeded"), artifactRefs };
+	}
+
+	const maxAttempts = temperatureDomain.driftPolicy.maxReacquisitionsPerTarget + 1;
+	for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex++) {
+		const stabilizationDeadlineMs = Date.now() + temperatureDomain.stability.timeoutPerTargetS * 1_000;
+		while (true) {
+			const stableResult = await waitForTemperatureStability(
+				runtime,
+				targetK,
+				temperatureDomain,
+				options,
+				stabilizationDeadlineMs,
+			);
+			if (stableResult.status !== "success") {
+				if (stableResult.status === "paused") {
+					return { status: "paused", reason: stableResult.summary, artifactRefs };
+				}
+				return { status: "failed", error: toRuntimeError(stableResult, "temperature_stability_failed"), artifactRefs };
+			}
+
+			if (spec.domain.raman.autofocus.enabled) {
+				const autofocusParams = resolveAutofocusActionParams(spec);
+				if ("status" in autofocusParams) {
+					return { status: "failed", error: toRuntimeError(autofocusParams, "autofocus_invalid_params"), artifactRefs };
+				}
+				const autofocusResult = await runtime.autofocus.runSingle({
+					action: "autofocus.run_single",
+					stageResourceId: findResourceId(spec, "stage"),
+					frameProviderResourceId: findResourceId(spec, "frame_provider"),
+					roi: spec.domain.raman.autofocus.roi,
+					params: autofocusParams,
+					timeoutMs: DEFAULT_AUTOFOCUS_TIMEOUT_MS,
+				});
+				const autofocusArtifact = persistAutofocusArtifact(cwd, runId, unit, autofocusResult);
+				persistArtifactRecord(cwd, runId, autofocusArtifact);
+				artifactRefs.push(autofocusArtifact);
+				if (autofocusResult.status !== "success") {
+					return autofocusResult.status === "paused"
+						? { status: "paused", reason: autofocusResult.summary, artifactRefs }
+						: { status: "failed", error: toRuntimeError(autofocusResult, "autofocus_failed"), artifactRefs };
+				}
+			}
+
+			const beforeResult = await temperatureRuntime.readSnapshot({
+				action: "temperature.read_snapshot",
+				resourceId: temperatureRuntime.resource.resourceId,
+				timeoutMs: DEFAULT_TEMPERATURE_ACTION_TIMEOUT_MS,
+			});
+			const before = temperatureSnapshotFromResult(beforeResult);
+			if (beforeResult.status !== "success" || !before) {
+				return {
+					status: "failed",
+					error: toRuntimeError(beforeResult, "invalid_temperature_snapshot"),
+					artifactRefs,
+				};
+			}
+			if (Math.abs(before.temperatureK - targetK) > temperatureDomain.stability.toleranceK) {
+				continue;
+			}
+
+			const spectrumResult = await runtime.spectrometer.acquireSpectrum({
+				action: "spectrometer.acquire_spectrum",
+				resourceId: findResourceId(spec, "spectrometer"),
+				acquisition,
+				timeoutMs: acquisition.timeoutMs ?? 60_000,
+			});
+			if (spectrumResult.status !== "success") {
+				return spectrumResult.status === "paused"
+					? { status: "paused", reason: spectrumResult.summary, artifactRefs }
+					: { status: "failed", error: toRuntimeError(spectrumResult, "spectrum_acquisition_failed"), artifactRefs };
+			}
+			for (const artifact of spectrumResult.artifacts) {
+				persistArtifactRecord(cwd, runId, artifact);
+				artifactRefs.push(artifact);
+			}
+
+			const afterResult = await temperatureRuntime.readSnapshot({
+				action: "temperature.read_snapshot",
+				resourceId: temperatureRuntime.resource.resourceId,
+				timeoutMs: DEFAULT_TEMPERATURE_ACTION_TIMEOUT_MS,
+			});
+			const after = temperatureSnapshotFromResult(afterResult);
+			if (afterResult.status !== "success" || !after) {
+				return { status: "failed", error: toRuntimeError(afterResult, "invalid_temperature_snapshot"), artifactRefs };
+			}
+
+			const driftK = Math.abs(after.temperatureK - before.temperatureK);
+			const withinDriftLimit = driftK <= temperatureDomain.driftPolicy.maxDeltaK;
+			const evidenceArtifact = persistTemperatureEvidenceArtifact(cwd, runId, unit, attemptIndex, {
+				targetK,
+				attemptIndex,
+				phase: attemptIndex === 0 ? "initial" : "drift_reacquisition",
+				temperatureBefore: before,
+				temperatureAfter: after,
+				driftK,
+				maxDeltaK: temperatureDomain.driftPolicy.maxDeltaK,
+				withinDriftLimit,
+				spectrumArtifactIds: spectrumResult.artifacts.map((artifact) => artifact.artifactId),
+			});
+			persistArtifactRecord(cwd, runId, evidenceArtifact);
+			artifactRefs.push(evidenceArtifact);
+			if (withinDriftLimit) {
+				return { status: "completed", artifactRefs };
+			}
+			break;
+		}
+	}
+
+	return {
+		status: "failed",
+		error: {
+			errorCode: "temperature_drift_exceeded",
+			message: `Temperature drift exceeded ${temperatureDomain.driftPolicy.maxDeltaK} K after the bounded reacquisition.`,
+			retrySafe: false,
+			needsOperator: false,
+			safeToResume: true,
+			scope: "unit",
+		},
+		artifactRefs,
+	};
+}
+
 function buildObservationMetrics(autofocusResult: ActionResult, spectrumResult: ActionResult): RamanObservationMetrics | RuntimeError {
 	const autofocusPayload = autofocusResult.payload ?? {};
 	const spectrumPayload = spectrumResult.payload ?? {};
@@ -588,6 +895,9 @@ export async function runLiveRamanUnit(
 	_currentState: RunState,
 	options: LiveRamanUnitOptions = {},
 ): Promise<LiveRamanUnitResult> {
+	if (spec.procedureId === "raman_temperature_series") {
+		return runLiveTemperatureSeriesUnit(cwd, runId, unit, spec, runtime, options);
+	}
 	const artifactRefs: ArtifactRef[] = [];
 	const stageResourceId = findResourceId(spec, "stage");
 	const unitPosition = await resolveUnitPosition(unit, runtime, stageResourceId);

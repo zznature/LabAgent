@@ -13,15 +13,20 @@ import {
 	type SpectrometerAcquireSpectrumAction,
 	type StageGetPositionAction,
 	type StageMoveAbsoluteAndWaitAction,
+	type TemperatureConfigureTargetAction,
+	type TemperatureReadSnapshotAction,
+	type TemperatureStopAction,
 } from "./actions.ts";
 import { registerRamanLiveRuntime, clearRamanLiveRuntime, type RamanLivePreflightResult, type RamanLiveRuntime } from "./live-runtime.ts";
 import {
 	FrameProviderResourceValidator,
 	SpectrometerResourceValidator,
 	StageResourceValidator,
+	TemperatureResourceValidator,
 	type FrameProviderResource,
 	type SpectrometerResource,
 	type StageResource,
+	type TemperatureResource,
 } from "./resources.ts";
 
 export const RAMAN_PYTHON_RUNTIME_LOCAL_CONFIG_PATH = join("lab-config", "raman-runtime.local.json");
@@ -47,6 +52,12 @@ export interface RamanPythonRuntimeConfigInfo {
 			port: string;
 			limits: StageResource["limits"];
 		};
+		temperatureController?: {
+			resourceId: string;
+			driver: string;
+			port: string;
+			operatingRange: TemperatureResource["operatingRange"];
+		};
 		frameProvider: {
 			resourceId: string;
 			driver: string;
@@ -68,6 +79,7 @@ export interface RamanPythonRuntimeConfig {
 	stage: StageResource;
 	frameProvider: FrameProviderResource;
 	spectrometer: SpectrometerResource;
+	temperatureController?: TemperatureResource;
 	preflight?: {
 		requirePythonRoot?: boolean;
 		requireBridgeDirs?: boolean;
@@ -95,7 +107,16 @@ interface LoadedRamanPythonRuntimeConfig {
 	config: RamanPythonRuntimeConfig;
 }
 
-type PythonActionKind = "preflight" | "stage_position" | "stage_move" | "frame_capture" | "autofocus" | "spectrum";
+type PythonActionKind =
+	| "preflight"
+	| "stage_position"
+	| "stage_move"
+	| "frame_capture"
+	| "autofocus"
+	| "spectrum"
+	| "temperature_snapshot"
+	| "temperature_configure"
+	| "temperature_stop";
 
 interface PythonRequestEnvelope {
 	requestId: string;
@@ -104,6 +125,7 @@ interface PythonRequestEnvelope {
 	stage: StageResource;
 	frameProvider: FrameProviderResource;
 	spectrometer: SpectrometerResource;
+	temperatureController?: TemperatureResource;
 	payload: Record<string, unknown>;
 }
 
@@ -199,6 +221,7 @@ export interface RamanPythonDaemonOptions {
 	stage: StageResource;
 	frameProvider: FrameProviderResource;
 	spectrometer: SpectrometerResource;
+	temperatureController?: TemperatureResource;
 	idleShutdownMs: number;
 }
 
@@ -320,6 +343,7 @@ export class RamanPythonDaemon {
 				stage: this.options.stage,
 				frameProvider: this.options.frameProvider,
 				spectrometer: this.options.spectrometer,
+				temperatureController: this.options.temperatureController,
 				payload,
 			};
 			try {
@@ -506,6 +530,9 @@ function validateConfig(path: string, parsed: Record<string, unknown>): RamanPyt
 	) {
 		throw new Error(`Invalid Raman Python runtime config at ${path}: enabled config requires valid stage, frameProvider, and spectrometer resources.`);
 	}
+	if (parsed.enabled && parsed.temperatureController !== undefined && !TemperatureResourceValidator.Check(parsed.temperatureController)) {
+		throw new Error(`Invalid Raman Python runtime config at ${path}: temperatureController must be a valid temperature resource.`);
+	}
 	return parsed as unknown as RamanPythonRuntimeConfig;
 }
 
@@ -579,6 +606,14 @@ export function getRamanPythonRuntimeConfigInfo(cwd: string): RamanPythonRuntime
 				bridgeDir: config.spectrometer.config.bridgeDir,
 				laserPower: config.spectrometer.config.laserPower,
 			},
+			temperatureController: config.temperatureController
+				? {
+					resourceId: config.temperatureController.resourceId,
+					driver: config.temperatureController.driver,
+					port: config.temperatureController.config.port,
+					operatingRange: config.temperatureController.operatingRange,
+				}
+				: undefined,
 		},
 	};
 }
@@ -601,6 +636,7 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 		stage: resolvedConfig.stage,
 		frameProvider: resolvedConfig.frameProvider,
 		spectrometer: resolvedConfig.spectrometer,
+		temperatureController: resolvedConfig.temperatureController,
 		idleShutdownMs: resolvedConfig.daemon?.idleShutdownMs ?? DEFAULT_DAEMON_IDLE_SHUTDOWN_MS,
 	});
 	registerDaemon(cwd, daemon);
@@ -678,6 +714,55 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				return createActionResult(response, artifacts);
 			},
 		},
+		...(resolvedConfig.temperatureController
+			? {
+					temperature: {
+						resource: resolvedConfig.temperatureController,
+						readSnapshot: async (action: TemperatureReadSnapshotAction): Promise<ActionResult> =>
+							createActionResult(
+								await daemon.request("temperature_snapshot", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000),
+							),
+						configureTarget: async (action: TemperatureConfigureTargetAction): Promise<ActionResult> => {
+							const range = resolvedConfig.temperatureController!.operatingRange;
+							if (action.targetK < range.minTargetK || action.targetK > range.maxTargetK) {
+								return failedActionResult(
+									`Temperature target ${action.targetK} K is outside the configured operating range.`,
+									{
+										errorCode: "temperature_target_unsupported",
+										message: "Requested temperature target is outside the configured device capability.",
+										retrySafe: false,
+										needsOperator: true,
+										safeToResume: false,
+									},
+								);
+							}
+							if (action.rampKPerMin > range.maxRampKPerMin) {
+								return failedActionResult(
+									`Temperature ramp ${action.rampKPerMin} K/min exceeds the configured operating range.`,
+									{
+										errorCode: "temperature_ramp_unsupported",
+										message: "Requested temperature ramp exceeds the configured device capability.",
+										retrySafe: false,
+										needsOperator: true,
+										safeToResume: false,
+									},
+								);
+							}
+							return createActionResult(
+								await daemon.request(
+									"temperature_configure",
+									{ targetK: action.targetK, rampKPerMin: action.rampKPerMin, timeoutMs: action.timeoutMs },
+									action.timeoutMs + 10_000,
+								),
+							);
+						},
+						stop: async (action: TemperatureStopAction): Promise<ActionResult> =>
+							createActionResult(
+								await daemon.request("temperature_stop", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000),
+							),
+					},
+				}
+			: {}),
 	};
 }
 
