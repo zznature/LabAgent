@@ -88,6 +88,7 @@ const DEFAULT_SMOKE_SPECTRUM_ACCUMULATIONS = 1;
 const DEFAULT_SMOKE_SPECTRUM_TIMEOUT_MS = 10_000;
 const MAX_SMOKE_SPECTRUM_LASER_POWER_PERCENT = 0.1;
 const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
+const DEFAULT_FRAME_CAPTURE_TIMEOUT_MS = 30_000;
 const DEFAULT_AUTOFOCUS_MIN_OBJECTIVE_CLEARANCE_UM = 200;
 const DEFAULT_AUTOFOCUS_ROI = { x: 100, y: 100, width: 64, height: 64 };
 
@@ -414,7 +415,7 @@ export const ramanCaptureFrameTool = {
 		const frameResult = await runtime.frame.captureLatest({
 			action: "frame.capture_latest",
 			resourceId: runtime.frame.resource.resourceId,
-			timeoutMs: 10_000,
+			timeoutMs: DEFAULT_FRAME_CAPTURE_TIMEOUT_MS,
 		});
 		const operation = recordOperatorArtifacts(ctx.cwd, "raman_capture_frame", "action-frame", frameResult);
 		const payload = isRecord(frameResult.payload) ? frameResult.payload : {};
@@ -458,7 +459,7 @@ export const ramanCaptureLaserOffFrameTool = {
 		const frameResult = await runtime.frame.captureLaserOff({
 			action: "frame.capture_laser_off",
 			resourceId: runtime.frame.resource.resourceId,
-			timeoutMs: 10_000,
+			timeoutMs: DEFAULT_FRAME_CAPTURE_TIMEOUT_MS,
 			discardFrames: params.discardFrames,
 		});
 		const operation = recordOperatorArtifacts(ctx.cwd, "raman_capture_laser_off_frame", "action-frame", frameResult);
