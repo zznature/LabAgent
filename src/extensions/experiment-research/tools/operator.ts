@@ -6,6 +6,13 @@ import { createRunRecords, type ArtifactDescriptor } from "../records/run-record
 
 const EmptyParamsSchema = Type.Object({}, { additionalProperties: false });
 
+const FrameNoLaserParamsSchema = Type.Object(
+	{
+		discardFrames: Type.Optional(Type.Integer({ minimum: 0, maximum: 10 })),
+	},
+	{ additionalProperties: false },
+);
+
 const StageAxisSchema = Type.Union([
 	Type.Literal("x"),
 	Type.Literal("y"),
@@ -72,6 +79,7 @@ const AutofocusParamsSchema = Type.Object(
 type StageRelativeMoveParams = Static<typeof StageRelativeMoveParamsSchema>;
 type SmokeSpectrumParams = Static<typeof SmokeSpectrumParamsSchema>;
 type OperatorAutofocusParams = Static<typeof AutofocusParamsSchema>;
+type FrameNoLaserParams = Static<typeof FrameNoLaserParamsSchema>;
 type StageAxis = Static<typeof StageAxisSchema>;
 
 const DEFAULT_SMOKE_SPECTRUM_INTEGRATION_TIME_MS = 1000;
@@ -439,9 +447,9 @@ export const ramanCaptureLaserOffFrameTool = {
 		"Do not use this for Raman spectrum acquisition; it only captures a frame.",
 		"Report whether the runtime requested laser off and return the frame artifact/path.",
 	],
-	parameters: EmptyParamsSchema,
+	parameters: FrameNoLaserParamsSchema,
 	executionMode: "sequential",
-	async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+	async execute(_toolCallId, params: FrameNoLaserParams, _signal, _onUpdate, ctx) {
 		const runtime = getRamanLiveRuntime(ctx.cwd);
 		if (!runtime) {
 			return runtimeUnavailableState();
@@ -451,6 +459,7 @@ export const ramanCaptureLaserOffFrameTool = {
 			action: "frame.capture_laser_off",
 			resourceId: runtime.frame.resource.resourceId,
 			timeoutMs: 10_000,
+			discardFrames: params.discardFrames,
 		});
 		const operation = recordOperatorArtifacts(ctx.cwd, "raman_capture_laser_off_frame", "action-frame", frameResult);
 		const payload = isRecord(frameResult.payload) ? frameResult.payload : {};
@@ -461,6 +470,7 @@ export const ramanCaptureLaserOffFrameTool = {
 			actionStatus: frameResult.status,
 			laserStateRequested: readString(payload, "laserStateRequested") ?? "off",
 			laserStateVerified: laserStateVerified ?? "unknown",
+			discardFrames: readNumber(payload, "discardFrames"),
 			payload,
 			artifactRefs: frameResult.artifacts,
 			operationId: operation.operationId,
@@ -482,7 +492,15 @@ export const ramanCaptureLaserOffFrameTool = {
 		const summary = framePath ? `Laser-off frame captured: ${framePath}.` : "Laser-off frame captured.";
 		return success(summary, stateAfter);
 	},
-} satisfies ToolDefinition<typeof EmptyParamsSchema, OperatorToolDetails>;
+} satisfies ToolDefinition<typeof FrameNoLaserParamsSchema, OperatorToolDetails>;
+
+export const ramanCaptureFrameNoLaserTool = {
+	...ramanCaptureLaserOffFrameTool,
+	name: "raman_capture_frame_no_laser",
+	label: "Raman Capture No-Laser Frame",
+	description: "Capture one microscope/sample image with LabSpec laser output disabled; the worker may discard stale frames before saving the final frame.",
+	promptSnippet: "Capture a microscope/sample image with no laser exposure through the LabSpec worker",
+} satisfies ToolDefinition<typeof FrameNoLaserParamsSchema, OperatorToolDetails>;
 
 export const ramanAcquireSmokeSpectrumTool = {
 	name: "raman_acquire_smoke_spectrum",

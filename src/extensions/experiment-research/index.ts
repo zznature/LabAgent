@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { RAMAN_EXTENSION_PROMPT } from "./prompt.ts";
 import {
 	ramanAcquireSmokeSpectrumTool,
+	ramanCaptureFrameNoLaserTool,
 	ramanCaptureFrameTool,
 	ramanCaptureLaserOffFrameTool,
 	ramanGetHardwareStatusTool,
@@ -51,6 +52,7 @@ const PLANNER_TOOL_NAMES = [
 	"raman_get_hardware_status",
 	"raman_get_stage_position",
 	"raman_capture_frame",
+	"raman_capture_frame_no_laser",
 	"raman_capture_laser_off_frame",
 	"raman_run_autofocus",
 	"raman_acquire_smoke_spectrum",
@@ -82,6 +84,7 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(ramanGetHardwareStatusTool);
 	pi.registerTool(ramanGetStagePositionTool);
 	pi.registerTool(ramanCaptureFrameTool);
+	pi.registerTool(ramanCaptureFrameNoLaserTool);
 	pi.registerTool(ramanCaptureLaserOffFrameTool);
 	pi.registerTool(ramanRunAutofocusTool);
 	pi.registerTool(ramanAcquireSmokeSpectrumTool);

@@ -105,15 +105,22 @@ class LabSpecFileBridgeFrameProvider:
     def wait_for_next(self, after_ts: float, timeout_ms: int) -> Frame:
         return self._wait_for_next(after_ts, timeout_ms, laser_off=False)
 
-    def wait_for_next_laser_off(self, after_ts: float, timeout_ms: int) -> Frame:
-        return self._wait_for_next(after_ts, timeout_ms, laser_off=True)
+    def wait_for_next_laser_off(self, after_ts: float, timeout_ms: int, discard_frames: int | None = None) -> Frame:
+        return self._wait_for_next(after_ts, timeout_ms, laser_off=True, discard_frames=discard_frames)
 
-    def _wait_for_next(self, after_ts: float, timeout_ms: int, *, laser_off: bool) -> Frame:
+    def _wait_for_next(
+        self,
+        after_ts: float,
+        timeout_ms: int,
+        *,
+        laser_off: bool,
+        discard_frames: int | None = None,
+    ) -> Frame:
         from PIL import Image
         import numpy as np
 
         deadline = time.monotonic() + timeout_ms / 1000.0
-        request = self._request_capture(timeout_ms, laser_off=laser_off)
+        request = self._request_capture(timeout_ms, laser_off=laser_off, discard_frames=discard_frames)
         _trace_bridge(
             self.bridge_dir,
             "capture_frame_request_created",
@@ -145,7 +152,10 @@ class LabSpecFileBridgeFrameProvider:
                     timestamp=frame_ts,
                     seq=self._seq,
                     path=archived_path,
-                    metadata={"laserStateVerified": result.get("laser_state_verified", "").strip().lower()},
+                    metadata={
+                        "laserStateVerified": result.get("laser_state_verified", "").strip().lower(),
+                        "discardFrames": int(result["discard_frames"]) if result.get("discard_frames", "").isdigit() else None,
+                    },
                 )
                 self._last_frame = frame
                 return frame
@@ -190,16 +200,19 @@ class LabSpecFileBridgeFrameProvider:
         except Exception:
             return str(source)
 
-    def _request_capture(self, timeout_ms: int, *, laser_off: bool):
+    def _request_capture(self, timeout_ms: int, *, laser_off: bool, discard_frames: int | None = None):
         request_id = f"cap_laser_off_{time.monotonic_ns()}" if laser_off else f"cap_{time.monotonic_ns()}"
         create_request = create_labspec_laser_off_video_frame_request if laser_off else create_labspec_video_frame_request
-        return create_request(
-            bridge_dir=self.bridge_dir,
-            request_id=request_id,
-            image_format=self.image_format,
-            timeout_ms=timeout_ms,
-            min_capture_interval_ms=self.min_capture_interval_ms,
-        )
+        kwargs = {
+            "bridge_dir": self.bridge_dir,
+            "request_id": request_id,
+            "image_format": self.image_format,
+            "timeout_ms": timeout_ms,
+            "min_capture_interval_ms": self.min_capture_interval_ms,
+        }
+        if laser_off:
+            kwargs["discard_frames"] = discard_frames
+        return create_request(**kwargs)
 
     @staticmethod
     def _is_stable_file(path: Path) -> bool:

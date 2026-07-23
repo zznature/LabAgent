@@ -344,6 +344,7 @@ def create_labspec_laser_off_video_frame_request(
     image_format: str = "tif",
     timeout_ms: int = 3000,
     min_capture_interval_ms: int = 400,
+    discard_frames: int | None = None,
 ) -> LabSpecQueuedWorkerRequest:
     """Create one queued video-frame request that asks the worker to disable laser first."""
 
@@ -351,6 +352,8 @@ def create_labspec_laser_off_video_frame_request(
         raise ValueError("timeout_ms must be > 0.")
     if min_capture_interval_ms < 0:
         raise ValueError("min_capture_interval_ms must be >= 0.")
+    if discard_frames is not None and (discard_frames < 0 or discard_frames > 10):
+        raise ValueError("discard_frames must be between 0 and 10 when provided.")
     if not image_format.strip():
         raise ValueError("image_format is required.")
 
@@ -363,19 +366,23 @@ def create_labspec_laser_off_video_frame_request(
         / DEFAULT_LABSPEC_FRAME_DIRNAME
         / f"frame_{resolved_request_id}.{image_format}"
     )
+    request_items = [
+        ("format", image_format),
+        ("timeout_ms", str(timeout_ms)),
+        ("min_capture_interval_ms", str(min_capture_interval_ms)),
+        ("laser_state", "off"),
+        ("laser_power_percent", "0"),
+        ("verify_laser_state", "1"),
+    ]
+    if discard_frames is not None:
+        request_items.append(("discard_frames", str(discard_frames)))
+
     return create_labspec_worker_request(
         action="capture_frame_no_laser",
         bridge_dir=resolved_bridge_dir,
         request_id=resolved_request_id,
         output_path=resolved_output_path,
-        items=[
-            ("format", image_format),
-            ("timeout_ms", str(timeout_ms)),
-            ("min_capture_interval_ms", str(min_capture_interval_ms)),
-            ("laser_state", "off"),
-            ("laser_power_percent", "0"),
-            ("verify_laser_state", "1"),
-        ],
+        items=request_items,
     )
 
 

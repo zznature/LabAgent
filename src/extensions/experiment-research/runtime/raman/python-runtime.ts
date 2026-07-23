@@ -723,7 +723,15 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				return createActionResult(response, response.ok ? asArtifact(response.payload.framePath, "frame", "LabSpec frame") : []);
 			},
 			captureLaserOff: async (action: FrameCaptureLaserOffAction): Promise<ActionResult> => {
-				const response = await daemon.request("frame_capture_laser_off", { timeoutMs: action.timeoutMs, artifactContext: action.artifactContext }, action.timeoutMs + 10_000);
+				const response = await daemon.request(
+					"frame_capture_laser_off",
+					{
+						timeoutMs: action.timeoutMs,
+						discardFrames: action.discardFrames,
+						artifactContext: action.artifactContext,
+					},
+					action.timeoutMs + 10_000,
+				);
 				return createActionResult(response, response.ok ? asArtifact(response.payload.framePath, "frame", "LabSpec laser-off frame") : []);
 			},
 		},

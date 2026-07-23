@@ -65,7 +65,10 @@ function loadExperimentExtension(): CapturedExtension {
 	return { tools, handlers };
 }
 
-function createOperatorRuntime(position: MutablePosition, options: { autofocusZBestUm?: number } = {}): RamanLiveRuntime {
+function createOperatorRuntime(
+	position: MutablePosition,
+	options: { autofocusZBestUm?: number; laserOffDiscardFrames?: number } = {},
+): RamanLiveRuntime {
 	return {
 		preflight() {
 			return {
@@ -175,6 +178,7 @@ function createOperatorRuntime(position: MutablePosition, options: { autofocusZB
 						shape: [512, 512],
 						laserStateRequested: "off",
 						laserStateVerified: "off",
+						discardFrames: options.laserOffDiscardFrames ?? 1,
 					},
 					[
 						{
@@ -336,12 +340,19 @@ describe("experiment research operator tools", () => {
 	it("captures a laser-off microscope frame through the registered runtime", async () => {
 		const cwd = createTempCwd();
 		const extension = loadExperimentExtension();
-		registerRamanLiveRuntime(cwd, createOperatorRuntime({ xUm: 100, yUm: 200, zUm: 300 }));
+		const runtime = createOperatorRuntime({ xUm: 100, yUm: 200, zUm: 300 }, { laserOffDiscardFrames: 2 });
+		let requestedDiscardFrames: number | undefined;
+		const captureLaserOff = runtime.frame.captureLaserOff.bind(runtime.frame);
+		runtime.frame.captureLaserOff = (action) => {
+			requestedDiscardFrames = action.discardFrames;
+			return captureLaserOff(action);
+		};
+		registerRamanLiveRuntime(cwd, runtime);
 		const context = { cwd } as ExtensionContext;
 
 		const frameResult = await extension.tools
-			.get("raman_capture_laser_off_frame")
-			?.execute("frame-laser-off", {}, undefined, undefined, context);
+			.get("raman_capture_frame_no_laser")
+			?.execute("frame-no-laser", { discardFrames: 2 }, undefined, undefined, context);
 		const frameDetails = asRecord(frameResult?.details);
 		const frameState = asRecord(frameDetails.stateAfter);
 
@@ -349,8 +360,10 @@ describe("experiment research operator tools", () => {
 		expect(asRecord(frameResult).content).toEqual([
 			{ type: "text", text: "Laser-off frame captured: D:\\RamanLab\\SpecBridge\\frames\\frame_laser_off_1.tif." },
 		]);
+		expect(requestedDiscardFrames).toBe(2);
 		expect(frameState.laserStateRequested).toBe("off");
 		expect(frameState.laserStateVerified).toBe("off");
+		expect(frameState.discardFrames).toBe(2);
 		expect(frameState.artifactRefs).toEqual([
 			{
 				artifactId: "frame-laser-off",

@@ -435,6 +435,17 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
     bridge_dir = Path(frame_cfg["config"]["bridgeDir"])
     image_format = frame_cfg["config"]["imageFormat"]
     timeout_ms = int(payload["timeoutMs"])
+    discard_frames = payload.get("discardFrames")
+    if discard_frames is not None:
+        discard_frames = int(discard_frames)
+        if discard_frames < 0 or discard_frames > 10:
+            return _fail(
+                "invalid_discard_frames",
+                "discardFrames must be between 0 and 10.",
+                retry_safe=False,
+                safe_to_resume=True,
+                payload={"discardFrames": discard_frames},
+            )
     _trace("frame_capture_start", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
     provider = session.frame(frame_cfg, timeout_ms)
     _trace("frame_capture_wait_for_next", {"bridgeDir": str(bridge_dir), "timeoutMs": timeout_ms, "laserOff": laser_off})
@@ -443,7 +454,11 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
     try:
         try:
             if laser_off:
-                frame = provider.wait_for_next_laser_off(after_ts=0.0, timeout_ms=timeout_ms)
+                frame = provider.wait_for_next_laser_off(
+                    after_ts=0.0,
+                    timeout_ms=timeout_ms,
+                    discard_frames=discard_frames,
+                )
             else:
                 frame = provider.wait_for_next(after_ts=0.0, timeout_ms=timeout_ms)
         except SourceArtifactUnavailableError as exc:
@@ -480,6 +495,7 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
     if action_dir is not None and source_path.exists():
         frame_path = _archive_copy(source_path, action_dir / f"source-frame.{image_format}")
     laser_state_verified = str(getattr(frame, "metadata", {}).get("laserStateVerified", ""))
+    result_discard_frames = getattr(frame, "metadata", {}).get("discardFrames")
     if laser_off and laser_state_verified != "off":
         return _fail(
             "laser_state_not_verified",
@@ -519,6 +535,7 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
             "actionStagingDir": str(action_dir) if action_dir is not None else "",
             "laserStateRequested": "off" if laser_off else "",
             "laserStateVerified": laser_state_verified or "unknown",
+            "discardFrames": result_discard_frames,
             **canonical_frame,
         },
     )

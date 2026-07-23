@@ -126,6 +126,7 @@ export const FrameCaptureLaserOffActionSchema = Type.Object(
 		action: Type.Literal("frame.capture_laser_off"),
 		resourceId: Type.String({ minLength: 1 }),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		discardFrames: Type.Optional(Type.Integer({ minimum: 0, maximum: 10 })),
 		artifactContext: Type.Optional(ArtifactStagingContextSchema),
 	},
 	{ additionalProperties: false },
