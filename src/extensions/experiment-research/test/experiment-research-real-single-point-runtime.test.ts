@@ -625,12 +625,15 @@ describe("experiment research real supervised single-point runtime", () => {
 		const captureLatest = runtime.frame.captureLatest.bind(runtime.frame);
 		let latestCaptureCalls = 0;
 		let laserOffCaptureCalls = 0;
+		const frameCaptureTimeouts: number[] = [];
 		runtime.frame.captureLatest = async (action) => {
 			latestCaptureCalls += 1;
+			frameCaptureTimeouts.push(action.timeoutMs);
 			return captureLatest(action);
 		};
 		runtime.frame.captureLaserOff = async (action) => {
 			laserOffCaptureCalls += 1;
+			frameCaptureTimeouts.push(action.timeoutMs);
 			const result = await captureLatest({ ...action, action: "frame.capture_latest" });
 			return {
 				...result,
@@ -667,6 +670,7 @@ describe("experiment research real supervised single-point runtime", () => {
 
 		expect(laserOffCaptureCalls).toBe(1);
 		expect(latestCaptureCalls).toBe(1);
+		expect(frameCaptureTimeouts).toEqual([30_000, 30_000]);
 		const explicitFrames = createRunRecords(cwd).listArtifacts(runId).filter(
 			(artifact) => artifact.profile === "raman-frame" && !artifact.artifactId.includes("autofocus"),
 		);

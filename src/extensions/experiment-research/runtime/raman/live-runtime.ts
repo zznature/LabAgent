@@ -135,6 +135,7 @@ interface RamanFramePayload {
 
 const liveRuntimeRegistry = new Map<string, RamanLiveRuntime>();
 const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
+const DEFAULT_FRAME_CAPTURE_TIMEOUT_MS = 30_000;
 
 function toRuntimeError(actionResult: ActionResult, fallbackCode: string, scope: RuntimeError["scope"] = "unit"): RuntimeError {
 	return {
@@ -1199,13 +1200,13 @@ export async function runLiveRamanUnit(
 				? await runtime.frame.captureLaserOff({
 						action: "frame.capture_laser_off",
 						resourceId: frameProviderResourceId,
-						timeoutMs: 10_000,
+						timeoutMs: DEFAULT_FRAME_CAPTURE_TIMEOUT_MS,
 						artifactContext,
 					})
 				: await runtime.frame.captureLatest({
 						action: "frame.capture_latest",
 						resourceId: frameProviderResourceId,
-						timeoutMs: 10_000,
+						timeoutMs: DEFAULT_FRAME_CAPTURE_TIMEOUT_MS,
 						artifactContext,
 					});
 			const frameResultArtifacts = scopeRuntimeArtifacts(cwd, runId, frameResult.artifacts, unit, actionIndex, options.attempt);

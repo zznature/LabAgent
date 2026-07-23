@@ -117,7 +117,7 @@ class AutofocusParams:
 
     # Timing
     settle_ms: int = 100
-    frame_timeout_ms: int = 3000
+    frame_timeout_ms: int = 30000
     stage_timeout_ms: int = 3000
 
     # Acquisition
@@ -161,7 +161,7 @@ class FixedRangeAutofocusParams:
     z_end_um: float
     point_count: int = 10
     stage_timeout_ms: int = 30000
-    frame_timeout_ms: int = 3000
+    frame_timeout_ms: int = 30000
     settle_ms: int = 100
     frames_per_z: int = 1
     warmup_frames_per_z: int = 1

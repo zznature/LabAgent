@@ -236,9 +236,14 @@ describe("experiment research planner proposal flow", () => {
 		const templateState = asRecord(templateDetails.stateAfter);
 		const template = asRecord(templateState.template);
 		const plan = asRecord(template.plan);
+		const domain = asRecord(template.domain);
+		const raman = asRecord(domain.raman);
+		const autofocus = asRecord(raman.autofocus);
+		const autofocusParams = asRecord(autofocus.params);
 		expect(templateDetails.status).toBe("success");
 		expect(template.procedureId).toBe("raman_grid_mapping");
 		expect(plan.kind).toBe("point_list");
+		expect(autofocusParams.frameTimeoutMs).toBe(30_000);
 		expect(templateState.notes).toEqual(expect.arrayContaining([expect.stringContaining("Line scans should use point_list")]));
 	});
 
