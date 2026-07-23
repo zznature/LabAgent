@@ -478,7 +478,8 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
             "finalApproachOffsetUm": params.get("finalApproachOffsetUm", 3.0),
             "interpolatePeak": params.get("interpolatePeak", True),
             "finalVerificationFramesPerZ": params.get("finalVerificationFramesPerZ", 1),
-            "metricName": params.get("metricName", "labspec_spot_compactness"),
+            "metricName": params.get("metricName", "labspec_center_spot_focus"),
+            "confidenceMethod": params.get("confidenceMethod", "curve_quality"),
         }
         result = controller.run_fixed_range(
             roi,
@@ -497,6 +498,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
                 interpolate_peak=resolved_params["interpolatePeak"],
                 final_verification_frames_per_z=resolved_params["finalVerificationFramesPerZ"],
                 metric_name=resolved_params["metricName"],
+                confidence_method=resolved_params["confidenceMethod"],
             ),
         )
     finally:

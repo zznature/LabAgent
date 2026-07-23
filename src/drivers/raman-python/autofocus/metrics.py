@@ -2,7 +2,7 @@
 
 import numpy as np
 from typing import Callable
-from autofocus.labspec_spot_focus import labspec_spot_compactness
+from autofocus.labspec_spot_focus import labspec_center_spot_focus, labspec_spot_compactness
 from autofocus.models import ROI
 from autofocus.roi import prepare
 
@@ -53,6 +53,7 @@ METRICS: dict[str, Callable[[np.ndarray, ROI], float]] = {
     "laplacian_variance": laplacian_variance,
     "brenner": brenner,
     "normalized_variance": normalized_variance,
+    "labspec_center_spot_focus": labspec_center_spot_focus,
     "labspec_spot_compactness": labspec_spot_compactness,
 }
 

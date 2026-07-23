@@ -134,7 +134,7 @@ class AutofocusParams:
     max_saturation_ratio: float = 0.01
 
     # Metric selection
-    metric_name: str = "labspec_spot_compactness"
+    metric_name: str = "labspec_center_spot_focus"
 
     def __post_init__(self) -> None:
         if not (self.z_min_um < self.z_max_um):
@@ -169,7 +169,8 @@ class FixedRangeAutofocusParams:
     final_approach_offset_um: float = 3.0
     interpolate_peak: bool = True
     final_verification_frames_per_z: int = 1
-    metric_name: str = "labspec_spot_compactness"
+    metric_name: str = "labspec_center_spot_focus"
+    confidence_method: Literal["curve_quality", "legacy_min_gate"] = "curve_quality"
 
     def __post_init__(self) -> None:
         if self.z_start_um == self.z_end_um:
