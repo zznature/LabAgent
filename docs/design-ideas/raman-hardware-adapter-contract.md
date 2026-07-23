@@ -614,6 +614,12 @@ Runtime 再将 source evidence 规范化为四种 canonical profiles：
 - requested laser state 不是 verified state；worker 未返回关闭验证证据时，不得把 laser-off frame 标为已验证 `off`
 - 不能靠 message 文本或裸 path 告诉上层“文件大概在某个目录里”
 
+LabSpec 当前实验室导出的 spectrum source 是无列头、CRLF、Tab/whitespace 分隔的双数值列：
+第一列由受信任 Raman runtime 配置声明为 `raman_shift / cm^-1`，第二列声明为
+`intensity / counts`。Adapter 可以解析这种 headerless source，但不得仅凭列位置猜测科学语义；
+缺少上述配置时 live preflight 返回 `spectrum_semantics_unconfigured`。单列 source 不得用行号
+伪造 Raman shift；它只能保留为 source evidence，不能发布 complete `raman-spectrum`。
+
 ## 11. 错误模型
 
 Raman 接入必须把 Python 异常归一化成结构化错误码，而不是把 traceback 暴露给 kernel 或 Agent。

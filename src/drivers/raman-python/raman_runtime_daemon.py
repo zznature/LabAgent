@@ -231,8 +231,6 @@ def parse_spectrum_points(output_path: str | None) -> list[tuple[float, float]]:
                 pass
         if len(values) >= 2:
             points.append((values[0], values[1]))
-        elif len(values) == 1:
-            points.append((float(len(points)), values[0]))
     return points
 
 

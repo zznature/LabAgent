@@ -156,6 +156,11 @@ type RunObservationSnapshot = {
     totalUnits: number
   }
   units: UnitObservation[]
+  artifactIndex?: {
+    status: "degraded"
+    errorCode: "artifact_index_update_failed"
+    message: string
+  }
   heartbeatAt?: string
   errorState?: RuntimeError
   startedAt: string
@@ -224,7 +229,9 @@ read one artifact descriptor
 stream one complete representation
 ```
 
-后端请求期间禁止扫描 artifact 目录。artifact listing 使用 run-level index。
+正常后端请求期间禁止扫描 artifact 目录，artifact listing 使用 run-level index。唯一例外是
+snapshot 已标记 `artifactIndex.status = "degraded"`，或 index 缺失、损坏、引用失效时，
+Run Records Module 可在内部扫描自包含 descriptor 重建读取视图；Backend Adapter 与前端仍不得扫描目录。
 
 ## 5. Artifact Contract
 
@@ -334,6 +341,10 @@ lab-records/
 - API 使用 index 做 listing/filtering
 - index 不取代每个 artifact 自包含的 `descriptor.json`
 - 丢失时从 RunState、events 和 completed descriptors 重建，不要求完整 event sourcing
+- 原子写入统一使用唯一临时文件；只有 artifact index 的 Windows rename 明确返回 `EPERM` 时执行有界重试
+- descriptor 与必要 observation 已经持久化后，index 更新失败只把查询投影标记为 `degraded`，不得终止 bounded run
+- `degraded` 时 Run Records Module 从 descriptor 重建读取视图；前端仍只调用读取 interface，不直接扫描目录
+- descriptor、representation 或必要 observation/event 写入失败仍属于不可降级的持久化失败
 
 ## 6. Raman MVP Canonical Profiles
 

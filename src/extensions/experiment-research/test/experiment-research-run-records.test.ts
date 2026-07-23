@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createRunRecords, recoverWorkspaceInterruptedPublications } from "../records/run-records.ts";
 import { createRunRecordsReadAdapter } from "../records/read-adapter.ts";
+import { runArtifactIndexPath } from "../store/layout.ts";
 
 const tempRoots: string[] = [];
 
@@ -247,6 +248,191 @@ describe("Run Records Interface", () => {
 		createdAt: "2026-07-15T10:00:03.000Z",
 		representations: [{ role: "source", mediaType: "text/plain", fileName: "source.txt", sourcePath }],
 	})).toThrow(/run observation unit not found/u);
+	});
+
+	it("keeps publishing and reading artifacts when the rebuildable index cannot be written", () => {
+		const cwd = createTempCwd();
+		const records = createRunRecords(cwd);
+		records.initializeRun({
+			runId: "run-degraded-index",
+			experimentId: "experiment-001",
+			procedureSpecId: "spec-001",
+			startedAt: "2026-07-15T10:00:00.000Z",
+			units: [{ unitId: "unit-0000", index: 0 }],
+		});
+		records.applyRunChange("run-degraded-index", {
+			type: "attempt_started",
+			unitId: "unit-0000",
+			attemptId: "attempt-0000",
+			timestamp: "2026-07-15T10:00:01.000Z",
+		});
+		const sourcePath = join(cwd, "source-spectrum.txt");
+		writeFileSync(sourcePath, "100\t12\n200\t18\n", "utf-8");
+
+		const source = records.publishArtifact({
+			artifactId: "source-spectrum",
+			scope: {
+				kind: "run",
+				runId: "run-degraded-index",
+				unitId: "unit-0000",
+				attemptId: "attempt-0000",
+				actionId: "action-spectrum",
+			},
+			layer: "source",
+			sourceArtifactIds: [],
+			createdAt: "2026-07-15T10:00:02.000Z",
+			representations: [{
+				role: "source",
+				mediaType: "text/plain",
+				fileName: "spectrum.txt",
+				sourcePath,
+			}],
+		});
+		rmSync(runArtifactIndexPath(cwd, "run-degraded-index"));
+		mkdirSync(runArtifactIndexPath(cwd, "run-degraded-index"), { recursive: true });
+		const canonical = records.publishArtifact({
+			artifactId: "canonical-spectrum",
+			scope: {
+				kind: "run",
+				runId: "run-degraded-index",
+				unitId: "unit-0000",
+				attemptId: "attempt-0000",
+				actionId: "action-spectrum",
+			},
+			layer: "canonical",
+			profile: "raman-spectrum",
+			sourceArtifactIds: [source.artifactId],
+			createdAt: "2026-07-15T10:00:03.000Z",
+			canonicalData: {
+				schemaVersion: 1,
+				xAxis: { kind: "raman_shift", unit: "cm^-1", values: [100, 200] },
+				yAxis: { kind: "intensity", unit: "counts", values: [12, 18] },
+				acquisition: {},
+				metrics: {},
+			},
+		});
+
+		expect(source.status).toBe("complete");
+		expect(canonical.status).toBe("complete");
+		expect(records.readRun("run-degraded-index")).toMatchObject({
+			status: "queued",
+			artifactIndex: {
+				status: "degraded",
+				errorCode: "artifact_index_update_failed",
+			},
+		});
+		expect(records.listArtifacts("run-degraded-index").map((artifact) => artifact.artifactId)).toEqual([
+			"source-spectrum",
+			"canonical-spectrum",
+		]);
+		expect(records.readRepresentation("run-degraded-index", "canonical-spectrum", "data").bytes.length).toBeGreaterThan(0);
+		records.applyRunChange("run-degraded-index", {
+			type: "attempt_accepted",
+			unitId: "unit-0000",
+			attemptId: "attempt-0000",
+			canonicalArtifactIds: [canonical.artifactId],
+			timestamp: "2026-07-15T10:00:04.000Z",
+		});
+		records.applyRunChange("run-degraded-index", {
+			type: "run_completed",
+			timestamp: "2026-07-15T10:00:05.000Z",
+		});
+
+		const restartedRecords = createRunRecords(cwd);
+		expect(restartedRecords.recoverInterruptedPublications("run-degraded-index")).toEqual([]);
+		expect(restartedRecords.readRun("run-degraded-index")).toMatchObject({
+			status: "completed",
+			units: [{
+				status: "succeeded",
+				attemptCount: 1,
+				acceptedAttemptId: "attempt-0000",
+				canonicalArtifactIds: ["canonical-spectrum"],
+			}],
+		});
+		expect(restartedRecords.listArtifacts("run-degraded-index").map((artifact) => ({
+			artifactId: artifact.artifactId,
+			status: artifact.status,
+		}))).toEqual([
+			{ artifactId: "source-spectrum", status: "complete" },
+			{ artifactId: "canonical-spectrum", status: "complete" },
+		]);
+	});
+
+	it("rebuilds unreadable and stale artifact indexes from durable descriptors", () => {
+		const cwd = createTempCwd();
+		const records = createRunRecords(cwd);
+		records.initializeRun({
+			runId: "run-rebuilt-index",
+			experimentId: "experiment-001",
+			procedureSpecId: "spec-001",
+			startedAt: "2026-07-15T10:00:00.000Z",
+			units: [{ unitId: "unit-0000", index: 0 }],
+		});
+		records.applyRunChange("run-rebuilt-index", {
+			type: "attempt_started",
+			unitId: "unit-0000",
+			attemptId: "attempt-0000",
+			timestamp: "2026-07-15T10:00:01.000Z",
+		});
+		const scope = {
+			kind: "run" as const,
+			runId: "run-rebuilt-index",
+			unitId: "unit-0000",
+			attemptId: "attempt-0000",
+			actionId: "action-diagnostic",
+		};
+		records.publishArtifact({
+			artifactId: "diagnostic-before-rebuild",
+			scope,
+			layer: "diagnostic",
+			sourceArtifactIds: [],
+			createdAt: "2026-07-15T10:00:02.000Z",
+			representations: [{
+				role: "diagnostic",
+				mediaType: "text/plain",
+				fileName: "before.txt",
+				content: "before\n",
+			}],
+		});
+		writeFileSync(runArtifactIndexPath(cwd, "run-rebuilt-index"), "{", "utf-8");
+
+		records.publishArtifact({
+			artifactId: "diagnostic-after-rebuild",
+			scope,
+			layer: "diagnostic",
+			sourceArtifactIds: [],
+			createdAt: "2026-07-15T10:00:03.000Z",
+			representations: [{
+				role: "diagnostic",
+				mediaType: "text/plain",
+				fileName: "after.txt",
+				content: "after\n",
+			}],
+		});
+		const staleIndex = readFileSync(runArtifactIndexPath(cwd, "run-rebuilt-index"), "utf-8");
+		records.publishArtifact({
+			artifactId: "diagnostic-after-stale-index",
+			scope,
+			layer: "diagnostic",
+			sourceArtifactIds: [],
+			createdAt: "2026-07-15T10:00:04.000Z",
+			representations: [{
+				role: "diagnostic",
+				mediaType: "text/plain",
+				fileName: "stale.txt",
+				content: "stale\n",
+			}],
+		});
+		writeFileSync(runArtifactIndexPath(cwd, "run-rebuilt-index"), staleIndex, "utf-8");
+
+		const restartedRecords = createRunRecords(cwd);
+		expect(restartedRecords.recoverInterruptedPublications("run-rebuilt-index")).toEqual([]);
+		expect(restartedRecords.listArtifacts("run-rebuilt-index").map((artifact) => artifact.artifactId)).toEqual([
+			"diagnostic-before-rebuild",
+			"diagnostic-after-rebuild",
+			"diagnostic-after-stale-index",
+		]);
+		expect(restartedRecords.readRun("run-rebuilt-index")?.artifactIndex).toBeUndefined();
 	});
 
 	it("fails artifact publication closed when a source representation is missing", () => {

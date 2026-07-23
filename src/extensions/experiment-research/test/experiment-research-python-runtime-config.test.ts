@@ -68,6 +68,11 @@ function createRuntimeConfig(enabled: boolean, port = "COM5"): Record<string, un
 		enabled,
 		pythonExecutable: "python",
 		pythonRoot: RAMAN_HARDWARE_PYTHON_DRIVER_PATH,
+		spectrum: {
+			xAxisKind: "raman_shift",
+			xAxisUnit: "cm^-1",
+			intensityUnit: "counts",
+		},
 		stage: {
 			resourceId: "stage-main",
 			kind: "stage",
