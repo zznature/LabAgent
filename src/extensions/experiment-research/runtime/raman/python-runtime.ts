@@ -623,6 +623,22 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 
 	return {
 		preflight: async (): Promise<RamanLivePreflightResult> => {
+			if (
+				resolvedConfig.spectrum?.xAxisKind !== "raman_shift" ||
+				resolvedConfig.spectrum.xAxisUnit !== "cm^-1" ||
+				typeof resolvedConfig.spectrum.intensityUnit !== "string" ||
+				resolvedConfig.spectrum.intensityUnit.trim().length === 0
+			) {
+				return {
+					preflightReady: false,
+					controlAvailable: false,
+					details: {
+						errorCode: "spectrum_semantics_unconfigured",
+						message:
+							"Live Raman canonical spectra require xAxisKind=raman_shift, xAxisUnit=cm^-1, and an explicit intensityUnit.",
+					},
+				};
+			}
 			const response = await daemon.request(
 				"preflight",
 				{

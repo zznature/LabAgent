@@ -16,6 +16,8 @@ import {
 } from "../store/layout.ts";
 import { appendJsonLine, readJsonFile, readJsonLines, writeJsonFileAtomic } from "../store/storage.ts";
 
+const ARTIFACT_INDEX_RENAME_RETRY_DELAYS_MS = [10, 25, 50];
+
 export interface RunObservationPoint {
 	row?: number;
 	col?: number;
@@ -52,6 +54,11 @@ export interface RunObservationSnapshot {
 		totalUnits: number;
 	};
 	units: UnitObservation[];
+	artifactIndex?: {
+		status: "degraded";
+		errorCode: "artifact_index_update_failed";
+		message: string;
+	};
 	heartbeatAt?: string;
 	errorState?: RuntimeError;
 	startedAt: string;
@@ -79,6 +86,12 @@ export type RunObservationChange =
 			type: "artifact_status_changed";
 			artifactId: string;
 			status: ArtifactLifecycleStatus;
+			timestamp: string;
+	  }
+	| {
+			type: "artifact_index_degraded";
+			errorCode: "artifact_index_update_failed";
+			message: string;
 			timestamp: string;
 	  };
 
@@ -383,24 +396,132 @@ export function createRunRecords(cwd: string): RunRecords {
 		return units;
 	}
 
-	function listIndexedArtifacts(indexPath: string, root: string, filter?: ArtifactFilter): ArtifactDescriptor[] {
-		const index = readJsonFile<ArtifactIndex>(indexPath);
-		if (!index) {
+	function readArtifactIndex(indexPath: string): ArtifactIndex | undefined {
+		try {
+			return readJsonFile<ArtifactIndex>(indexPath);
+		} catch {
+			return undefined;
+		}
+	}
+
+	function discoverArtifactDescriptors(artifactRoot: string): ArtifactDescriptor[] {
+		if (!existsSync(artifactRoot)) {
 			return [];
 		}
-		return index.artifacts.filter((entry) =>
-			(filter?.layer === undefined || entry.layer === filter.layer) &&
-			(filter?.profile === undefined || entry.profile === filter.profile) &&
-			(filter?.status === undefined || entry.status === filter.status) &&
-			(filter?.unitId === undefined || entry.unitId === filter.unitId) &&
-			(filter?.attemptId === undefined || entry.attemptId === filter.attemptId),
-		).map((entry) => {
-			const descriptor = readJsonFile<ArtifactDescriptor>(join(root, entry.descriptorPath));
-			if (!descriptor) {
-				throw new Error(`artifact descriptor missing: ${entry.artifactId}`);
+		const descriptors: ArtifactDescriptor[] = [];
+		const visit = (path: string): void => {
+			for (const entry of readdirSync(path, { withFileTypes: true })) {
+				const entryPath = join(path, entry.name);
+				if (entry.isDirectory()) {
+					if (!entry.name.endsWith(".staging") && !entry.name.endsWith(".recovery")) {
+						visit(entryPath);
+					}
+					continue;
+				}
+				if (entry.name !== "descriptor.json") {
+					continue;
+				}
+				const descriptor = readJsonFile<ArtifactDescriptor>(entryPath);
+				if (descriptor) {
+					descriptors.push(descriptor);
+				}
 			}
-			return descriptor;
-		});
+		};
+		visit(artifactRoot);
+		return descriptors.sort((left, right) =>
+			left.createdAt.localeCompare(right.createdAt) || left.artifactId.localeCompare(right.artifactId)
+		);
+	}
+
+	function matchesArtifactFilter(
+		candidate: Pick<ArtifactIndexEntry, "layer" | "profile" | "status" | "unitId" | "attemptId">,
+		filter?: ArtifactFilter,
+	): boolean {
+		return (filter?.layer === undefined || candidate.layer === filter.layer) &&
+			(filter?.profile === undefined || candidate.profile === filter.profile) &&
+			(filter?.status === undefined || candidate.status === filter.status) &&
+			(filter?.unitId === undefined || candidate.unitId === filter.unitId) &&
+			(filter?.attemptId === undefined || candidate.attemptId === filter.attemptId);
+	}
+
+	function filterArtifacts(descriptors: ArtifactDescriptor[], filter?: ArtifactFilter): ArtifactDescriptor[] {
+		return descriptors.filter((descriptor) => matchesArtifactFilter({
+			layer: descriptor.layer,
+			profile: descriptor.profile,
+			status: descriptor.status,
+			unitId: descriptor.scope.kind === "run" ? descriptor.scope.unitId : undefined,
+			attemptId: descriptor.scope.kind === "run" ? descriptor.scope.attemptId : undefined,
+		}, filter));
+	}
+
+	function toArtifactIndexEntry(root: string, descriptor: ArtifactDescriptor): ArtifactIndexEntry {
+		const artifactRoot = descriptor.scope.kind === "run"
+			? runArtifactRoot(
+					cwd,
+					descriptor.scope.runId,
+					descriptor.scope.unitId,
+					descriptor.scope.attemptId,
+					descriptor.artifactId,
+				)
+			: operatorArtifactRoot(cwd, descriptor.scope.operationId, descriptor.artifactId);
+		return {
+			artifactId: descriptor.artifactId,
+			layer: descriptor.layer,
+			profile: descriptor.profile,
+			status: descriptor.status,
+			unitId: descriptor.scope.kind === "run" ? descriptor.scope.unitId : undefined,
+			attemptId: descriptor.scope.kind === "run" ? descriptor.scope.attemptId : undefined,
+			descriptorPath: relative(root, join(artifactRoot, "descriptor.json")).replace(/\\/gu, "/"),
+		};
+	}
+
+	function writeArtifactIndex(indexPath: string, index: ArtifactIndex): void {
+		let retryIndex = 0;
+		while (true) {
+			try {
+				writeJsonFileAtomic(indexPath, index);
+				return;
+			} catch (cause) {
+				const retryable = cause instanceof Error &&
+					"code" in cause &&
+					cause.code === "EPERM" &&
+					"syscall" in cause &&
+					cause.syscall === "rename";
+				if (!retryable || retryIndex >= ARTIFACT_INDEX_RENAME_RETRY_DELAYS_MS.length) {
+					throw cause;
+				}
+				Atomics.wait(
+					new Int32Array(new SharedArrayBuffer(4)),
+					0,
+					0,
+					ARTIFACT_INDEX_RENAME_RETRY_DELAYS_MS[retryIndex] ?? 0,
+				);
+				retryIndex += 1;
+			}
+		}
+	}
+
+	function listIndexedArtifacts(
+		indexPath: string,
+		root: string,
+		filter?: ArtifactFilter,
+		rebuildFromDescriptors = false,
+	): ArtifactDescriptor[] {
+		const index = rebuildFromDescriptors ? undefined : readArtifactIndex(indexPath);
+		if (!index) {
+			return filterArtifacts(discoverArtifactDescriptors(join(root, "artifacts")), filter);
+		}
+		try {
+			return index.artifacts.filter((entry) => matchesArtifactFilter(entry, filter)).map((entry) => {
+				const descriptor = readJsonFile<ArtifactDescriptor>(join(root, entry.descriptorPath));
+				if (!descriptor) {
+					throw new Error(`artifact descriptor missing: ${entry.artifactId}`);
+				}
+				return descriptor;
+			});
+		} catch {
+			return filterArtifacts(discoverArtifactDescriptors(join(root, "artifacts")), filter);
+		}
 	}
 
 	function readCompleteRepresentation(
@@ -585,6 +706,17 @@ export function createRunRecords(cwd: string): RunRecords {
 					})),
 					updatedAt: change.timestamp,
 				};
+			} else if (change.type === "artifact_index_degraded") {
+				next = {
+					...current,
+					throughSequence: sequence,
+					artifactIndex: {
+						status: "degraded",
+						errorCode: change.errorCode,
+						message: change.message,
+					},
+					updatedAt: change.timestamp,
+				};
 			} else {
 				next = {
 					...current,
@@ -625,9 +757,8 @@ export function createRunRecords(cwd: string): RunRecords {
 				return [];
 			}
 			const recovered: ArtifactDescriptor[] = [];
-			const indexedArtifactIds = new Set(
-				(readJsonFile<ArtifactIndex>(runArtifactIndexPath(cwd, runId))?.artifacts ?? []).map((entry) => entry.artifactId),
-			);
+			const indexPath = runArtifactIndexPath(cwd, runId);
+			const existingIndex = readArtifactIndex(indexPath);
 			for (const unitEntry of readdirSync(unitsRoot, { withFileTypes: true })) {
 				if (!unitEntry.isDirectory()) continue;
 				const attemptsRoot = join(unitsRoot, unitEntry.name, "attempts");
@@ -636,28 +767,9 @@ export function createRunRecords(cwd: string): RunRecords {
 					if (!attemptEntry.isDirectory()) continue;
 					const attemptRoot = join(attemptsRoot, attemptEntry.name);
 					for (const artifactEntry of readdirSync(attemptRoot, { withFileTypes: true })) {
-						if (!artifactEntry.isDirectory() || artifactEntry.name.endsWith(".recovery")) continue;
+						if (!artifactEntry.isDirectory() || !artifactEntry.name.endsWith(".staging")) continue;
 						const interruptedRoot = join(attemptRoot, artifactEntry.name);
-						let intent: ArtifactPublicationIntent | undefined;
-						if (artifactEntry.name.endsWith(".staging")) {
-							intent = readJsonFile<ArtifactPublicationIntent>(join(interruptedRoot, "publication.json"));
-						} else if (!indexedArtifactIds.has(artifactEntry.name)) {
-							const unindexed = readJsonFile<ArtifactDescriptor>(join(interruptedRoot, "descriptor.json"));
-							if (unindexed) {
-								intent = {
-									schemaVersion: 1,
-									artifactId: unindexed.artifactId,
-									scope: unindexed.scope,
-									layer: unindexed.layer,
-									profile: unindexed.profile,
-									sourceArtifactIds: unindexed.sourceArtifactIds,
-									createdAt: unindexed.createdAt,
-									data: unindexed.data,
-								};
-							}
-						} else {
-							continue;
-						}
+						const intent = readJsonFile<ArtifactPublicationIntent>(join(interruptedRoot, "publication.json"));
 						if (!intent || intent.scope.kind !== "run" || intent.scope.runId !== runId) continue;
 						const finalRoot = runArtifactRoot(cwd, runId, intent.scope.unitId, intent.scope.attemptId, intent.artifactId);
 						const recoveryRoot = `${finalRoot}.recovery`;
@@ -680,35 +792,46 @@ export function createRunRecords(cwd: string): RunRecords {
 							},
 						};
 						writeJsonFileAtomic(join(finalRoot, "descriptor.json"), descriptor);
-						const throughSequence = this.applyRunChange(runId, {
+						this.applyRunChange(runId, {
 							type: "artifact_status_changed",
 							artifactId: descriptor.artifactId,
 							status: "failed",
 							timestamp: descriptor.createdAt,
-						}).throughSequence;
-						const indexPath = runArtifactIndexPath(cwd, runId);
-						const currentIndex = readJsonFile<ArtifactIndex>(indexPath) ?? {
-							schemaVersion: 1,
-							scopeId: runId,
-							throughSequence: 0,
-							artifacts: [],
-						};
-						writeJsonFileAtomic(indexPath, {
-							...currentIndex,
-							throughSequence,
-							artifacts: currentIndex.artifacts.concat({
-								artifactId: descriptor.artifactId,
-								layer: descriptor.layer,
-								profile: descriptor.profile,
-								status: "failed",
-								unitId: intent.scope.unitId,
-								attemptId: intent.scope.attemptId,
-								descriptorPath: relative(runRoot(cwd, runId), join(finalRoot, "descriptor.json")).replace(/\\/gu, "/"),
-							}),
 						});
 						recovered.push(descriptor);
-						indexedArtifactIds.add(descriptor.artifactId);
 					}
+				}
+			}
+			const root = runRoot(cwd, runId);
+			const descriptors = discoverArtifactDescriptors(join(root, "artifacts"));
+			const rebuiltEntries = descriptors.map((descriptor) => toArtifactIndexEntry(root, descriptor));
+			const existingEntries = new Map(existingIndex?.artifacts.map((entry) => [entry.artifactId, entry]));
+			const indexMatchesDescriptors = existingIndex !== undefined &&
+				existingIndex.artifacts.length === rebuiltEntries.length &&
+				rebuiltEntries.every((entry) => {
+					const existing = existingEntries.get(entry.artifactId);
+					return existing?.layer === entry.layer &&
+						existing.profile === entry.profile &&
+						existing.status === entry.status &&
+						existing.unitId === entry.unitId &&
+						existing.attemptId === entry.attemptId &&
+						existing.descriptorPath === entry.descriptorPath;
+				});
+			if (!indexMatchesDescriptors || recovered.length > 0) {
+				try {
+					writeArtifactIndex(indexPath, {
+						schemaVersion: 1,
+						scopeId: runId,
+						throughSequence: this.readRun(runId)?.throughSequence ?? 0,
+						artifacts: rebuiltEntries,
+					});
+				} catch (cause) {
+					this.applyRunChange(runId, {
+						type: "artifact_index_degraded",
+						errorCode: "artifact_index_update_failed",
+						message: cause instanceof Error ? cause.message : String(cause),
+						timestamp: new Date().toISOString(),
+					});
 				}
 			}
 			return recovered;
@@ -876,34 +999,48 @@ export function createRunRecords(cwd: string): RunRecords {
 					}).throughSequence
 				: 0;
 			const root = scope.kind === "run" ? runRoot(cwd, scope.runId) : operatorOperationRoot(cwd, scope.operationId);
-			const descriptorPath = relative(root, join(finalRoot, "descriptor.json")).replace(/\\/gu, "/");
 			const indexPath = scope.kind === "run"
 				? runArtifactIndexPath(cwd, scope.runId)
 				: operatorArtifactIndexPath(cwd, scope.operationId);
-			const currentIndex = readJsonFile<ArtifactIndex>(indexPath) ?? {
-				schemaVersion: 1,
+			const indexedArtifacts = readArtifactIndex(indexPath);
+			const currentIndex = indexedArtifacts ?? {
+				schemaVersion: 1 as const,
 				scopeId: scope.kind === "run" ? scope.runId : scope.operationId,
 				throughSequence: 0,
-				artifacts: [],
+				artifacts: discoverArtifactDescriptors(join(root, "artifacts"))
+					.map((candidate) => toArtifactIndexEntry(root, candidate)),
 			};
-			const entry: ArtifactIndexEntry = {
-				artifactId: input.artifactId,
-				layer: input.layer,
-				profile: input.profile,
-				status: descriptor.status,
-				unitId: scope.kind === "run" ? scope.unitId : undefined,
-				attemptId: scope.kind === "run" ? scope.attemptId : undefined,
-				descriptorPath,
-			};
-			writeJsonFileAtomic(indexPath, {
-				...currentIndex,
-				throughSequence,
-				artifacts: currentIndex.artifacts.concat(entry),
-			});
+			const entry = toArtifactIndexEntry(root, descriptor);
+			const entries = new Map(currentIndex.artifacts.map((artifact) => [artifact.artifactId, artifact]));
+			entries.set(entry.artifactId, entry);
+			try {
+				writeArtifactIndex(indexPath, {
+					...currentIndex,
+					throughSequence,
+					artifacts: [...entries.values()],
+				});
+			} catch (cause) {
+				if (scope.kind === "run") {
+					this.applyRunChange(scope.runId, {
+						type: "artifact_index_degraded",
+						errorCode: "artifact_index_update_failed",
+						message: cause instanceof Error ? cause.message : String(cause),
+						timestamp: new Date().toISOString(),
+					});
+				} else {
+					throw cause;
+				}
+			}
 			return descriptor;
 		},
 		listArtifacts(runId, filter) {
-			return listIndexedArtifacts(runArtifactIndexPath(cwd, runId), runRoot(cwd, runId), filter);
+			const observation = this.readRun(runId);
+			return listIndexedArtifacts(
+				runArtifactIndexPath(cwd, runId),
+				runRoot(cwd, runId),
+				filter,
+				observation?.artifactIndex?.status === "degraded",
+			);
 		},
 		readArtifact(runId, artifactId) {
 			return this.listArtifacts(runId).find((artifact) => artifact.artifactId === artifactId);

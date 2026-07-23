@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export function ensureParentDirectory(path: string): void {
@@ -12,9 +13,13 @@ export function writeJsonFile(path: string, value: unknown): void {
 
 export function writeJsonFileAtomic(path: string, value: unknown): void {
 	ensureParentDirectory(path);
-	const temporaryPath = `${path}.tmp`;
-	writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
-	renameSync(temporaryPath, path);
+	const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+	try {
+		writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+		renameSync(temporaryPath, path);
+	} finally {
+		rmSync(temporaryPath, { force: true });
+	}
 }
 
 export function writeNewJsonFile(path: string, value: unknown): void {

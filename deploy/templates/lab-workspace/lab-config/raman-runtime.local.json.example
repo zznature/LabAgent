@@ -5,5 +5,10 @@
 		"config": {
 			"port": "COM17"
 		}
+	},
+	"spectrum": {
+		"xAxisKind": "raman_shift",
+		"xAxisUnit": "cm^-1",
+		"intensityUnit": "counts"
 	}
 }

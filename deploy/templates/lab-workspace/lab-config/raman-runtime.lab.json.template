@@ -48,6 +48,11 @@
 		"leasePolicy": "exclusive",
 		"simulationAvailable": false
 	},
+	"spectrum": {
+		"xAxisKind": "raman_shift",
+		"xAxisUnit": "cm^-1",
+		"intensityUnit": "counts"
+	},
 	"preflight": {
 		"requirePythonRoot": true,
 		"requireBridgeDirs": false,

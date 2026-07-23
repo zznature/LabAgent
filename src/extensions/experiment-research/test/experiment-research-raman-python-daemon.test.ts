@@ -50,6 +50,10 @@ rl.on("line", (raw) => {
       payload.snr = 12;
       payload.saturated = false;
       payload.targetPeakBaselineRatio = 1.8;
+      payload.canonicalSpectrum = {
+        xAxis: { kind: req.payload.xAxisKind, unit: req.payload.xAxisUnit, values: [100, 200] },
+        yAxis: { kind: "intensity", unit: req.payload.intensityUnit, values: [12, 18] }
+      };
     } else if (req.action === "autofocus") {
       payload.status = "ok";
       payload.zBestUm = 260;
@@ -116,6 +120,11 @@ function createConfig(pythonRoot: string): RamanPythonRuntimeConfig {
 		pythonExecutable: process.execPath,
 		pythonRoot,
 		daemon: { idleShutdownMs: 60_000 },
+		spectrum: {
+			xAxisKind: "raman_shift",
+			xAxisUnit: "cm^-1",
+			intensityUnit: "counts",
+		},
 		stage: {
 			resourceId: "stage-main",
 			kind: "stage",
@@ -168,6 +177,26 @@ function createDaemon(pythonRoot: string, idleShutdownMs = 60_000): RamanPythonD
 }
 
 describe("experiment research Raman Python daemon transport", () => {
+	it("rejects live preflight when canonical spectrum semantics are not configured", async () => {
+		const root = createDriverRoot();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-exp-daemon-cwd-"));
+		tempRoots.push(cwd);
+		liveCwds.push(cwd);
+		const config = createConfig(root);
+		config.spectrum = undefined;
+		const runtime = createRamanPythonRuntime(cwd, config);
+
+		const preflight = await runtime.preflight();
+
+		expect(preflight).toMatchObject({
+			preflightReady: false,
+			controlAvailable: false,
+			details: {
+				errorCode: "spectrum_semantics_unconfigured",
+			},
+		});
+	});
+
 	it("rejects a daemon with a stale driver revision", async () => {
 		const root = createDriverRoot(FAKE_DAEMON_SOURCE.replace('payload.driverVersion = "raman-python-v1"', 'payload.driverVersion = "raman-python-v0"'));
 		const cwd = mkdtempSync(join(tmpdir(), "pi-exp-daemon-cwd-"));
@@ -255,6 +284,10 @@ describe("experiment research Raman Python daemon transport", () => {
 		expect(spectrum.status).toBe("success");
 		expect(spectrum.artifacts.map((artifact) => artifact.kind).sort()).toEqual(["spectrum", "spectrum-plot"]);
 		expect(spectrum.payload?.snr).toBe(12);
+		expect(spectrum.payload?.canonicalSpectrum).toEqual({
+			xAxis: { kind: "raman_shift", unit: "cm^-1", values: [100, 200] },
+			yAxis: { kind: "intensity", unit: "counts", values: [12, 18] },
+		});
 
 		const autofocus = await runtime.autofocus.runSingle({
 			action: "autofocus.run_single",
