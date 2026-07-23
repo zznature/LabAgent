@@ -478,7 +478,8 @@ function configCandidates(cwd: string): RamanPythonRuntimeConfigCandidate[] {
 }
 
 function readConfigRecord(path: string): Record<string, unknown> {
-	const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+	const raw = readFileSync(path, "utf-8");
+	const parsed: unknown = JSON.parse(raw.replace(/^\uFEFF/u, ""));
 	if (!isRecord(parsed)) {
 		throw new Error(`Invalid Raman Python runtime config at ${path}: config must be a JSON object.`);
 	}
