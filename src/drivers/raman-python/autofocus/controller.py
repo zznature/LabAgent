@@ -216,7 +216,12 @@ class AutofocusController:
         on_progress: Optional[Callable[[ScoredZPoint], None]] = None,
     ) -> FocusResult:
         """Run the lab-optimized fixed-range autofocus and adapt it to FocusResult."""
-        controller = FixedRangeAutofocusController(self.stage, self.frames, self._strategy)
+        controller = FixedRangeAutofocusController(
+            self.stage,
+            self.frames,
+            self._strategy,
+            metric_name=params.metric_name,
+        )
         try:
             result = controller.run(roi, params, on_progress=on_progress)
         except FrameTimeoutError as e:
@@ -226,7 +231,7 @@ class AutofocusController:
         except Exception as e:
             return self._result_error(FocusStatus.NO_PEAK, f"Fixed-range scan: {e}")
 
-        confidence, diagnostics = self._fixed_range_confidence(result)
+        confidence, diagnostics = self._fixed_range_confidence(result, params.confidence_method)
         quality = self._quality_from_confidence(confidence)
         recommendation = self._recommendation_from_diagnostics(diagnostics)
         status = FocusStatus.OK if confidence >= 0.2 else FocusStatus.LOW_CONFIDENCE
@@ -252,7 +257,18 @@ class AutofocusController:
         )
 
     @staticmethod
-    def _fixed_range_confidence(result: FixedRangeAutofocusResult) -> tuple[float, dict[str, float | str]]:
+    def _fixed_range_confidence(
+        result: FixedRangeAutofocusResult,
+        method: str = "curve_quality",
+    ) -> tuple[float, dict[str, float | str]]:
+        if method == "legacy_min_gate":
+            confidence, diagnostics = AutofocusController._fixed_range_legacy_confidence(result)
+            diagnostics["confidenceMethod"] = "legacy_min_gate"
+            return confidence, diagnostics
+        return AutofocusController._fixed_range_curve_quality_confidence(result)
+
+    @staticmethod
+    def _fixed_range_legacy_confidence(result: FixedRangeAutofocusResult) -> tuple[float, dict[str, float | str]]:
         scores = [point.score for point in result.points]
         if len(scores) < 3:
             return 0.0, {"reason": "too_few_points", "pointCount": float(len(scores))}
@@ -319,6 +335,120 @@ class AutofocusController:
         }
 
     @staticmethod
+    def _fixed_range_curve_quality_confidence(result: FixedRangeAutofocusResult) -> tuple[float, dict[str, float | str]]:
+        scan_points = result.points
+        scores = [point.score for point in scan_points]
+        verification_scores = [result.final_verification.score]
+        if result.prediction_verification is not None:
+            verification_scores.append(result.prediction_verification.score)
+        if len(scores) < 3:
+            return 0.0, {
+                "confidenceMethod": "curve_quality",
+                "reason": "too_few_points",
+                "scanPointCount": float(len(scores)),
+                "verificationPointCount": float(len(verification_scores)),
+            }
+
+        best_index = max(range(len(scores)), key=lambda index: scores[index])
+        best_score = scores[best_index]
+        median_score = statistics.median(scores)
+        if not math.isfinite(best_score) or best_score <= 1e-9:
+            return 0.0, {
+                "confidenceMethod": "curve_quality",
+                "reason": "non_positive_best_score",
+                "scanPointCount": float(len(scores)),
+                "verificationPointCount": float(len(verification_scores)),
+                "bestIndex": float(best_index),
+                "bestScore": float(best_score),
+                "medianScore": float(median_score),
+            }
+
+        peak_prominence = max(0.0, min(1.0, (best_score - median_score) / best_score))
+        sorted_scores = sorted(scores, reverse=True)
+        top_separation = (
+            max(0.0, min(1.0, (sorted_scores[0] - sorted_scores[1]) / sorted_scores[0]))
+            if len(sorted_scores) > 1 and sorted_scores[0] > 1e-9
+            else 0.0
+        )
+        center = (len(scores) - 1) / 2.0
+        max_center_distance = max(center, 1.0)
+        peak_centeredness = max(0.0, 1.0 - abs(best_index - center) / max_center_distance)
+        rising_consistency = AutofocusController._monotonic_consistency(scores[:best_index + 1], rising=True)
+        falling_consistency = AutofocusController._monotonic_consistency(scores[best_index:], rising=False)
+        trend_consistency = (rising_consistency + falling_consistency) / 2.0
+        verification_ratio = max(
+            0.0,
+            min(1.0, statistics.median(verification_scores) / best_score),
+        )
+        selected = result.selected or result.best
+        final_reproducibility = max(
+            0.0,
+            min(1.0, result.final_verification.score / max(selected.score, 1e-9)),
+        )
+
+        confidence = max(
+            0.0,
+            min(
+                1.0,
+                0.25 * peak_prominence
+                + 0.20 * peak_centeredness
+                + 0.20 * trend_consistency
+                + 0.08 * verification_ratio
+                + 0.07 * final_reproducibility
+                + 0.20 * max(0.0, min(1.0, top_separation * 4.0)),
+            ),
+        )
+        edge_peak = best_index == 0 or best_index == len(scores) - 1
+        if edge_peak:
+            confidence = min(confidence, 0.35)
+        return confidence, {
+            "confidenceMethod": "curve_quality",
+            "edgePeak": "true" if edge_peak else "false",
+            "peakProminence": peak_prominence,
+            "topSeparation": top_separation,
+            "peakCenteredness": peak_centeredness,
+            "risingConsistency": rising_consistency,
+            "fallingConsistency": falling_consistency,
+            "trendConsistency": trend_consistency,
+            "verificationRatio": verification_ratio,
+            "finalReproducibility": final_reproducibility,
+            "bestIndex": float(best_index),
+            "scanPointCount": float(len(scores)),
+            "verificationPointCount": float(len(verification_scores)),
+            "bestScore": best_score,
+            "medianScore": median_score,
+            "peakEstimateSource": result.peak.source,
+            "peakEstimateZUm": result.peak.z_um,
+            "sampledBestZUm": result.best.actual_z_um,
+            "sampledBestScore": result.best.score,
+            "selectedSource": result.selection_source,
+            "selectedZUm": selected.actual_z_um,
+            "selectedScore": selected.score,
+            "predictionVerificationZUm": (
+                result.prediction_verification.actual_z_um
+                if result.prediction_verification is not None
+                else float("nan")
+            ),
+            "predictionVerificationScore": (
+                result.prediction_verification.score
+                if result.prediction_verification is not None
+                else float("nan")
+            ),
+        }
+
+    @staticmethod
+    def _monotonic_consistency(scores: list[float], *, rising: bool) -> float:
+        if len(scores) < 2:
+            return 1.0
+        matches = 0
+        for index in range(1, len(scores)):
+            previous = scores[index - 1]
+            current = scores[index]
+            if (current >= previous and rising) or (current <= previous and not rising):
+                matches += 1
+        return matches / float(len(scores) - 1)
+
+    @staticmethod
     def _median_spacing_um(points: list[ScoredZPoint]) -> float:
         spacings = [
             abs(points[index].actual_z_um - points[index - 1].actual_z_um)
@@ -358,7 +488,7 @@ class FixedRangeAutofocusController:
         stage: ZStage,
         frames: FrameProvider,
         strategy: Optional[FocusStrategy] = None,
-        metric_name: str = "labspec_spot_compactness",
+        metric_name: str = "labspec_center_spot_focus",
     ) -> None:
         self.stage = stage
         self.frames = frames
