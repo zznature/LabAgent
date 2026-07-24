@@ -59,6 +59,7 @@ export {
 	getRamanLiveRuntime,
 	clearRamanLiveRuntime,
 	runLiveRamanUnit,
+	validateFocusPlaneArtifactReference,
 	validateRuntimeAnchorState,
 	type RamanLivePreflightResult,
 	type RamanStageRuntime,

@@ -138,7 +138,7 @@ async function executeUnit(
 	options?: LiveRamanUnitOptions,
 ): Promise<ManagedUnitResult> {
 	if (activeRun.mode === "simulation") {
-		return runSimulationUnit(activeRun.cwd, activeRun.runId, unit, activeRun.controls ?? {}, currentState);
+		return runSimulationUnit(activeRun.cwd, activeRun.runId, unit, activeRun.spec, activeRun.controls ?? {}, currentState);
 	}
 
 	const runtime = getRamanLiveRuntime(activeRun.cwd);

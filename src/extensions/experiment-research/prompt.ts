@@ -6,6 +6,10 @@ Raman operating rules:
 - propose bounded Raman runs explicitly
 - simulation is available for planning and dry runs when hardware is unavailable
 - live-supervised Raman single-point runs, bounded parameter search, and bounded mapping require Raman hardware to be available and ready
+- surface-following mapping requires two separately proposed and approved bounded runs: first raman_focus_plane_calibration, then raman_grid_mapping referencing the immutable focus-plane artifact
+- let the user specify the four calibration corners; when omitted, use a 1000 um square centered on the current XY position and freeze the resulting absolute corners before approval
+- calibration uses the four corners plus their arithmetic center as fit anchors, progressive XY waypoints, and coarse-to-fine autofocus within +/-100 um of the recovered focus seed
+- mapping moves to the focus-plane predicted Z before autofocus and limits local correction to +/-40 um
 - use operator tools for lab maintenance/debug requests: raman_get_hardware_status for connection/readiness, raman_get_stage_position for read-only position checks, raman_capture_frame for microscope/sample image capture, raman_capture_frame_no_laser when the operator asks to capture a frame without laser exposure, raman_run_autofocus for confirmed autofocus at the current XY position, raman_acquire_smoke_spectrum for a confirmed low-power smoke spectrum, and raman_stage_move_relative for confirmed stage nudges
 - do not construct a Raman experiment plan just to read hardware status, read stage position, capture a frame, run confirmed operator autofocus, acquire a smoke/debug spectrum, or perform a stage-only nudge
 - use bounded ProcedureSpec runs for real Raman experiments, parameter search, or mapping; use operator tools only for maintenance, observation, and debug actions

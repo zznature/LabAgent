@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
+import {
+	defaultFocusPlaneCorners,
+	focusPlaneCenter,
+	validateFocusPlaneCorners,
+	type FocusPlaneCorner,
+} from "./focus-plane.ts";
 import type {
 	ExperimentIntent,
 	ExecutionUnit,
@@ -69,6 +75,10 @@ interface AutofocusInput {
 		interpolatePeak?: boolean;
 		finalVerificationFramesPerZ?: number;
 		metricName?: string;
+		strategy?: "fixed_absolute" | "calibration_coarse_to_fine" | "mapping_local_correction";
+		coarseStepUm?: number;
+		fineHalfRangeUm?: number;
+		fineStepUm?: number;
 	};
 }
 
@@ -105,12 +115,30 @@ export interface GridMappingBuilderInput extends BaseProcedureBuilderInput {
 		pitchYUm: number;
 		order?: "row_major" | "snake";
 	};
+	focusPlane?: {
+		calibrationRunId: string;
+		artifactId: string;
+		checksum: string;
+		a: number;
+		b: number;
+		c: number;
+		validRegion: FocusPlaneCorner[];
+	};
+	focusPlaneDecision?: "user_declined";
+}
+
+export interface FocusPlaneCalibrationBuilderInput extends BaseProcedureBuilderInput {
+	procedureId: "raman_focus_plane_calibration";
+	currentPosition: { xUm: number; yUm: number; zUm: number };
+	corners?: Array<{ xUm: number; yUm: number }>;
+	maxXySpanUm?: number;
 }
 
 export type ProcedureSpecBuilderInput =
 	| SinglePointProbeBuilderInput
 	| ParameterSearchBuilderInput
-	| GridMappingBuilderInput;
+	| GridMappingBuilderInput
+	| FocusPlaneCalibrationBuilderInput;
 
 const PER_ACTION_RUNTIME_MS: Record<SemanticStep["kind"], number> = {
 	move_to_point: 2_000,
@@ -132,6 +160,10 @@ function defaultActions(): SemanticStep[] {
 	];
 }
 
+function calibrationActions(): SemanticStep[] {
+	return [{ kind: "move_to_point" }, { kind: "autofocus" }, { kind: "capture_frame", laserOff: true }];
+}
+
 function toResourceRefs(resources: RamanResourceBindings): ResourceRef[] {
 	return [
 		{ resourceId: resources.stageResourceId, role: "stage" },
@@ -141,9 +173,21 @@ function toResourceRefs(resources: RamanResourceBindings): ResourceRef[] {
 }
 
 function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
+	const strategy =
+		input.procedureId === "raman_focus_plane_calibration"
+			? "calibration_coarse_to_fine"
+			: input.procedureId === "raman_grid_mapping" && input.focusPlane
+				? "mapping_local_correction"
+				: input.autofocus.params?.strategy;
 	return {
 		raman: {
-			autofocus: input.autofocus,
+			autofocus: {
+				...input.autofocus,
+				params: {
+					...input.autofocus.params,
+					strategy,
+				},
+			},
 			acquisition: input.acquisition,
 			parameterSearch: input.procedureId === "raman_parameter_search" ? input.parameterSearch : undefined,
 		},
@@ -152,11 +196,57 @@ function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
 
 function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 	if (input.procedureId === "raman_grid_mapping") {
+		if (!input.focusPlane && input.focusPlaneDecision !== "user_declined") {
+			throw new Error(
+				"Mapping requires focus-plane calibration by default. Supply focusPlane or record an explicit user_declined decision.",
+			);
+		}
+		if (input.focusPlaneDecision === "user_declined" && input.grid.origin.zUm === undefined) {
+			throw new Error("Uncorrected mapping requires an explicit fixed grid origin zUm.");
+		}
 		return {
 			kind: "grid_scan",
 			grid: input.grid,
+			surfaceCorrection: input.focusPlane
+				? {
+						kind: "focus_plane",
+						calibrationRunId: input.focusPlane.calibrationRunId,
+						artifactId: input.focusPlane.artifactId,
+						checksum: input.focusPlane.checksum,
+						coefficients: {
+							a: input.focusPlane.a,
+							b: input.focusPlane.b,
+							c: input.focusPlane.c,
+						},
+						validRegion: validateFocusPlaneCorners(input.focusPlane.validRegion),
+						localAutofocusHalfRangeUm: 40,
+					}
+				: { kind: "disabled", reason: "user_declined" },
 			perPoint: defaultActions(),
 			interPointDelayMs: input.interPointDelayMs,
+		};
+	}
+
+	if (input.procedureId === "raman_focus_plane_calibration") {
+		const corners = input.corners
+			? validateFocusPlaneCorners(
+					input.corners.map((corner, index) => ({
+						...corner,
+						anchorId: `corner_${index + 1}` as FocusPlaneCorner["anchorId"],
+					})),
+				)
+			: defaultFocusPlaneCorners(input.currentPosition);
+		const center = focusPlaneCenter(corners);
+		return {
+			kind: "focus_plane_calibration",
+			seedZUm: input.currentPosition.zUm,
+			startPosition: { xUm: input.currentPosition.xUm, yUm: input.currentPosition.yUm },
+			anchors: {
+				corners,
+				center: { anchorId: "center", ...center },
+			},
+			maxXySpanUm: input.maxXySpanUm ?? 250,
+			perPoint: calibrationActions(),
 		};
 	}
 
@@ -211,6 +301,9 @@ function actionRuntimeMs(spec: ProcedureSpec, actionKind: SemanticStep["kind"]):
 }
 
 function classifyLaserRisk(spec: ProcedureSpec): ProposalRisk | undefined {
+	if (spec.procedureId === "raman_focus_plane_calibration") {
+		return undefined;
+	}
 	const requestedPower = spec.domain.raman.acquisition.laserPowerPercent;
 	const maxPower = spec.limits.maxLaserPowerPercent;
 	if (maxPower !== undefined && requestedPower > maxPower) {
@@ -328,6 +421,21 @@ export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedurePropos
 			code: "multi_point_mapping",
 			message: "This mapping run will execute repeated motion and Raman acquisition across the approved grid.",
 		});
+		if (spec.plan.surfaceCorrection?.kind === "disabled") {
+			risks.push({
+				level: "confirm_required",
+				code: "focus_plane_correction_declined",
+				message: "The user explicitly declined focus-plane correction; this mapping run will use the planned fixed Z values.",
+			});
+		}
+	}
+
+	if (spec.plan.kind === "focus_plane_calibration") {
+		risks.push({
+			level: "confirm_required",
+			code: "focus_plane_calibration",
+			message: "This calibration run will execute progressive XY motion and coarse-to-fine autofocus within a +/-100 um Z envelope.",
+		});
 	}
 
 	if (spec.procedureId === "raman_parameter_search") {
@@ -368,5 +476,7 @@ export function procedureDisplayName(procedureId: ProcedureId): string {
 			return "bounded Raman parameter search";
 		case "raman_grid_mapping":
 			return "bounded Raman grid mapping";
+		case "raman_focus_plane_calibration":
+			return "bounded Raman focus-plane calibration";
 	}
 }

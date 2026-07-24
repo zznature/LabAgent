@@ -176,6 +176,7 @@ docs freeze
 - [x] 支持的 plan kinds：
   - [x] `grid_scan`
   - [x] `point_list`
+  - [x] `focus_plane_calibration`
 - [x] 支持的 semantic steps：
   - [x] `move_to_point`
   - [x] `autofocus`
@@ -254,6 +255,7 @@ docs freeze
 - [x] 支持：
   - [x] `point_list -> point units`
   - [x] `grid_scan -> point units`
+  - [x] `focus_plane_calibration -> progressive waypoint + five anchor point units`
 - [x] 每个 unit 生成：
   - [x] `unitId`
   - [x] `index`
@@ -385,6 +387,7 @@ docs freeze
   - [x] `raman_single_point_probe`
   - [x] `raman_parameter_search`
   - [x] `raman_grid_mapping`
+  - [x] `raman_focus_plane_calibration`
 - [x] proposal 输出包含：
   - [x] risks
   - [x] limits
@@ -594,6 +597,25 @@ docs freeze
 - [x] mapping 不会自动扩大 grid 或自动改参数
 
 > 注：mapping `perPoint` 在 MVP 中不含 `apply_xy_correction`（见 Open issues）。
+
+### Focus-plane Z correction increment
+
+- [x] calibration 与 mapping 是两个独立 proposal、approval 和 frozen ProcedureSpec
+- [x] 新 mapping proposal 默认要求校准 artifact；无校正 mapping 必须记录用户明确拒绝
+- [x] 用户可指定四角；缺省为提案时当前位置中心的 1000 µm 正方形
+- [x] 四角必须互异并组成四顶点凸四边形，center 为算术中心
+- [x] compiler 从冻结的当前 XY 开始，按 `maxXySpanUm` 生成有限 progressive XY waypoints
+- [x] calibration 禁止 `stoppingRules.maxUnits` 截断最终 anchor / model artifact
+- [x] 只使用四角加中心的五个 accepted autofocus 结果拟合 `z = a*x + b*y + c`
+- [x] calibration 使用以已恢复 Z 为中心的 ±100 µm coarse-to-fine autofocus
+- [x] calibration simulation 与 live runtime 都发布 `raman-focus-plane` artifact
+- [x] artifact 包含五点 evidence、模型、有效区域、run/spec provenance 和 SHA-256
+- [x] mapping spec 冻结 calibration run ID、artifact ID、checksum、系数和有效区域
+- [x] mapping compiler 拒绝有效凸区域外点，并为每点计算 Predicted Focus Z
+- [x] mapping runtime 每个 unit 验证跨 run artifact 完整性
+- [x] mapping 先移动到 Predicted Focus Z，再执行固定 ±40 µm local correction
+- [x] corrected mapping compiler 强制 `move_to_point -> autofocus -> acquire_spectrum` 的唯一动作顺序
+- [x] compiler/preflight 在审批前检查初始 calibration 窗口和全部 mapping 窗口；runtime 对按已接受焦点动态恢复的每个 calibration 窗口在 motion 前执行 hard-limit 检查
 
 ### Exit Criteria
 

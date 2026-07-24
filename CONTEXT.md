@@ -67,3 +67,19 @@ _Avoid_: autonomous run, unattended run
 **Preflight**:
 The checks performed before starting a run to decide whether the ProcedureSpec, resources, and current lab state are ready for execution.
 _Avoid_: validation, approval
+
+**Focus-Plane Calibration Run**:
+A separately approved Bounded Run that freezes four corner anchors plus their arithmetic center, follows finite progressive XY waypoints, autofocuses within a ±100 µm coarse-to-fine envelope, and publishes one immutable Raman Focus-Plane Artifact.
+_Avoid_: mapping warm-up, hidden pre-scan
+
+**Raman Focus-Plane Artifact**:
+The immutable calibration evidence and fitted model `z = a*x + b*y + c`, identified across runs by calibration run ID, artifact ID, and checksum.
+_Avoid_: mutable calibration state, daemon memory
+
+**Predicted Focus Z**:
+The Z coordinate computed from an approved Raman Focus-Plane Artifact for a mapping XY point and frozen into its ExecutionUnit before motion.
+_Avoid_: autofocus result, guessed Z
+
+**Local Focus Correction**:
+The mapping-time autofocus search restricted to ±40 µm around Predicted Focus Z.
+_Avoid_: recalibration, global focus search

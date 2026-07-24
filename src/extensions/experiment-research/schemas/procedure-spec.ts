@@ -135,6 +135,16 @@ export const RamanAutofocusSchema = Type.Object(
 					interpolatePeak: Type.Optional(Type.Boolean()),
 					finalVerificationFramesPerZ: Type.Optional(Type.Integer({ minimum: 1 })),
 					metricName: Type.Optional(Type.String({ minLength: 1 })),
+					strategy: Type.Optional(
+						Type.Union([
+							Type.Literal("fixed_absolute"),
+							Type.Literal("calibration_coarse_to_fine"),
+							Type.Literal("mapping_local_correction"),
+						]),
+					),
+					coarseStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+					fineHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+					fineStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 				},
 				{ additionalProperties: false },
 			),
@@ -210,8 +220,89 @@ export const GridScanPlanSchema = Type.Object(
 			},
 			{ additionalProperties: false },
 		),
+		surfaceCorrection: Type.Optional(
+			Type.Union([
+				Type.Object(
+				{
+					kind: Type.Literal("focus_plane"),
+					calibrationRunId: Type.String({ minLength: 1 }),
+					artifactId: Type.String({ minLength: 1 }),
+					checksum: Type.String({ minLength: 1 }),
+					coefficients: Type.Object(
+						{
+							a: Type.Number(),
+							b: Type.Number(),
+							c: Type.Number(),
+						},
+						{ additionalProperties: false },
+					),
+					validRegion: Type.Array(
+						Type.Object(
+							{
+								anchorId: Type.String({ minLength: 1 }),
+								xUm: Type.Number(),
+								yUm: Type.Number(),
+							},
+							{ additionalProperties: false },
+						),
+						{ minItems: 4, maxItems: 4 },
+					),
+					localAutofocusHalfRangeUm: Type.Literal(40),
+				},
+				{ additionalProperties: false },
+				),
+				Type.Object(
+					{
+						kind: Type.Literal("disabled"),
+						reason: Type.Literal("user_declined"),
+					},
+					{ additionalProperties: false },
+				),
+			]),
+		),
 		perPoint: Type.Array(SemanticStepSchema, { minItems: 1 }),
 		interPointDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
+	},
+	{ additionalProperties: false },
+);
+
+export const FocusPlaneCalibrationPlanSchema = Type.Object(
+	{
+		kind: Type.Literal("focus_plane_calibration"),
+		seedZUm: Type.Number(),
+		startPosition: Type.Object(
+			{
+				xUm: Type.Number(),
+				yUm: Type.Number(),
+			},
+			{ additionalProperties: false },
+		),
+		anchors: Type.Object(
+			{
+				corners: Type.Array(
+					Type.Object(
+						{
+							anchorId: Type.String({ minLength: 1 }),
+							xUm: Type.Number(),
+							yUm: Type.Number(),
+						},
+						{ additionalProperties: false },
+					),
+					{ minItems: 4, maxItems: 4 },
+				),
+				center: Type.Object(
+					{
+						anchorId: Type.Literal("center"),
+						xUm: Type.Number(),
+						yUm: Type.Number(),
+					},
+					{ additionalProperties: false },
+				),
+			},
+			{ additionalProperties: false },
+		),
+		maxXySpanUm: Type.Number({ exclusiveMinimum: 0 }),
+		perPoint: Type.Array(SemanticStepSchema, { minItems: 1 }),
 	},
 	{ additionalProperties: false },
 );
@@ -234,12 +325,18 @@ export const CurrentPositionPlanSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-export const ProcedurePlanSchema = Type.Union([GridScanPlanSchema, PointListPlanSchema, CurrentPositionPlanSchema]);
+export const ProcedurePlanSchema = Type.Union([
+	GridScanPlanSchema,
+	PointListPlanSchema,
+	CurrentPositionPlanSchema,
+	FocusPlaneCalibrationPlanSchema,
+]);
 
 export const ProcedureIdSchema = Type.Union([
 	Type.Literal("raman_single_point_probe"),
 	Type.Literal("raman_parameter_search"),
 	Type.Literal("raman_grid_mapping"),
+	Type.Literal("raman_focus_plane_calibration"),
 ]);
 
 export const ProcedureSpecSchema = Type.Object(
@@ -280,6 +377,7 @@ export type ProcedureDomain = Static<typeof ProcedureDomainSchema>;
 export type GridScanPlan = Static<typeof GridScanPlanSchema>;
 export type PointListPlan = Static<typeof PointListPlanSchema>;
 export type CurrentPositionPlan = Static<typeof CurrentPositionPlanSchema>;
+export type FocusPlaneCalibrationPlan = Static<typeof FocusPlaneCalibrationPlanSchema>;
 export type ProcedurePlan = Static<typeof ProcedurePlanSchema>;
 export type ProcedureId = Static<typeof ProcedureIdSchema>;
 export type ProcedureSpec = Static<typeof ProcedureSpecSchema>;

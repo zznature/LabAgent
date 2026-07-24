@@ -201,6 +201,22 @@ MVP 阶段优先选择**point-level** 或 **step-sequence-level** unit。
 
 前者恢复边界太粗，后者执行面会碎到难以维护。
 
+### 5.3 Focus-plane calibration 与 mapping unit
+
+`raman_focus_plane_calibration` 与 `raman_grid_mapping` 必须编译成两组不同 run 的 point units：
+
+- calibration spec 冻结提案时当前位置为 `startPosition` 和用户给出的四角；缺省时使用该位置为中心的 1000 µm 正方形。
+- center 是四角的算术中心，只有 `center + corner_1..4` 五个 accepted autofocus 进入平面拟合。
+- compiler 从冻结的 `startPosition` 开始，并在所有相邻目标间按 `maxXySpanUm` 插入有限 progressive waypoint；waypoint autofocus 提供导航和恢复证据，但不进入拟合。
+- calibration unit 的初始 Z 来自 seed；后续 unit 从该 run 已持久化的最近 accepted autofocus artifact 恢复 Z，而不是依赖 daemon 内存。
+- calibration 最后一个 anchor 完成后发布一个 `raman-focus-plane` artifact，包含五点证据、`z = a*x + b*y + c`、有效凸区域和 SHA-256。
+- mapping spec 必须冻结 `{ calibrationRunId, artifactId, checksum }`、模型系数、有效区域和 `localAutofocusHalfRangeUm = 40`。
+- compiler 只允许有效凸区域内的 mapping 点，并把 Predicted Focus Z 写入每个 point unit。
+- runtime 每个 mapping unit 都重新校验 artifact identity、checksum 和冻结系数，先移动到 Predicted Focus Z，再在 ±40 µm 内 autofocus。
+
+两组 units 分别经过 `propose_run -> approve_and_start_run`；校准完成不构成 mapping motion approval。
+新的 mapping proposal 默认必须引用 focus-plane artifact；只有用户明确拒绝时才允许冻结 `{ kind: "disabled", reason: "user_declined" }`。
+
 ## 6. kernel 编译阶段应做什么
 
 `compileUnits()` 至少要做六件事：
@@ -226,6 +242,7 @@ MVP 阶段优先选择**point-level** 或 **step-sequence-level** unit。
    - 激光上限
    - 运动边界
    - 域内 guard
+   - calibration ±100 µm 与 mapping ±40 µm 的完整 Z 搜索窗口必须位于运行和 stage hard limits 内
 
 6. **形成恢复边界**
    - 明确哪些边界可以自动 resume

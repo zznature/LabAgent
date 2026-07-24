@@ -11,6 +11,7 @@ export {
 	ResourceRefSchema,
 	PointSchema,
 	CurrentPositionPlanSchema,
+	FocusPlaneCalibrationPlanSchema,
 	SemanticStepSchema,
 	ProcedureLimitsSchema,
 	StoppingRulesSchema,
@@ -26,6 +27,7 @@ export {
 	type GridScanPlan,
 	type PointListPlan,
 	type CurrentPositionPlan,
+	type FocusPlaneCalibrationPlan,
 	type ResourceRef,
 	type Point,
 	type SemanticStep,
@@ -57,6 +59,7 @@ export {
 	type ExecutionUnitPoint,
 	type ExecutionUnitPositionRef,
 	type ArtifactScope,
+	type FocusCalibrationUnit,
 } from "./execution-unit.ts";
 export {
 	RunStateSchema,

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
+import { buildProcedureSpec } from "../planner/procedure-spec-builder.ts";
 import type { ProcedureSpec } from "../schemas/index.ts";
 import { readArtifactRecords, readRunEvents } from "../store/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -260,6 +261,54 @@ describe("experiment research simulation runtime", () => {
 			expect.arrayContaining(["run_started", "unit_started", "unit_completed", "run_completed"]),
 		);
 		expect(readArtifactRecords(cwd, runId).length).toBeGreaterThan(0);
+	});
+
+	it("publishes one immutable focus-plane artifact after a separate calibration run", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = buildProcedureSpec({
+			procedureId: "raman_focus_plane_calibration",
+			intent: {
+				intentId: "intent-calibration",
+				experimentId: "experiment-calibration",
+				objective: "Calibrate sample focus plane.",
+			},
+			resources: {
+				stageResourceId: "stage-main",
+				frameProviderResourceId: "frame-main",
+				spectrometerResourceId: "spectrometer-main",
+			},
+			limits: {
+				xRangeUm: { minUm: 0, maxUm: 5_000 },
+				yRangeUm: { minUm: 0, maxUm: 5_000 },
+				zRangeUm: { minUm: 0, maxUm: 5_000 },
+			},
+			autofocus: {
+				enabled: true,
+				roi: { x: 0, y: 0, width: 64, height: 64 },
+			},
+			acquisition: {
+				integrationTimeMs: 100,
+				laserPowerPercent: 0,
+				accumulations: 1,
+			},
+			currentPosition: { xUm: 2_000, yUm: 2_000, zUm: 1_000 },
+			maxXySpanUm: 500,
+		});
+
+		const runId = await proposeAndStart(extension, spec, context, {
+			perUnitDelayMs: 0,
+			focusPlane: { a: 0.01, b: -0.02, c: 1_000 },
+		});
+		await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		const artifacts = readArtifactRecords(cwd, runId).filter(
+			(record) => record.artifact.kind === "raman-focus-plane",
+		);
+		expect(artifacts).toHaveLength(1);
+		expect(artifacts[0]?.artifact.metadata?.checksum).toMatch(/^sha256:/u);
 	});
 
 	it("waits between repeated points when interPointDelayMs is set", async () => {

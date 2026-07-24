@@ -1,4 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type {
 	ArtifactRef,
@@ -12,8 +13,11 @@ import type {
 	RuntimeError,
 } from "../../schemas/index.ts";
 import { appendArtifactRecord } from "../../store/artifact-store.ts";
+import { readArtifactRecords } from "../../store/artifact-store.ts";
 import { runRoot } from "../../store/layout.ts";
+import { compileProcedureSpec } from "../../kernel/compile-units.ts";
 import { evaluateRamanGoodEnough } from "../../planner/evaluate-good-enough.ts";
+import { fitFocusPlane } from "../../planner/focus-plane.ts";
 import {
 	failedActionResult,
 	type ActionResult,
@@ -450,8 +454,31 @@ function normalizeAutofocusResult(spec: ProcedureSpec, runtime: RamanLiveRuntime
 	return result;
 }
 
-function resolveAutofocusActionParams(spec: ProcedureSpec): NonNullable<AutofocusRunSingleAction["params"]> | ActionResult {
+function resolveAutofocusActionParams(
+	spec: ProcedureSpec,
+	unit: ExecutionUnit,
+	position: StagePosition,
+): NonNullable<AutofocusRunSingleAction["params"]> | ActionResult {
 	const params = spec.domain.raman.autofocus.params;
+	if (unit.focusCalibration && spec.plan.kind === "focus_plane_calibration") {
+		return {
+			...params,
+			strategy: "calibration_coarse_to_fine",
+			zStartUm: position.zUm - 100,
+			zEndUm: position.zUm + 100,
+			coarseStepUm: params?.coarseStepUm ?? 10,
+			fineHalfRangeUm: params?.fineHalfRangeUm ?? 15,
+			fineStepUm: params?.fineStepUm ?? 2,
+		};
+	}
+	if (spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection?.kind === "focus_plane") {
+		return {
+			...params,
+			strategy: "mapping_local_correction",
+			zStartUm: position.zUm - spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+			zEndUm: position.zUm + spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+		};
+	}
 	if (typeof params?.zStartUm !== "number" || typeof params.zEndUm !== "number") {
 		return failedActionResult("Fixed-range autofocus requires zStartUm and zEndUm in ProcedureSpec domain.raman.autofocus.params.", {
 			errorCode: "autofocus_invalid_params",
@@ -468,6 +495,174 @@ function resolveAutofocusActionParams(spec: ProcedureSpec): NonNullable<Autofocu
 	};
 }
 
+function readAutofocusArtifact(cwd: string, runId: string, path: string): {
+	unitId: string;
+	status: string;
+	payload: Record<string, unknown>;
+} | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(join(runRoot(cwd, runId), path), "utf-8")) as Record<string, unknown>;
+		if (
+			typeof parsed.unitId !== "string" ||
+			typeof parsed.status !== "string" ||
+			typeof parsed.payload !== "object" ||
+			parsed.payload === null ||
+			Array.isArray(parsed.payload)
+		) {
+			return undefined;
+		}
+		return {
+			unitId: parsed.unitId,
+			status: parsed.status,
+			payload: parsed.payload as Record<string, unknown>,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function previousAcceptedFocusZ(cwd: string, runId: string): number | undefined {
+	const records = readArtifactRecords(cwd, runId);
+	for (const record of records.reverse()) {
+		if (record.artifact.kind !== "raman-autofocus") {
+			continue;
+		}
+		const autofocus = readAutofocusArtifact(cwd, runId, record.artifact.path);
+		const zBestUm = autofocus?.payload.zBestUm;
+		if (autofocus?.status === "success" && typeof zBestUm === "number") {
+			return zBestUm;
+		}
+	}
+	return undefined;
+}
+
+function persistFocusPlaneArtifact(cwd: string, runId: string, spec: ProcedureSpec): ArtifactRef {
+	if (spec.plan.kind !== "focus_plane_calibration") {
+		throw new Error("Focus-plane artifact requires a calibration plan.");
+	}
+	const artifactId = `${runId}-focus-plane`;
+	const relativePath = "focus-plane.json";
+	const absolutePath = join(runRoot(cwd, runId), relativePath);
+	if (existsSync(absolutePath)) {
+		const content = readFileSync(absolutePath, "utf-8");
+		return {
+			artifactId,
+			kind: "raman-focus-plane",
+			path: relativePath,
+			label: "Raman focus-plane calibration",
+			metadata: { checksum: `sha256:${createHash("sha256").update(content).digest("hex")}` },
+		};
+	}
+	const anchorUnits = new Map(
+		compileProcedureSpec(spec)
+			.filter((unit) => unit.focusCalibration?.sampleRole === "anchor" && unit.focusCalibration.anchorId)
+			.map((unit) => [unit.unitId, unit]),
+	);
+	const acceptedByUnit = new Map<string, ReturnType<typeof readAutofocusArtifact>>();
+	for (const record of readArtifactRecords(cwd, runId)) {
+		if (record.artifact.kind !== "raman-autofocus") {
+			continue;
+		}
+		const autofocus = readAutofocusArtifact(cwd, runId, record.artifact.path);
+		if (autofocus?.status === "success" && anchorUnits.has(autofocus.unitId)) {
+			acceptedByUnit.set(autofocus.unitId, autofocus);
+		}
+	}
+	const anchors = [...anchorUnits.entries()]
+		.map(([unitId, unit]) => {
+			const record = acceptedByUnit.get(unitId);
+			const zUm = record?.payload.zBestUm;
+			if (typeof zUm !== "number" || !unit.point || !unit.focusCalibration?.anchorId) {
+				throw new Error(`Accepted focus evidence for ${unit.unitId} is incomplete.`);
+			}
+			return {
+				anchorId: unit.focusCalibration.anchorId,
+				xUm: unit.point.xUm,
+				yUm: unit.point.yUm,
+				zUm,
+				confidence: record?.payload.confidence,
+			};
+		});
+	if (anchors.length !== 5) {
+		throw new Error(`Focus-plane fit requires five accepted anchor results; found ${anchors.length}.`);
+	}
+	const model = fitFocusPlane(anchors);
+	const content = `${JSON.stringify(
+		{
+			profile: "raman-focus-plane",
+			calibrationRunId: runId,
+			procedureSpecId: spec.procedureSpecId,
+			anchors,
+			model,
+			validRegion: spec.plan.anchors.corners,
+		},
+		null,
+		2,
+	)}\n`;
+	mkdirSync(dirname(absolutePath), { recursive: true });
+	writeFileSync(absolutePath, content, { encoding: "utf-8", flag: "wx" });
+	return {
+		artifactId,
+		kind: "raman-focus-plane",
+		path: relativePath,
+		label: "Raman focus-plane calibration",
+		metadata: {
+			checksum: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+			anchorCount: anchors.length,
+			rmsErrorUm: model.rmsErrorUm,
+		},
+	};
+}
+
+export function validateFocusPlaneArtifactReference(cwd: string, spec: ProcedureSpec): ActionResult | undefined {
+	if (spec.plan.kind !== "grid_scan" || spec.plan.surfaceCorrection?.kind !== "focus_plane") {
+		return undefined;
+	}
+	const reference = spec.plan.surfaceCorrection;
+	const record = readArtifactRecords(cwd, reference.calibrationRunId).find(
+		(candidate) => candidate.artifact.artifactId === reference.artifactId && candidate.artifact.kind === "raman-focus-plane",
+	);
+	if (!record) {
+		return failedActionResult("The approved focus-plane artifact could not be found.", {
+			errorCode: "focus_plane_artifact_missing",
+			message: "Mapping requires the exact focus-plane artifact produced by the approved calibration run.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		});
+	}
+	try {
+		const content = readFileSync(join(runRoot(cwd, reference.calibrationRunId), record.artifact.path), "utf-8");
+		const checksum = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+		const parsed = JSON.parse(content) as {
+			profile?: string;
+			calibrationRunId?: string;
+			model?: { a?: number; b?: number; c?: number };
+			validRegion?: unknown;
+		};
+		if (
+			checksum !== reference.checksum ||
+			parsed.profile !== "raman-focus-plane" ||
+			parsed.calibrationRunId !== reference.calibrationRunId ||
+			parsed.model?.a !== reference.coefficients.a ||
+			parsed.model?.b !== reference.coefficients.b ||
+			parsed.model?.c !== reference.coefficients.c ||
+			JSON.stringify(parsed.validRegion) !== JSON.stringify(reference.validRegion)
+		) {
+			throw new Error("checksum or coefficients mismatch");
+		}
+	} catch {
+		return failedActionResult("The approved focus-plane artifact failed integrity validation.", {
+			errorCode: "focus_plane_artifact_mismatch",
+			message: "Mapping cannot continue because the calibration artifact checksum or frozen coefficients changed.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		});
+	}
+	return undefined;
+}
+
 function autofocusRange(spec: ProcedureSpec): { zStartUm: number; zEndUm: number } | undefined {
 	const params = spec.domain.raman.autofocus.params;
 	const zStartUm = params?.zStartUm;
@@ -482,6 +677,9 @@ function zAnchorFromSpec(spec: ProcedureSpec): number | undefined {
 	const plan = spec.plan;
 	if (plan.kind === "point_list") {
 		return plan.points.find((point) => typeof point.zUm === "number")?.zUm;
+	}
+	if (plan.kind === "focus_plane_calibration") {
+		return plan.seedZUm;
 	}
 	return undefined;
 }
@@ -537,6 +735,57 @@ export async function validateRuntimeAnchorState(
 		zAnchorUm,
 		allowedDriftUm,
 	};
+	if (
+		spec.plan.kind === "focus_plane_calibration" &&
+		(Math.hypot(
+			position.xUm - spec.plan.startPosition.xUm,
+			position.yUm - spec.plan.startPosition.yUm,
+		) > Math.min(allowedDriftUm, spec.plan.maxXySpanUm))
+	) {
+		return {
+			valid: false,
+			details: {
+				...details,
+				errorCode: "preflight_stage_xy_anchor_drift",
+				message: `Current XY=(${position.xUm}, ${position.yUm}) um is too far from the frozen calibration start XY=(${spec.plan.startPosition.xUm}, ${spec.plan.startPosition.yUm}) um for the approved ${spec.plan.maxXySpanUm} um waypoint span.`,
+			},
+		};
+	}
+	for (const unit of compileProcedureSpec(spec)) {
+		if (!unit.point) {
+			continue;
+		}
+		const zValues =
+			spec.plan.kind === "focus_plane_calibration"
+				? [spec.plan.seedZUm - 100, spec.plan.seedZUm + 100]
+				: spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection?.kind === "focus_plane"
+					? [
+							unit.point.zUm! - spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+							unit.point.zUm! + spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+						]
+					: unit.point.zUm === undefined
+						? []
+						: [unit.point.zUm];
+		for (const zUm of zValues) {
+			const failure = enforceMotionHardLimits(
+				spec,
+				{ xUm: unit.point.xUm, yUm: unit.point.yUm, zUm },
+				runtime,
+			);
+			if (failure) {
+				return {
+					valid: false,
+					details: {
+						...details,
+						errorCode: "preflight_motion_envelope_out_of_bounds",
+						message: failure.summary,
+						unitId: unit.unitId,
+						zUm,
+					},
+				};
+			}
+		}
+	}
 
 	if (range) {
 		const zMin = Math.min(range.zStartUm, range.zEndUm);
@@ -589,15 +838,26 @@ export async function runLiveRamanUnit(
 	options: LiveRamanUnitOptions = {},
 ): Promise<LiveRamanUnitResult> {
 	const artifactRefs: ArtifactRef[] = [];
-	const stageResourceId = findResourceId(spec, "stage");
-	const unitPosition = await resolveUnitPosition(unit, runtime, stageResourceId);
-	if ("status" in unitPosition) {
+	const focusPlaneFailure = validateFocusPlaneArtifactReference(cwd, spec);
+	if (focusPlaneFailure) {
 		return {
 			status: "failed",
-			error: toRuntimeError(unitPosition, unitPosition.errorCode ?? "stage_position_read_failed"),
+			error: toRuntimeError(focusPlaneFailure, "focus_plane_artifact_mismatch"),
 			artifactRefs,
 		};
 	}
+	const stageResourceId = findResourceId(spec, "stage");
+	const resolvedUnitPosition = await resolveUnitPosition(unit, runtime, stageResourceId);
+	if ("status" in resolvedUnitPosition) {
+		return {
+			status: "failed",
+			error: toRuntimeError(resolvedUnitPosition, resolvedUnitPosition.errorCode ?? "stage_position_read_failed"),
+			artifactRefs,
+		};
+	}
+	const unitPosition = unit.focusCalibration
+		? { ...resolvedUnitPosition, zUm: previousAcceptedFocusZ(cwd, runId) ?? resolvedUnitPosition.zUm }
+		: resolvedUnitPosition;
 
 	const preMoveFailure = enforceMotionHardLimits(spec, unitPosition, runtime);
 	if (preMoveFailure) {
@@ -606,6 +866,27 @@ export async function runLiveRamanUnit(
 			error: toRuntimeError(preMoveFailure, "motion_out_of_bounds"),
 			artifactRefs,
 		};
+	}
+	const autofocusWindow =
+		unit.focusCalibration !== undefined && spec.plan.kind === "focus_plane_calibration"
+			? [unitPosition.zUm - 100, unitPosition.zUm + 100]
+			: spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection?.kind === "focus_plane"
+				? [
+						unitPosition.zUm - spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+						unitPosition.zUm + spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+					]
+				: [];
+	if (autofocusWindow.length > 0) {
+		for (const zUm of autofocusWindow) {
+			const windowFailure = enforceMotionHardLimits(spec, { ...unitPosition, zUm }, runtime);
+			if (windowFailure) {
+				return {
+					status: "failed",
+					error: toRuntimeError(windowFailure, "autofocus_window_out_of_bounds"),
+					artifactRefs,
+				};
+			}
+		}
 	}
 
 	const acquisition = options.acquisitionOverride ?? spec.domain.raman.acquisition;
@@ -652,7 +933,7 @@ export async function runLiveRamanUnit(
 		}
 
 		if (action.kind === "autofocus") {
-			const autofocusParams = resolveAutofocusActionParams(spec);
+			const autofocusParams = resolveAutofocusActionParams(spec, unit, unitPosition);
 			if ("status" in autofocusParams) {
 				return {
 					status: "failed",
@@ -762,6 +1043,44 @@ export async function runLiveRamanUnit(
 				artifactRefs.push(artifact);
 			}
 		}
+	}
+
+	if (spec.procedureId === "raman_focus_plane_calibration") {
+		if (!autofocusResult) {
+			return {
+				status: "failed",
+				error: {
+					errorCode: "calibration_action_sequence_incomplete",
+					message: "Focus-plane calibration requires one accepted autofocus result per waypoint.",
+					retrySafe: false,
+					needsOperator: true,
+					safeToResume: false,
+					scope: "unit",
+				},
+				artifactRefs,
+			};
+		}
+		if (unit.focusCalibration?.finalAnchor) {
+			try {
+				const focusPlaneArtifact = persistFocusPlaneArtifact(cwd, runId, spec);
+				persistArtifactRecord(cwd, runId, focusPlaneArtifact);
+				artifactRefs.push(focusPlaneArtifact);
+			} catch (error) {
+				return {
+					status: "failed",
+					error: {
+						errorCode: "focus_plane_fit_failed",
+						message: error instanceof Error ? error.message : String(error),
+						retrySafe: false,
+						needsOperator: true,
+						safeToResume: false,
+						scope: "run",
+					},
+					artifactRefs,
+				};
+			}
+		}
+		return { status: "completed", artifactRefs };
 	}
 
 	if (!autofocusResult || !spectrumResult) {

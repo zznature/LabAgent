@@ -434,7 +434,7 @@ def _handle_frame_capture(session: HardwareSession, request: dict, payload: dict
 
 def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) -> dict:
     from autofocus.controller import AutofocusController
-    from autofocus.models import FixedRangeAutofocusParams, ROI
+    from autofocus.models import AutofocusParams, FixedRangeAutofocusParams, ROI
 
     stage_cfg = request["stage"]
     params = payload.get("params") or {}
@@ -457,48 +457,82 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
                 retry_safe=False,
                 safe_to_resume=True,
             )
-        effective_point_count = int(params.get("pointCount", 10))
-        if effective_point_count != 10:
-            effective_point_count = 10
-        effective_spacing_um = abs(float(params["zStartUm"]) - float(params["zEndUm"])) / float(effective_point_count - 1)
         requested_frame_timeout_ms = int(params.get("frameTimeoutMs", _AUTOFOCUS_FRAME_TIMEOUT_DEFAULT_MS))
-        resolved_params = {
-            "zStartUm": params["zStartUm"],
-            "zEndUm": params["zEndUm"],
-            "effectivePointCount": effective_point_count,
-            "effectiveSpacingUm": effective_spacing_um,
-            "stageTimeoutMs": params.get("stageTimeoutMs", 30000),
-            "frameTimeoutMs": max(requested_frame_timeout_ms, _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS),
-            "settleMs": params.get("settleMs", 100),
-            "warmupFramesPerZ": params.get("warmupFramesPerZ", 1),
-            "scoreFramesPerZ": params.get("framesPerZ", 1),
-            "capturedFramesPerSample": params.get("warmupFramesPerZ", 1) + params.get("framesPerZ", 1),
-            "targetToleranceUm": params.get("targetToleranceUm", 5.0),
-            "finalToleranceUm": params.get("finalToleranceUm", 5.0),
-            "finalApproachOffsetUm": params.get("finalApproachOffsetUm", 3.0),
-            "interpolatePeak": params.get("interpolatePeak", True),
-            "finalVerificationFramesPerZ": params.get("finalVerificationFramesPerZ", 1),
-            "metricName": params.get("metricName", "labspec_spot_compactness"),
-        }
-        result = controller.run_fixed_range(
-            roi,
-            FixedRangeAutofocusParams(
-                z_start_um=resolved_params["zStartUm"],
-                z_end_um=resolved_params["zEndUm"],
-                point_count=resolved_params["effectivePointCount"],
-                stage_timeout_ms=resolved_params["stageTimeoutMs"],
-                frame_timeout_ms=resolved_params["frameTimeoutMs"],
-                settle_ms=resolved_params["settleMs"],
-                frames_per_z=resolved_params["scoreFramesPerZ"],
-                warmup_frames_per_z=resolved_params["warmupFramesPerZ"],
-                target_tolerance_um=resolved_params["targetToleranceUm"],
-                final_tolerance_um=resolved_params["finalToleranceUm"],
-                final_approach_offset_um=resolved_params["finalApproachOffsetUm"],
-                interpolate_peak=resolved_params["interpolatePeak"],
-                final_verification_frames_per_z=resolved_params["finalVerificationFramesPerZ"],
-                metric_name=resolved_params["metricName"],
-            ),
-        )
+        strategy = params.get("strategy", "fixed_absolute")
+        if strategy == "calibration_coarse_to_fine":
+            resolved_params = {
+                "strategy": strategy,
+                "zStartUm": params["zStartUm"],
+                "zEndUm": params["zEndUm"],
+                "coarseHalfRangeUm": 100.0,
+                "coarseStepUm": params.get("coarseStepUm", 10.0),
+                "fineHalfRangeUm": params.get("fineHalfRangeUm", 15.0),
+                "fineStepUm": params.get("fineStepUm", 2.0),
+                "stageTimeoutMs": params.get("stageTimeoutMs", 30000),
+                "frameTimeoutMs": max(requested_frame_timeout_ms, _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS),
+                "settleMs": params.get("settleMs", 100),
+                "framesPerZ": params.get("framesPerZ", 3),
+                "metricName": params.get("metricName", "labspec_spot_compactness"),
+            }
+            result = controller.run_single(
+                roi,
+                AutofocusParams(
+                    z_min_um=float(resolved_params["zStartUm"]),
+                    z_max_um=float(resolved_params["zEndUm"]),
+                    coarse_range_um=resolved_params["coarseHalfRangeUm"],
+                    coarse_step_um=resolved_params["coarseStepUm"],
+                    fine_range_um=resolved_params["fineHalfRangeUm"],
+                    fine_step_um=resolved_params["fineStepUm"],
+                    stage_timeout_ms=resolved_params["stageTimeoutMs"],
+                    frame_timeout_ms=resolved_params["frameTimeoutMs"],
+                    settle_ms=resolved_params["settleMs"],
+                    frames_per_z=resolved_params["framesPerZ"],
+                    metric_name=resolved_params["metricName"],
+                ),
+            )
+        else:
+            effective_point_count = int(params.get("pointCount", 10))
+            if effective_point_count != 10:
+                effective_point_count = 10
+            effective_spacing_um = abs(float(params["zStartUm"]) - float(params["zEndUm"])) / float(effective_point_count - 1)
+            resolved_params = {
+                "strategy": strategy,
+                "zStartUm": params["zStartUm"],
+                "zEndUm": params["zEndUm"],
+                "effectivePointCount": effective_point_count,
+                "effectiveSpacingUm": effective_spacing_um,
+                "stageTimeoutMs": params.get("stageTimeoutMs", 30000),
+                "frameTimeoutMs": max(requested_frame_timeout_ms, _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS),
+                "settleMs": params.get("settleMs", 100),
+                "warmupFramesPerZ": params.get("warmupFramesPerZ", 1),
+                "scoreFramesPerZ": params.get("framesPerZ", 1),
+                "capturedFramesPerSample": params.get("warmupFramesPerZ", 1) + params.get("framesPerZ", 1),
+                "targetToleranceUm": params.get("targetToleranceUm", 5.0),
+                "finalToleranceUm": params.get("finalToleranceUm", 5.0),
+                "finalApproachOffsetUm": params.get("finalApproachOffsetUm", 3.0),
+                "interpolatePeak": params.get("interpolatePeak", True),
+                "finalVerificationFramesPerZ": params.get("finalVerificationFramesPerZ", 1),
+                "metricName": params.get("metricName", "labspec_spot_compactness"),
+            }
+            result = controller.run_fixed_range(
+                roi,
+                FixedRangeAutofocusParams(
+                    z_start_um=resolved_params["zStartUm"],
+                    z_end_um=resolved_params["zEndUm"],
+                    point_count=resolved_params["effectivePointCount"],
+                    stage_timeout_ms=resolved_params["stageTimeoutMs"],
+                    frame_timeout_ms=resolved_params["frameTimeoutMs"],
+                    settle_ms=resolved_params["settleMs"],
+                    frames_per_z=resolved_params["scoreFramesPerZ"],
+                    warmup_frames_per_z=resolved_params["warmupFramesPerZ"],
+                    target_tolerance_um=resolved_params["targetToleranceUm"],
+                    final_tolerance_um=resolved_params["finalToleranceUm"],
+                    final_approach_offset_um=resolved_params["finalApproachOffsetUm"],
+                    interpolate_peak=resolved_params["interpolatePeak"],
+                    final_verification_frames_per_z=resolved_params["finalVerificationFramesPerZ"],
+                    metric_name=resolved_params["metricName"],
+                ),
+            )
     finally:
         provider.artifact_dir = previous_artifact_dir
         session.disable_stage_axes()

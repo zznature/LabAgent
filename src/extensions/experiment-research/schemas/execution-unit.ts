@@ -28,6 +28,15 @@ export const ArtifactScopeSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const FocusCalibrationUnitSchema = Type.Object(
+	{
+		sampleRole: Type.Union([Type.Literal("anchor"), Type.Literal("waypoint")]),
+		anchorId: Type.Optional(Type.String({ minLength: 1 })),
+		finalAnchor: Type.Optional(Type.Boolean()),
+	},
+	{ additionalProperties: false },
+);
+
 export const ExecutionUnitSchema = Type.Object(
 	{
 		unitId: Type.String({ minLength: 1 }),
@@ -40,6 +49,7 @@ export const ExecutionUnitSchema = Type.Object(
 		interUnitDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
 		resumeKey: Type.String({ minLength: 1 }),
 		artifactScope: ArtifactScopeSchema,
+		focusCalibration: Type.Optional(FocusCalibrationUnitSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -48,6 +58,7 @@ export type ExecutionUnitKind = Static<typeof ExecutionUnitKindSchema>;
 export type ExecutionUnitPoint = Static<typeof ExecutionUnitPointSchema>;
 export type ExecutionUnitPositionRef = Static<typeof ExecutionUnitPositionRefSchema>;
 export type ArtifactScope = Static<typeof ArtifactScopeSchema>;
+export type FocusCalibrationUnit = Static<typeof FocusCalibrationUnitSchema>;
 export type ExecutionUnit = Static<typeof ExecutionUnitSchema>;
 
 export const ExecutionUnitValidator = compileSchema(ExecutionUnitSchema);

@@ -4,7 +4,12 @@ import type { ExperimentIntent, ProcedureId, ProcedureSpec } from "../schemas/in
 import { ExperimentIntentValidator, ProcedureSpecValidator, formatValidationErrors } from "../schemas/index.ts";
 import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
-import { getRamanLiveRuntime, getRamanPythonRuntimeConfigInfo, validateRuntimeAnchorState } from "../runtime/raman/index.ts";
+import {
+	getRamanLiveRuntime,
+	getRamanPythonRuntimeConfigInfo,
+	validateFocusPlaneArtifactReference,
+	validateRuntimeAnchorState,
+} from "../runtime/raman/index.ts";
 import { findExperimentProcedureTemplate, listExperimentProcedureTemplates, saveExperimentIntent } from "../store/index.ts";
 import {
 	ProcedureSpecParamsSchema,
@@ -21,6 +26,7 @@ const ProcedureSpecTemplateParamsSchema = Type.Object(
 			Type.Literal("raman_single_point_probe"),
 			Type.Literal("raman_parameter_search"),
 			Type.Literal("raman_grid_mapping"),
+			Type.Literal("raman_focus_plane_calibration"),
 		]),
 	},
 	{ additionalProperties: false },
@@ -32,6 +38,7 @@ const ExperimentProcedureTemplateMatchParamsSchema = Type.Object(
 			Type.Literal("raman_single_point_probe"),
 			Type.Literal("raman_parameter_search"),
 			Type.Literal("raman_grid_mapping"),
+			Type.Literal("raman_focus_plane_calibration"),
 		]),
 		sampleId: Type.Optional(Type.String({ minLength: 1 })),
 		sampleClass: Type.Optional(Type.String({ minLength: 1 })),
@@ -119,6 +126,22 @@ function validateProcedureSpec(spec: ProcedureSpec): { valid: boolean; issues: s
 		return {
 			valid: false,
 			issues: formatValidationErrors(ProcedureSpecValidator, spec),
+		};
+	}
+	if (spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection === undefined) {
+		return {
+			valid: false,
+			issues: [
+				"Mapping requires focus-plane correction by default; attach a calibration artifact or record surfaceCorrection.kind=disabled after the user explicitly declines.",
+			],
+		};
+	}
+	try {
+		compileProcedureSpec(spec);
+	} catch (cause) {
+		return {
+			valid: false,
+			issues: [cause instanceof Error ? cause.message : String(cause)],
 		};
 	}
 	return { valid: true, issues: [] };
@@ -271,6 +294,53 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 		};
 	}
 
+	if (procedureId === "raman_focus_plane_calibration") {
+		return {
+			...common,
+			procedureId,
+			stoppingRules: {
+				maxRuntimeMinutes: 180,
+				maxUnits: 64,
+				stopOnError: true,
+				maxConsecutiveFailures: 1,
+			},
+			plan: {
+				kind: "focus_plane_calibration",
+				seedZUm: 1_500,
+				startPosition: { xUm: 1_000, yUm: 2_000 },
+				anchors: {
+					corners: [
+						{ anchorId: "corner_1", xUm: 500, yUm: 1_500 },
+						{ anchorId: "corner_2", xUm: 1_500, yUm: 1_500 },
+						{ anchorId: "corner_3", xUm: 1_500, yUm: 2_500 },
+						{ anchorId: "corner_4", xUm: 500, yUm: 2_500 },
+					],
+					center: { anchorId: "center", xUm: 1_000, yUm: 2_000 },
+				},
+				maxXySpanUm: 250,
+				perPoint: [
+					{ kind: "move_to_point" },
+					{ kind: "autofocus" },
+					{ kind: "capture_frame", laserOff: true },
+				],
+			},
+			domain: {
+				raman: {
+					...(common.domain.raman),
+					autofocus: {
+						...(common.domain.raman.autofocus),
+						params: {
+							strategy: "calibration_coarse_to_fine",
+							coarseStepUm: 10,
+							fineHalfRangeUm: 15,
+							fineStepUm: 2,
+						},
+					},
+				},
+			},
+		};
+	}
+
 	return {
 		...common,
 		stoppingRules: {
@@ -282,12 +352,26 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 		plan: {
 			kind: "grid_scan",
 			grid: {
-				origin: { xUm: 2_375, yUm: 1_640, zUm: 1_510 },
+				origin: { xUm: 2_375, yUm: 1_640 },
 				rows: 16,
 				cols: 16,
 				pitchXUm: 10,
 				pitchYUm: 10,
 				order: "snake",
+			},
+			surfaceCorrection: {
+				kind: "focus_plane",
+				calibrationRunId: "replace-with-calibration-run-id",
+				artifactId: "replace-with-focus-plane-artifact-id",
+				checksum: "replace-with-focus-plane-sha256",
+				coefficients: { a: 0, b: 0, c: 1_500 },
+				validRegion: [
+					{ anchorId: "corner_1", xUm: 2_000, yUm: 1_000 },
+					{ anchorId: "corner_2", xUm: 3_000, yUm: 1_000 },
+					{ anchorId: "corner_3", xUm: 3_000, yUm: 2_000 },
+					{ anchorId: "corner_4", xUm: 2_000, yUm: 2_000 },
+				],
+				localAutofocusHalfRangeUm: 40,
 			},
 			perPoint: [
 				{ kind: "move_to_point" },
@@ -310,6 +394,7 @@ async function buildPreflightState(
 	const forbiddenRisks = preview.risks.filter((risk) => risk.level === "forbidden");
 	const requiredRolesPresent = hasRequiredRamanRoles(spec);
 	const requestedModeSupported = executionMode === "simulation" || requiredRolesPresent;
+	const focusPlaneValidation = validateFocusPlaneArtifactReference(cwd, spec);
 
 	if (executionMode === "simulation") {
 		return {
@@ -319,8 +404,8 @@ async function buildPreflightState(
 			unitCount: preview.unitCount,
 			estimatedRuntimeMs: preview.estimatedRuntimeMs,
 			estimatedRuntimeMinutes: Number((preview.estimatedRuntimeMs / 60_000).toFixed(2)),
-			readyForApproval: forbiddenRisks.length === 0 && requiredRolesPresent,
-			preflightReady: true,
+			readyForApproval: forbiddenRisks.length === 0 && requiredRolesPresent && !focusPlaneValidation,
+			preflightReady: focusPlaneValidation === undefined,
 			controlAvailable: true,
 			requiresConfirmation: preview.requiresConfirmation,
 			risks: preview.risks,
@@ -330,6 +415,12 @@ async function buildPreflightState(
 			requiredRolesPresent,
 			requestedModeSupported,
 			canProposeRun: true,
+			focusPlaneValidation: focusPlaneValidation
+				? {
+						errorCode: focusPlaneValidation.errorCode,
+						message: focusPlaneValidation.summary,
+					}
+				: { valid: true },
 		};
 	}
 
@@ -374,7 +465,8 @@ async function buildPreflightState(
 			requestedModeSupported &&
 			livePreflight.preflightReady &&
 			livePreflight.controlAvailable &&
-			anchorValidation.valid,
+			anchorValidation.valid &&
+			!focusPlaneValidation,
 		preflightReady: livePreflight.preflightReady,
 		controlAvailable: livePreflight.controlAvailable,
 		requiresConfirmation: preview.requiresConfirmation,
@@ -388,6 +480,12 @@ async function buildPreflightState(
 		livePreflightDetails: livePreflight.details ?? {},
 		stageAnchorValid: anchorValidation.valid,
 		stageAnchorDetails: anchorValidation.details,
+		focusPlaneValidation: focusPlaneValidation
+			? {
+					errorCode: focusPlaneValidation.errorCode,
+					message: focusPlaneValidation.summary,
+				}
+			: { valid: true },
 		canProposeRun: true,
 	};
 }
@@ -410,11 +508,13 @@ export const getLabCapabilitiesTool = {
 				"raman_single_point_probe",
 				"raman_parameter_search",
 				"raman_grid_mapping",
+				"raman_focus_plane_calibration",
 			],
 			liveSupportedProceduresWhenRuntimeRegistered: [
 				"raman_single_point_probe",
 				"raman_parameter_search",
 				"raman_grid_mapping",
+				"raman_focus_plane_calibration",
 			],
 			plannerTools: [
 				"get_lab_capabilities",
@@ -443,6 +543,7 @@ export const getLabCapabilitiesTool = {
 				liveSinglePointExecutionRequiresRegisteredRuntime: true,
 				liveParameterSearchExecutionRequiresRegisteredRuntime: true,
 				liveGridMappingExecutionRequiresRegisteredRuntime: true,
+				liveFocusPlaneCalibrationRequiresRegisteredRuntime: true,
 			},
 		});
 	},
@@ -559,7 +660,9 @@ export const getProcedureSpecTemplateTool = {
 			schemaVersion: "0.1.0",
 			template: templateForProcedure(params.procedureId),
 			notes: [
-				"ProcedureSpec supports plan.kind values current_position, point_list, and grid_scan.",
+				"ProcedureSpec supports plan.kind values current_position, point_list, focus_plane_calibration, and grid_scan.",
+				"Approve focus_plane_calibration and grid_scan as two separate bounded runs.",
+				"If calibration corners are not supplied, use a 1000 um square centered on the current XY position.",
 				"Line scans should use point_list when one axis is fixed and pitchYUm would be zero.",
 				"Use plan.interPointDelayMs on point_list or grid_scan when repeated points need a fixed wait between completed units.",
 				"Use limits only for maxLaserPowerPercent, minObjectiveClearanceUm, xRangeUm, yRangeUm, and zRangeUm.",
@@ -591,6 +694,7 @@ export const getLabStateTool = {
 			canExecuteLiveSinglePointRuns: liveRuntimeRegistered,
 			canExecuteLiveParameterSearchRuns: liveRuntimeRegistered,
 			canExecuteLiveGridMappingRuns: liveRuntimeRegistered,
+			canExecuteLiveFocusPlaneCalibrationRuns: liveRuntimeRegistered,
 			runtimeConfig: {
 				source: runtimeConfig.source,
 				path: runtimeConfig.path,
@@ -671,6 +775,9 @@ export const runPreflightTool = {
 
 		if (state.stageAnchorValid === false) {
 			return warning("ProcedureSpec preflight found current stage position inconsistent with the approved autofocus envelope.", state);
+		}
+		if (asProcedureSpec(params).plan.kind === "grid_scan" && (state.focusPlaneValidation as Record<string, unknown>).valid !== true) {
+			return warning("ProcedureSpec preflight could not validate the referenced focus-plane artifact.", state);
 		}
 
 		return success("ProcedureSpec preflight is ready for supervised proposal approval.", state);

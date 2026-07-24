@@ -89,6 +89,16 @@ export const AutofocusRunSingleActionSchema = Type.Object(
 				interpolatePeak: Type.Optional(Type.Boolean()),
 				finalVerificationFramesPerZ: Type.Optional(Type.Integer({ minimum: 1 })),
 				metricName: Type.Optional(Type.String({ minLength: 1 })),
+				strategy: Type.Optional(
+					Type.Union([
+						Type.Literal("fixed_absolute"),
+						Type.Literal("calibration_coarse_to_fine"),
+						Type.Literal("mapping_local_correction"),
+					]),
+				),
+				coarseStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+				fineHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+				fineStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 			},
 			{ additionalProperties: false },
 		),

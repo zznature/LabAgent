@@ -127,8 +127,9 @@ describe("experiment research planner proposal flow", () => {
 		const gridMapping = buildProcedureProposal({
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
+			focusPlaneDecision: "user_declined",
 			grid: {
-				origin: { xUm: 1_000, yUm: 2_000 },
+				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
 				cols: 3,
 				pitchXUm: 10,
@@ -172,8 +173,9 @@ describe("experiment research planner proposal flow", () => {
 		const proposal = buildProcedureProposal({
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
+			focusPlaneDecision: "user_declined",
 			grid: {
-				origin: { xUm: 1_000, yUm: 2_000 },
+				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
 				cols: 2,
 				pitchXUm: 10,
@@ -256,6 +258,7 @@ describe("experiment research planner proposal flow", () => {
 		const proposal = buildProcedureProposal({
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
+			focusPlaneDecision: "user_declined",
 			stoppingRules: {
 				maxRuntimeMinutes: 1_200,
 				maxUnits: 256,
@@ -345,8 +348,9 @@ describe("experiment research planner proposal flow", () => {
 		const proposal = buildProcedureProposal({
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
+			focusPlaneDecision: "user_declined",
 			grid: {
-				origin: { xUm: 1_000, yUm: 2_000 },
+				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
 				cols: 2,
 				pitchXUm: 10,

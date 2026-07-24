@@ -37,8 +37,11 @@
 - `ExecutionUnit` 是 kernel 从 `ProcedureSpec` 派生的运行时对象，不是第四个核心交互对象。
 - `ProcedureSpec` 是声明式实验方案，不是脚本，也不是底层 driver 命令集合。
 - 用户批准后，bounded run 执行冻结后的 `ProcedureSpec`；run 内不热改 spec。
+- surface-following mapping 固定为两次 bounded approval：先批准 `raman_focus_plane_calibration`，再批准引用其不可变 artifact 的 `raman_grid_mapping`。
+- 校准默认使用当前位置为中心的 1000 µm 正方形四角和算术中心；用户可覆盖四角，planner 会冻结绝对坐标并校验凸四边形。
+- 校准通过有限 progressive XY waypoint 导航并在 ±100 µm 内粗到细 autofocus；mapping 先移动到 predicted Z，再做 ±40 µm local correction。
 - Raman MVP 已明确区分 planner-facing experiment tools 与 operator-facing maintenance tools。
 - Raman live runtime 从 `lab-config/drivers/raman-python` 接入，`docs/Raman` 只作为 legacy/reference。
 - 实验室默认硬件配置放在 `lab-config/raman-runtime.lab.json`，本机覆盖放在 git-ignored 的 `lab-config/raman-runtime.local.json`。
 - planner 侧参数模板放在 `lab-config/templates/*.json`，模板 provenance 只进入 proposal / validation details，不污染可执行 `ProcedureSpec`。
-- XY correction、完整 lease、多角色审批和监督人在场仍属于目标态或 future/reference，不进入当前 MVP 主链路。
+- XY correction、完整 lease、多角色审批和监督人在场仍属于目标态或 future/reference；focus-plane Z correction 已进入当前 MVP 主链路。
