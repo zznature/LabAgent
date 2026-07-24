@@ -128,7 +128,11 @@ function validateProcedureSpec(spec: ProcedureSpec): { valid: boolean; issues: s
 			issues: formatValidationErrors(ProcedureSpecValidator, spec),
 		};
 	}
-	if (spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection === undefined) {
+	if (
+		spec.procedureId === "raman_grid_mapping" &&
+		(spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list") &&
+		spec.plan.surfaceCorrection === undefined
+	) {
 		return {
 			valid: false,
 			issues: [
@@ -776,7 +780,12 @@ export const runPreflightTool = {
 		if (state.stageAnchorValid === false) {
 			return warning("ProcedureSpec preflight found current stage position inconsistent with the approved autofocus envelope.", state);
 		}
-		if (asProcedureSpec(params).plan.kind === "grid_scan" && (state.focusPlaneValidation as Record<string, unknown>).valid !== true) {
+		const plan = asProcedureSpec(params).plan;
+		if (
+			(plan.kind === "grid_scan" || plan.kind === "point_list") &&
+			plan.surfaceCorrection?.kind === "focus_plane" &&
+			(state.focusPlaneValidation as Record<string, unknown>).valid !== true
+		) {
 			return warning("ProcedureSpec preflight could not validate the referenced focus-plane artifact.", state);
 		}
 

@@ -32,6 +32,9 @@ planning or simulation instead of inventing device status.
   bridges, SDK objects, or Python drivers.
 - Real hardware execution must use the supervised approval flow:
   `validate_procedure_spec -> run_preflight -> propose_run -> approve_and_start_run`.
+- After `propose_run`, wait for the user to approve the exact proposal and spec
+  hash. Do not call `approve_and_start_run` for live hardware on the user's
+  behalf.
 
 For read-only operator questions, use the dedicated operator tools when
 available. Do not construct an experiment plan merely to answer hardware status

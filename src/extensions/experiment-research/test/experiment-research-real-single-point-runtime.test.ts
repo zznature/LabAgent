@@ -10,6 +10,8 @@ import {
 	successActionResult,
 } from "../runtime/raman/index.ts";
 import { readArtifactRecords, readRunEvents } from "../store/index.ts";
+import { hashProcedureSpec } from "../store/proposal-store.ts";
+import type { ProcedureSpec } from "../schemas/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 type CapturedHandler = (...args: unknown[]) => unknown;
@@ -111,6 +113,9 @@ function createSinglePointSpec(overrides?: {
 							}),
 						),
 					}),
+			...(overrides?.procedureId === "raman_grid_mapping" && !overrides?.currentPosition
+				? { surfaceCorrection: { kind: "disabled", reason: "user_declined" } }
+				: {}),
 			perPoint: [
 				{ kind: "move_to_point" },
 				{ kind: "autofocus" },
@@ -322,6 +327,15 @@ async function proposeRun(
 	return proposalState.proposalId as string;
 }
 
+function operatorApproval(proposalId: string, spec: ReturnType<typeof createSinglePointSpec>) {
+	return {
+		acknowledgedProposalId: proposalId,
+		acknowledgedSpecHash: hashProcedureSpec(spec as ProcedureSpec),
+		approvedBy: "user" as const,
+		approvedAt: "2026-07-24T00:00:00.000Z",
+	};
+}
+
 async function pollUntilTerminal(
 	extension: CapturedExtension,
 	runId: string,
@@ -362,6 +376,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: true,
 				},
+				operatorApproval: operatorApproval(proposalId, spec),
 			},
 			undefined,
 			undefined,
@@ -393,6 +408,34 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(state.requestedModeSupported).toBe(true);
 	});
 
+	it("rejects live supervised start without explicit operator approval", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		registerRamanLiveRuntime(cwd, createLiveRuntime(true, true));
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-without-operator",
+			{
+				proposalId,
+				spec,
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect((started?.details as Record<string, unknown>).errorCode).toBe("operator_approval_required");
+	});
+
 	it("executes a live supervised single-point run, records artifacts, and persists rule-based evaluation output", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
@@ -412,6 +455,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: true,
 				},
+				operatorApproval: operatorApproval(proposalId, spec),
 			},
 			undefined,
 			undefined,
@@ -455,6 +499,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: true,
 				},
+				operatorApproval: operatorApproval(proposalId, spec),
 			},
 			undefined,
 			undefined,
@@ -498,6 +543,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: true,
 				},
+				operatorApproval: operatorApproval(proposalId, spec),
 			},
 			undefined,
 			undefined,
@@ -537,6 +583,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: true,
 				},
+				operatorApproval: operatorApproval(proposalId, spec),
 			},
 			undefined,
 			undefined,
@@ -579,6 +626,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: false,
 				},
+				operatorApproval: operatorApproval(safeProposalId, safeSpec),
 			},
 			undefined,
 			undefined,
@@ -600,6 +648,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: true,
 				},
+				operatorApproval: operatorApproval(highPowerProposalId, highPowerSpec),
 			},
 			undefined,
 			undefined,
@@ -623,6 +672,7 @@ describe("experiment research real supervised single-point runtime", () => {
 					preflightReady: true,
 					controlAvailable: true,
 				},
+				operatorApproval: operatorApproval(lowClearanceProposalId, lowClearanceSpec),
 			},
 			undefined,
 			undefined,

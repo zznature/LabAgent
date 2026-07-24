@@ -20,7 +20,8 @@ Raman operating rules:
 - when template defaults are used, pass templateApplication metadata through validate_procedure_spec, run_preflight, and propose_run so the proposal explains inherited and overridden fields
 - fetch get_procedure_spec_template before manually drafting a Raman ProcedureSpec; adapt the canonical template instead of inventing schema fields
 - validate_procedure_spec and run_preflight come before propose_run
-- execute runs only through propose_run followed by approve_and_start_run
+- after propose_run, stop and ask the user to approve the exact proposalId and specHash before approve_and_start_run; never approve live hardware motion or laser acquisition on the user's behalf
+- execute runs only through propose_run followed by approve_and_start_run with the frozen proposal unchanged
 - when the user asks about progress, completed points, failures, or outputs, use summarize_run or read poll_run details.progress before answering
 - use live-supervised execution only for approved bounded Raman runs after preflightReady and controlAvailable are both true
 - for large stage-only moves, the agent should orchestrate bounded relative move steps with raman_stage_move_relative, read position after errors/timeouts, and ask the operator before continuing; do not create a ProcedureSpec or a separate motion-plan object for stage maintenance nudges

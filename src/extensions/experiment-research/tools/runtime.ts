@@ -8,6 +8,7 @@ import {
 	startLiveRamanRun,
 	startSimulationRun,
 } from "../kernel/run-controller.ts";
+import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import { approveAndFreezeProcedureSpec, RunAdmissionError } from "../kernel/run-admission.ts";
 import { getRamanLiveRuntime } from "../runtime/raman/index.ts";
 import {
@@ -172,6 +173,14 @@ export const proposeRunTool = {
 				"invalid_procedure_spec",
 			);
 		}
+		try {
+			compileProcedureSpec(params.spec);
+		} catch (cause) {
+			return error(
+				`ProcedureSpec failed executable validation: ${cause instanceof Error ? cause.message : String(cause)}`,
+				"invalid_procedure_spec",
+			);
+		}
 		const proposal = createProcedureProposal(ctx.cwd, params.spec);
 		return {
 			content: [{ type: "text", text: `Run proposal ${proposal.proposalId} created.` }],
@@ -232,6 +241,7 @@ export const approveAndStartRunTool = {
 				spec: params.spec,
 				mode,
 				admission: params.admission,
+				operatorApproval: params.operatorApproval,
 			});
 			const runState =
 				mode === "live-supervised"

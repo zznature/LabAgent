@@ -206,6 +206,45 @@ export const ProcedureDomainSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const SurfaceCorrectionSchema = Type.Union([
+	Type.Object(
+		{
+			kind: Type.Literal("focus_plane"),
+			calibrationRunId: Type.String({ minLength: 1 }),
+			artifactId: Type.String({ minLength: 1 }),
+			checksum: Type.String({ minLength: 1 }),
+			coefficients: Type.Object(
+				{
+					a: Type.Number(),
+					b: Type.Number(),
+					c: Type.Number(),
+				},
+				{ additionalProperties: false },
+			),
+			validRegion: Type.Array(
+				Type.Object(
+					{
+						anchorId: Type.String({ minLength: 1 }),
+						xUm: Type.Number(),
+						yUm: Type.Number(),
+					},
+					{ additionalProperties: false },
+				),
+				{ minItems: 4, maxItems: 4 },
+			),
+			localAutofocusHalfRangeUm: Type.Literal(40),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			kind: Type.Literal("disabled"),
+			reason: Type.Literal("user_declined"),
+		},
+		{ additionalProperties: false },
+	),
+]);
+
 export const GridScanPlanSchema = Type.Object(
 	{
 		kind: Type.Literal("grid_scan"),
@@ -220,46 +259,7 @@ export const GridScanPlanSchema = Type.Object(
 			},
 			{ additionalProperties: false },
 		),
-		surfaceCorrection: Type.Optional(
-			Type.Union([
-				Type.Object(
-				{
-					kind: Type.Literal("focus_plane"),
-					calibrationRunId: Type.String({ minLength: 1 }),
-					artifactId: Type.String({ minLength: 1 }),
-					checksum: Type.String({ minLength: 1 }),
-					coefficients: Type.Object(
-						{
-							a: Type.Number(),
-							b: Type.Number(),
-							c: Type.Number(),
-						},
-						{ additionalProperties: false },
-					),
-					validRegion: Type.Array(
-						Type.Object(
-							{
-								anchorId: Type.String({ minLength: 1 }),
-								xUm: Type.Number(),
-								yUm: Type.Number(),
-							},
-							{ additionalProperties: false },
-						),
-						{ minItems: 4, maxItems: 4 },
-					),
-					localAutofocusHalfRangeUm: Type.Literal(40),
-				},
-				{ additionalProperties: false },
-				),
-				Type.Object(
-					{
-						kind: Type.Literal("disabled"),
-						reason: Type.Literal("user_declined"),
-					},
-					{ additionalProperties: false },
-				),
-			]),
-		),
+		surfaceCorrection: Type.Optional(SurfaceCorrectionSchema),
 		perPoint: Type.Array(SemanticStepSchema, { minItems: 1 }),
 		interPointDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
 	},
@@ -311,6 +311,7 @@ export const PointListPlanSchema = Type.Object(
 	{
 		kind: Type.Literal("point_list"),
 		points: Type.Array(PointSchema, { minItems: 1 }),
+		surfaceCorrection: Type.Optional(SurfaceCorrectionSchema),
 		perPoint: Type.Array(SemanticStepSchema, { minItems: 1 }),
 		interPointDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
 	},
@@ -374,6 +375,7 @@ export type RamanAcquisition = Static<typeof RamanAcquisitionSchema>;
 export type RamanParameterSearch = Static<typeof RamanParameterSearchSchema>;
 export type RamanDomain = Static<typeof RamanDomainSchema>;
 export type ProcedureDomain = Static<typeof ProcedureDomainSchema>;
+export type SurfaceCorrection = Static<typeof SurfaceCorrectionSchema>;
 export type GridScanPlan = Static<typeof GridScanPlanSchema>;
 export type PointListPlan = Static<typeof PointListPlanSchema>;
 export type CurrentPositionPlan = Static<typeof CurrentPositionPlanSchema>;

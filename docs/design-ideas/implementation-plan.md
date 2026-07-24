@@ -602,6 +602,8 @@ docs freeze
 
 - [x] calibration 与 mapping 是两个独立 proposal、approval 和 frozen ProcedureSpec
 - [x] 新 mapping proposal 默认要求校准 artifact；无校正 mapping 必须记录用户明确拒绝
+- [x] `point_list` mapping 与 `grid_scan` mapping 使用同一套 `surfaceCorrection` 准入规则
+- [x] live-supervised approval 必须包含用户确认过的 proposalId 和 specHash
 - [x] 用户可指定四角；缺省为提案时当前位置中心的 1000 µm 正方形
 - [x] 四角必须互异并组成四顶点凸四边形，center 为算术中心
 - [x] compiler 从冻结的当前 XY 开始，按 `maxXySpanUm` 生成有限 progressive XY waypoints
@@ -611,6 +613,7 @@ docs freeze
 - [x] calibration simulation 与 live runtime 都发布 `raman-focus-plane` artifact
 - [x] artifact 包含五点 evidence、模型、有效区域、run/spec provenance 和 SHA-256
 - [x] mapping spec 冻结 calibration run ID、artifact ID、checksum、系数和有效区域
+- [x] mapping 引用的 calibration run 必须 completed，且 artifact 同时存在于 artifact index 和 completed RunState
 - [x] mapping compiler 拒绝有效凸区域外点，并为每点计算 Predicted Focus Z
 - [x] mapping runtime 每个 unit 验证跨 run artifact 完整性
 - [x] mapping 先移动到 Predicted Focus Z，再执行固定 ±40 µm local correction

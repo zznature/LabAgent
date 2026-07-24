@@ -16,6 +16,7 @@ import type {
 	Point,
 	PointListPlan,
 	ProcedureSpec,
+	SurfaceCorrection,
 } from "../schemas/procedure-spec.ts";
 import { formatValidationErrors } from "../schemas/validation.ts";
 
@@ -45,8 +46,61 @@ function toExecutionPoint(point: Point, row?: number, col?: number): ExecutionUn
 	};
 }
 
+function assertFocusPlaneMappingActions(plan: GridScanPlan | PointListPlan): void {
+	const moveIndexes = plan.perPoint.flatMap((action, index) => (action.kind === "move_to_point" ? [index] : []));
+	const autofocusIndexes = plan.perPoint.flatMap((action, index) => (action.kind === "autofocus" ? [index] : []));
+	const acquisitionIndexes = plan.perPoint.flatMap((action, index) => (action.kind === "acquire_spectrum" ? [index] : []));
+	if (
+		moveIndexes.length !== 1 ||
+		autofocusIndexes.length !== 1 ||
+		acquisitionIndexes.length !== 1 ||
+		moveIndexes[0]! >= autofocusIndexes[0]! ||
+		autofocusIndexes[0]! >= acquisitionIndexes[0]!
+	) {
+		throw new Error(
+			"Focus-plane mapping requires exactly one move_to_point, then one autofocus, then one acquire_spectrum action.",
+		);
+	}
+}
+
+function requireMappingSurfaceCorrection(spec: ProcedureSpec, plan: GridScanPlan | PointListPlan): SurfaceCorrection {
+	if (spec.procedureId !== "raman_grid_mapping") {
+		return plan.surfaceCorrection ?? { kind: "disabled", reason: "user_declined" };
+	}
+	if (!plan.surfaceCorrection) {
+		throw new Error(
+			"Mapping requires focus-plane calibration by default. Attach a focus-plane artifact or record surfaceCorrection.kind=disabled with reason=user_declined.",
+		);
+	}
+	return plan.surfaceCorrection;
+}
+
+function applyPointListSurfaceCorrection(point: Point, correction: SurfaceCorrection): Point {
+	if (correction.kind === "disabled") {
+		if (point.zUm === undefined) {
+			throw new Error("Uncorrected mapping requires every point_list point to include an explicit fixed zUm.");
+		}
+		return point;
+	}
+	if (!isPointInConvexRegion(point, correction.validRegion)) {
+		throw new Error(`Mapping point x=${point.xUm}, y=${point.yUm} is outside the approved focus-plane region.`);
+	}
+	return {
+		...point,
+		zUm: predictFocusZ(correction.coefficients, point),
+	};
+}
+
 function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): ExecutionUnit[] {
-	return plan.points.map((point, index) => ({
+	const correction = requireMappingSurfaceCorrection(spec, plan);
+	if (spec.procedureId === "raman_grid_mapping" && correction.kind === "focus_plane") {
+		assertFocusPlaneMappingActions(plan);
+	}
+	const points =
+		spec.procedureId === "raman_grid_mapping"
+			? plan.points.map((point) => applyPointListSurfaceCorrection(point, correction))
+			: plan.points;
+	return points.map((point, index) => ({
 		unitId: createUnitId(spec.procedureSpecId, index),
 		index,
 		unitKind: "point",
@@ -171,21 +225,9 @@ function buildFocusPlaneCalibrationUnits(spec: ProcedureSpec, plan: FocusPlaneCa
 }
 
 function buildGridScanUnits(spec: ProcedureSpec, plan: GridScanPlan): ExecutionUnit[] {
+	requireMappingSurfaceCorrection(spec, plan);
 	if (plan.surfaceCorrection?.kind === "focus_plane") {
-		const moveIndexes = plan.perPoint.flatMap((action, index) => (action.kind === "move_to_point" ? [index] : []));
-		const autofocusIndexes = plan.perPoint.flatMap((action, index) => (action.kind === "autofocus" ? [index] : []));
-		const acquisitionIndexes = plan.perPoint.flatMap((action, index) => (action.kind === "acquire_spectrum" ? [index] : []));
-		if (
-			moveIndexes.length !== 1 ||
-			autofocusIndexes.length !== 1 ||
-			acquisitionIndexes.length !== 1 ||
-			moveIndexes[0]! >= autofocusIndexes[0]! ||
-			autofocusIndexes[0]! >= acquisitionIndexes[0]!
-		) {
-			throw new Error(
-				"Focus-plane mapping requires exactly one move_to_point, then one autofocus, then one acquire_spectrum action.",
-			);
-		}
+		assertFocusPlaneMappingActions(plan);
 	}
 	const points = buildGridPoints(plan);
 	return points.map((point, index) => ({
@@ -238,7 +280,8 @@ function assertAutofocusWindowsWithinSpecLimits(spec: ProcedureSpec, units: Exec
 		return;
 	}
 	const surfaceCorrection =
-		spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection?.kind === "focus_plane"
+		(spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list") &&
+		spec.plan.surfaceCorrection?.kind === "focus_plane"
 			? spec.plan.surfaceCorrection
 			: undefined;
 	const windows =

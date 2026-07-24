@@ -14,6 +14,16 @@ export const AdmissionSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const OperatorApprovalSchema = Type.Object(
+	{
+		acknowledgedProposalId: Type.String({ minLength: 1 }),
+		acknowledgedSpecHash: Type.String({ minLength: 1 }),
+		approvedBy: Type.Literal("user"),
+		approvedAt: Type.String({ minLength: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const SimulationControlsSchema = Type.Object(
 	{
 		perUnitDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -78,6 +88,7 @@ export const ProposalIdParamsSchema = Type.Object(
 		simulation: Type.Optional(SimulationControlsSchema),
 		executionMode: Type.Optional(ExecutionModeSchema),
 		admission: Type.Optional(AdmissionSchema),
+		operatorApproval: Type.Optional(OperatorApprovalSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -91,6 +102,7 @@ export const RunIdParamsSchema = Type.Object(
 
 export type ExecutionMode = Static<typeof ExecutionModeSchema>;
 export type Admission = Static<typeof AdmissionSchema>;
+export type OperatorApproval = Static<typeof OperatorApprovalSchema>;
 export type TemplateApplication = Static<typeof TemplateApplicationSchema>;
 export type ProcedureSpecParams = Static<typeof ProcedureSpecParamsSchema>;
 export type RunProcedureParams = Static<typeof RunProcedureParamsSchema>;

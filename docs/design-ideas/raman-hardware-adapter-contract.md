@@ -546,7 +546,8 @@ compiler 会从 `startPosition` 开始插入有限 waypoint，并拒绝可能被
 runtime 从同一 run 已持久化的最新 accepted autofocus Artifact 恢复下一 unit 的 Z；只有五个命名
 anchors 进入平面拟合。最终 anchor unit 发布 `raman-focus-plane` JSON，Python daemon 不负责拟合。
 
-校正 mapping 的当前 schema：
+校正 mapping 的当前 schema（`grid_scan` 和 `point_list` mapping 都使用同一个
+`surfaceCorrection` gate；line scan / rotated 1xN mapping 可用 `point_list`）：
 
 ```yaml
 plan:
@@ -575,7 +576,17 @@ plan:
 compiler 验证全部 mapping XY 位于 calibrated convex region，计算每点 Predicted Focus Z，并强制
 唯一的 `move_to_point -> autofocus -> acquire_spectrum` 顺序。preflight/runtime 重读 calibration
 Artifact，核对 profile、run ID、checksum、coefficients 和 validRegion。用户明确拒绝时允许
-`{ kind: disabled, reason: user_declined }`，但 grid 必须冻结 `origin.zUm`。
+`{ kind: disabled, reason: user_declined }`，但 grid 必须冻结 `origin.zUm`，point-list mapping
+必须为每个 point 冻结 `zUm`。
+
+Artifact provenance 是一个小闭环：mapping 引用的 calibration run 必须有 completed RunState；
+artifact 必须同时存在于该 run 的 artifact JSONL index 和 completed RunState.artifactRefs；artifact
+内容中的 `calibrationRunId / procedureSpecId / checksum / coefficients / validRegion` 必须与 mapping
+spec 冻结字段一致。缺失、未完成或不匹配都 fail closed。
+
+live-supervised `approve_and_start_run` 还要求 operator approval payload 复述 proposalId 和
+specHash。preflight ready 与 control available 只表示可进入审批，不表示 agent 可以代替用户批准
+真实硬件运动或激光采集。
 
 ## 9. 预检与维护工具如何接 Raman
 

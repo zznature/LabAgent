@@ -24,6 +24,7 @@ export {
 	type ProcedureSpec,
 	type ProcedurePlan,
 	type ProcedureId,
+	type SurfaceCorrection,
 	type GridScanPlan,
 	type PointListPlan,
 	type CurrentPositionPlan,

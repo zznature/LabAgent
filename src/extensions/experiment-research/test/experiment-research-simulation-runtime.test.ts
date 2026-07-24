@@ -77,7 +77,9 @@ function createProcedureSpec(pointCount = 3): ProcedureSpec {
 			points: Array.from({ length: pointCount }, (_, index) => ({
 				xUm: 1000 + index * 5,
 				yUm: 2000 + index * 5,
+				zUm: 1500,
 			})),
+			surfaceCorrection: { kind: "disabled", reason: "user_declined" },
 			perPoint: [
 				{ kind: "move_to_point" },
 				{ kind: "autofocus" },

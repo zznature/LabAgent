@@ -11,9 +11,11 @@ import type {
 	RamanSearchEnvelope,
 	RunState,
 	RuntimeError,
+	SurfaceCorrection,
 } from "../../schemas/index.ts";
 import { appendArtifactRecord } from "../../store/artifact-store.ts";
 import { readArtifactRecords } from "../../store/artifact-store.ts";
+import { readRunStateSnapshot } from "../../store/run-store.ts";
 import { runRoot } from "../../store/layout.ts";
 import { compileProcedureSpec } from "../../kernel/compile-units.ts";
 import { evaluateRamanGoodEnough } from "../../planner/evaluate-good-enough.ts";
@@ -454,12 +456,20 @@ function normalizeAutofocusResult(spec: ProcedureSpec, runtime: RamanLiveRuntime
 	return result;
 }
 
+function mappingSurfaceCorrection(spec: ProcedureSpec): SurfaceCorrection | undefined {
+	return spec.procedureId === "raman_grid_mapping" &&
+		(spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list")
+		? spec.plan.surfaceCorrection
+		: undefined;
+}
+
 function resolveAutofocusActionParams(
 	spec: ProcedureSpec,
 	unit: ExecutionUnit,
 	position: StagePosition,
 ): NonNullable<AutofocusRunSingleAction["params"]> | ActionResult {
 	const params = spec.domain.raman.autofocus.params;
+	const surfaceCorrection = mappingSurfaceCorrection(spec);
 	if (unit.focusCalibration && spec.plan.kind === "focus_plane_calibration") {
 		return {
 			...params,
@@ -471,12 +481,12 @@ function resolveAutofocusActionParams(
 			fineStepUm: params?.fineStepUm ?? 2,
 		};
 	}
-	if (spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection?.kind === "focus_plane") {
+	if (surfaceCorrection?.kind === "focus_plane") {
 		return {
 			...params,
 			strategy: "mapping_local_correction",
-			zStartUm: position.zUm - spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
-			zEndUm: position.zUm + spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+			zStartUm: position.zUm - surfaceCorrection.localAutofocusHalfRangeUm,
+			zEndUm: position.zUm + surfaceCorrection.localAutofocusHalfRangeUm,
 		};
 	}
 	if (typeof params?.zStartUm !== "number" || typeof params.zEndUm !== "number") {
@@ -615,10 +625,21 @@ function persistFocusPlaneArtifact(cwd: string, runId: string, spec: ProcedureSp
 }
 
 export function validateFocusPlaneArtifactReference(cwd: string, spec: ProcedureSpec): ActionResult | undefined {
-	if (spec.plan.kind !== "grid_scan" || spec.plan.surfaceCorrection?.kind !== "focus_plane") {
+	const surfaceCorrection = mappingSurfaceCorrection(spec);
+	if (surfaceCorrection?.kind !== "focus_plane") {
 		return undefined;
 	}
-	const reference = spec.plan.surfaceCorrection;
+	const reference = surfaceCorrection;
+	const calibrationRunState = readRunStateSnapshot(cwd, reference.calibrationRunId);
+	if (calibrationRunState?.status !== "completed") {
+		return failedActionResult("The referenced focus-plane calibration run is not completed.", {
+			errorCode: "focus_plane_calibration_run_not_completed",
+			message: "Mapping requires a completed calibration run before its focus-plane artifact can be used.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		});
+	}
 	const record = readArtifactRecords(cwd, reference.calibrationRunId).find(
 		(candidate) => candidate.artifact.artifactId === reference.artifactId && candidate.artifact.kind === "raman-focus-plane",
 	);
@@ -631,12 +652,26 @@ export function validateFocusPlaneArtifactReference(cwd: string, spec: Procedure
 			safeToResume: false,
 		});
 	}
+	if (
+		!calibrationRunState.artifactRefs.some(
+			(artifact) => artifact.artifactId === reference.artifactId && artifact.kind === "raman-focus-plane",
+		)
+	) {
+		return failedActionResult("The approved focus-plane artifact is not part of the completed calibration run state.", {
+			errorCode: "focus_plane_artifact_not_in_completed_run",
+			message: "Mapping requires the completed calibration RunState to reference the exact focus-plane artifact.",
+			retrySafe: false,
+			needsOperator: true,
+			safeToResume: false,
+		});
+	}
 	try {
 		const content = readFileSync(join(runRoot(cwd, reference.calibrationRunId), record.artifact.path), "utf-8");
 		const checksum = `sha256:${createHash("sha256").update(content).digest("hex")}`;
 		const parsed = JSON.parse(content) as {
 			profile?: string;
 			calibrationRunId?: string;
+			procedureSpecId?: string;
 			model?: { a?: number; b?: number; c?: number };
 			validRegion?: unknown;
 		};
@@ -644,6 +679,7 @@ export function validateFocusPlaneArtifactReference(cwd: string, spec: Procedure
 			checksum !== reference.checksum ||
 			parsed.profile !== "raman-focus-plane" ||
 			parsed.calibrationRunId !== reference.calibrationRunId ||
+			parsed.procedureSpecId !== calibrationRunState.procedureSpecId ||
 			parsed.model?.a !== reference.coefficients.a ||
 			parsed.model?.b !== reference.coefficients.b ||
 			parsed.model?.c !== reference.coefficients.c ||
@@ -755,13 +791,14 @@ export async function validateRuntimeAnchorState(
 		if (!unit.point) {
 			continue;
 		}
+		const surfaceCorrection = mappingSurfaceCorrection(spec);
 		const zValues =
 			spec.plan.kind === "focus_plane_calibration"
 				? [spec.plan.seedZUm - 100, spec.plan.seedZUm + 100]
-				: spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection?.kind === "focus_plane"
+				: surfaceCorrection?.kind === "focus_plane"
 					? [
-							unit.point.zUm! - spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
-							unit.point.zUm! + spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+							unit.point.zUm! - surfaceCorrection.localAutofocusHalfRangeUm,
+							unit.point.zUm! + surfaceCorrection.localAutofocusHalfRangeUm,
 						]
 					: unit.point.zUm === undefined
 						? []
@@ -867,13 +904,14 @@ export async function runLiveRamanUnit(
 			artifactRefs,
 		};
 	}
+	const surfaceCorrection = mappingSurfaceCorrection(spec);
 	const autofocusWindow =
 		unit.focusCalibration !== undefined && spec.plan.kind === "focus_plane_calibration"
 			? [unitPosition.zUm - 100, unitPosition.zUm + 100]
-			: spec.plan.kind === "grid_scan" && spec.plan.surfaceCorrection?.kind === "focus_plane"
+			: surfaceCorrection?.kind === "focus_plane"
 				? [
-						unitPosition.zUm - spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
-						unitPosition.zUm + spec.plan.surfaceCorrection.localAutofocusHalfRangeUm,
+						unitPosition.zUm - surfaceCorrection.localAutofocusHalfRangeUm,
+						unitPosition.zUm + surfaceCorrection.localAutofocusHalfRangeUm,
 					]
 				: [];
 	if (autofocusWindow.length > 0) {

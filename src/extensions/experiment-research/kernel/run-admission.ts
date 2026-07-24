@@ -14,12 +14,20 @@ export interface RunAdmission {
 	controlAvailable: boolean;
 }
 
+export interface OperatorApproval {
+	acknowledgedProposalId: string;
+	acknowledgedSpecHash: string;
+	approvedBy: "user";
+	approvedAt: string;
+}
+
 export interface ApproveAndFreezeInput {
 	cwd: string;
 	proposalId: string;
 	spec: ProcedureSpec;
 	mode: ExecutionMode;
 	admission?: RunAdmission;
+	operatorApproval?: OperatorApproval;
 }
 
 export interface ApprovedFrozenProcedureSpec {
@@ -56,6 +64,53 @@ function assertLiveAdmission(mode: ExecutionMode, admission: RunAdmission | unde
 			"Live supervised execution requires controlAvailable=true before approval and start.",
 			"control_not_available",
 			{ executionMode: mode, admission },
+		);
+	}
+}
+
+function assertOperatorApproval(
+	mode: ExecutionMode,
+	proposal: ProcedureProposalRecord,
+	operatorApproval: OperatorApproval | undefined,
+): void {
+	if (mode !== "live-supervised") {
+		return;
+	}
+
+	if (!operatorApproval) {
+		throw new RunAdmissionError(
+			"Live supervised execution requires explicit user approval of the proposal before hardware motion or laser acquisition.",
+			"operator_approval_required",
+			{
+				executionMode: mode,
+				proposalId: proposal.proposalId,
+				specHash: proposal.specHash,
+			},
+		);
+	}
+
+	if (operatorApproval.acknowledgedProposalId !== proposal.proposalId) {
+		throw new RunAdmissionError(
+			`Operator approval acknowledged proposal ${operatorApproval.acknowledgedProposalId}, not ${proposal.proposalId}.`,
+			"operator_approval_proposal_mismatch",
+			{
+				executionMode: mode,
+				proposalId: proposal.proposalId,
+				acknowledgedProposalId: operatorApproval.acknowledgedProposalId,
+			},
+		);
+	}
+
+	if (operatorApproval.acknowledgedSpecHash !== proposal.specHash) {
+		throw new RunAdmissionError(
+			"Operator approval acknowledged a different ProcedureSpec hash.",
+			"operator_approval_spec_hash_mismatch",
+			{
+				executionMode: mode,
+				proposalId: proposal.proposalId,
+				specHash: proposal.specHash,
+				acknowledgedSpecHash: operatorApproval.acknowledgedSpecHash,
+			},
 		);
 	}
 }
@@ -99,6 +154,7 @@ export function approveAndFreezeProcedureSpec(input: ApproveAndFreezeInput): App
 	}
 
 	assertLiveAdmission(input.mode, input.admission);
+	assertOperatorApproval(input.mode, proposal, input.operatorApproval);
 
 	const frozenSpec = freezeProcedureSpec(input.cwd, proposal.spec, proposal.specHash);
 	const approvedProposal = approveProcedureProposal(input.cwd, proposal);

@@ -18,8 +18,10 @@ import {
 	type RamanLiveRuntime,
 } from "../runtime/raman/live-runtime.ts";
 import type { RunState } from "../schemas/index.ts";
+import type { ProcedureSpec } from "../schemas/procedure-spec.ts";
 import { ProcedureSpecValidator } from "../schemas/procedure-spec.ts";
 import { readArtifactRecords } from "../store/artifact-store.ts";
+import { writeRunStateSnapshot } from "../store/run-store.ts";
 
 const intent = {
 	intentId: "intent-focus-plane",
@@ -162,6 +164,61 @@ describe("focus-plane calibration and mapping", () => {
 			kind: "disabled",
 			reason: "user_declined",
 		});
+	});
+
+	it("rejects raw point-list mapping that bypasses the focus-plane decision", () => {
+		const spec: ProcedureSpec = {
+			procedureSpecId: "raw-point-list-mapping",
+			experimentId: intent.experimentId,
+			intentId: intent.intentId,
+			procedureId: "raman_grid_mapping",
+			procedureVersion: "0.1.0",
+			resources: [
+				{ resourceId: "stage-main", role: "stage" },
+				{ resourceId: "frame-main", role: "frame_provider" },
+				{ resourceId: "spectrometer-main", role: "spectrometer" },
+			],
+			limits,
+			plan: {
+				kind: "point_list",
+				points: [{ xUm: 0, yUm: 0, zUm: 1000 }],
+				perPoint: [{ kind: "move_to_point" }, { kind: "autofocus" }, { kind: "acquire_spectrum" }],
+			},
+			domain: {
+				raman: { autofocus, acquisition },
+			},
+		};
+
+		expect(ProcedureSpecValidator.Check(spec)).toBe(true);
+		expect(() => compileProcedureSpec(spec)).toThrow(/Mapping requires focus-plane calibration by default/u);
+	});
+
+	it("requires fixed Z for every point-list mapping point when correction is explicitly declined", () => {
+		const spec: ProcedureSpec = {
+			procedureSpecId: "declined-point-list-mapping",
+			experimentId: intent.experimentId,
+			intentId: intent.intentId,
+			procedureId: "raman_grid_mapping",
+			procedureVersion: "0.1.0",
+			resources: [
+				{ resourceId: "stage-main", role: "stage" },
+				{ resourceId: "frame-main", role: "frame_provider" },
+				{ resourceId: "spectrometer-main", role: "spectrometer" },
+			],
+			limits,
+			plan: {
+				kind: "point_list",
+				points: [{ xUm: 0, yUm: 0 }],
+				surfaceCorrection: { kind: "disabled", reason: "user_declined" },
+				perPoint: [{ kind: "move_to_point" }, { kind: "autofocus" }, { kind: "acquire_spectrum" }],
+			},
+			domain: {
+				raman: { autofocus, acquisition },
+			},
+		};
+
+		expect(ProcedureSpecValidator.Check(spec)).toBe(true);
+		expect(() => compileProcedureSpec(spec)).toThrow(/every point_list point to include an explicit fixed zUm/u);
 	});
 
 	it("rejects a proposal when the complete local autofocus window exceeds approved Z limits", () => {
@@ -369,6 +426,42 @@ describe("focus-plane calibration and mapping", () => {
 					...plane.model,
 					validRegion: plane.validRegion,
 				},
+			});
+			const calibrationArtifacts = readArtifactRecords(cwd, calibrationRunId).map((record) => record.artifact);
+			const completedUnits = compileProcedureSpec(calibrationSpec).length;
+			writeRunStateSnapshot(cwd, {
+				runId: calibrationRunId,
+				experimentId: calibrationSpec.experimentId,
+				procedureSpecId: calibrationSpec.procedureSpecId,
+				status: "failed",
+				progress: { completedUnits, failedUnits: 1, totalUnits: completedUnits, unitKind: "point" },
+				artifactRefs: calibrationArtifacts,
+				startedAt: "2026-07-24T00:00:00.000Z",
+				updatedAt: "2026-07-24T00:00:01.000Z",
+				endedAt: "2026-07-24T00:00:01.000Z",
+			});
+			const incompleteCalibrationResult = await runLiveRamanUnit(
+				cwd,
+				"mapping-run-incomplete-calibration",
+				compileProcedureSpec(mappingSpec)[0]!,
+				mappingSpec,
+				runtime,
+				{} as RunState,
+			);
+			expect(incompleteCalibrationResult.status).toBe("failed");
+			if (incompleteCalibrationResult.status === "failed") {
+				expect(incompleteCalibrationResult.error.errorCode).toBe("focus_plane_calibration_run_not_completed");
+			}
+			writeRunStateSnapshot(cwd, {
+				runId: calibrationRunId,
+				experimentId: calibrationSpec.experimentId,
+				procedureSpecId: calibrationSpec.procedureSpecId,
+				status: "completed",
+				progress: { completedUnits, failedUnits: 0, totalUnits: completedUnits, unitKind: "point" },
+				artifactRefs: calibrationArtifacts,
+				startedAt: "2026-07-24T00:00:00.000Z",
+				updatedAt: "2026-07-24T00:00:02.000Z",
+				endedAt: "2026-07-24T00:00:02.000Z",
 			});
 			const mappingResult = await runLiveRamanUnit(
 				cwd,
