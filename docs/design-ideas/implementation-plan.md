@@ -612,6 +612,7 @@ docs freeze
 - [x] calibration 使用以已恢复 Z 为中心的 ±100 µm coarse-to-fine autofocus
 - [x] calibration simulation 与 live runtime 都发布 `raman-focus-plane` artifact
 - [x] artifact 包含五点 evidence、模型、有效区域、run/spec provenance 和 SHA-256
+- [x] 已有四角 accepted autofocus evidence 可通过显式注册工具补齐 completed calibration RunState、artifact index 和 focus-plane artifact provenance；注册入口允许任意非退化凸四边形，不要求中心点参与拟合，也不允许手写 artifact JSON 绕过 preflight
 - [x] mapping spec 冻结 calibration run ID、artifact ID、checksum、系数和有效区域
 - [x] mapping 引用的 calibration run 必须 completed，且 artifact 同时存在于 artifact index 和 completed RunState
 - [x] mapping compiler 拒绝有效凸区域外点，并为每点计算 Predicted Focus Z

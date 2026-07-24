@@ -35,6 +35,10 @@ planning or simulation instead of inventing device status.
 - After `propose_run`, wait for the user to approve the exact proposal and spec
   hash. Do not call `approve_and_start_run` for live hardware on the user's
   behalf.
+- When a calibration model was computed from already accepted autofocus corner
+  evidence but is not yet part of a completed run artifact chain, use the
+  explicit registration tool if available. Do not hand-write trusted artifact
+  JSON or bypass focus-plane provenance.
 
 For read-only operator questions, use the dedicated operator tools when
 available. Do not construct an experiment plan merely to answer hardware status

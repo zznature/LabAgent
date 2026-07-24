@@ -14,6 +14,7 @@ import { buildProcedureSpec } from "../planner/procedure-spec-builder.ts";
 import { successActionResult } from "../runtime/raman/actions.ts";
 import {
 	runLiveRamanUnit,
+	validateFocusPlaneArtifactReference,
 	validateRuntimeAnchorState,
 	type RamanLiveRuntime,
 } from "../runtime/raman/live-runtime.ts";
@@ -21,7 +22,8 @@ import type { RunState } from "../schemas/index.ts";
 import type { ProcedureSpec } from "../schemas/procedure-spec.ts";
 import { ProcedureSpecValidator } from "../schemas/procedure-spec.ts";
 import { readArtifactRecords } from "../store/artifact-store.ts";
-import { writeRunStateSnapshot } from "../store/run-store.ts";
+import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
+import { registerFocusPlaneCalibrationArtifactTool } from "../tools/planner.ts";
 
 const intent = {
 	intentId: "intent-focus-plane",
@@ -501,6 +503,92 @@ describe("focus-plane calibration and mapping", () => {
 			if (tamperedResult.status === "failed") {
 				expect(tamperedResult.error.errorCode).toBe("focus_plane_artifact_mismatch");
 			}
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("registers four agent-computed focus-plane corner anchors as a completed calibration artifact", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "focus-plane-registration-"));
+		try {
+			const calibrationRunId = "registered-calibration-run";
+			const procedureSpecId = "registered-calibration-spec";
+			const validRegion: FocusPlaneCorner[] = [
+				{ anchorId: "corner_1", xUm: -600, yUm: -400 },
+				{ anchorId: "corner_2", xUm: 700, yUm: -300 },
+				{ anchorId: "corner_3", xUm: 500, yUm: 650 },
+				{ anchorId: "corner_4", xUm: -550, yUm: 450 },
+			];
+			const params = {
+				calibrationRunId,
+				procedureSpecId,
+				experimentId: intent.experimentId,
+				validRegion,
+				anchors: [
+					{ anchorId: "corner_1", xUm: -600, yUm: -400, zUm: 974, evidenceRefs: ["autofocus:corner_1"] },
+					{ anchorId: "corner_2", xUm: 700, yUm: -300, zUm: 1038, evidenceRefs: ["autofocus:corner_2"] },
+					{ anchorId: "corner_3", xUm: 500, yUm: 650, zUm: 1012, evidenceRefs: ["autofocus:corner_3"] },
+					{ anchorId: "corner_4", xUm: -550, yUm: 450, zUm: 955, evidenceRefs: ["autofocus:corner_4"] },
+				],
+				operatorConfirmation: {
+					approvedBy: "user" as const,
+					approvedAt: "2026-07-24T00:00:00.000Z",
+					acknowledgedCalibrationRunId: calibrationRunId,
+					acknowledgedNoHardwareMotion: true as const,
+				},
+			};
+
+			const result = await registerFocusPlaneCalibrationArtifactTool.execute(
+				"register-focus-plane",
+				params,
+				undefined,
+				undefined,
+				{ cwd } as never,
+			);
+			expect(result.details.status).toBe("success");
+			expect(readRunStateSnapshot(cwd, calibrationRunId)?.status).toBe("completed");
+			const artifactRecords = readArtifactRecords(cwd, calibrationRunId);
+			expect(artifactRecords).toHaveLength(1);
+			expect(artifactRecords[0]!.artifact.kind).toBe("raman-focus-plane");
+
+			const surfaceCorrection = result.details.stateAfter.surfaceCorrection as {
+				artifactId: string;
+				checksum: string;
+				coefficients: { a: number; b: number; c: number };
+			};
+			const mappingSpec = buildProcedureSpec({
+				procedureId: "raman_grid_mapping",
+				intent,
+				resources,
+				limits,
+				autofocus,
+				acquisition,
+				grid: {
+					origin: { xUm: 0, yUm: 0 },
+					rows: 1,
+					cols: 1,
+					pitchXUm: 10,
+					pitchYUm: 10,
+				},
+				focusPlane: {
+					calibrationRunId,
+					artifactId: surfaceCorrection.artifactId,
+					checksum: surfaceCorrection.checksum,
+					...surfaceCorrection.coefficients,
+					validRegion,
+				},
+			});
+			expect(validateFocusPlaneArtifactReference(cwd, mappingSpec)).toBeUndefined();
+
+			const duplicate = await registerFocusPlaneCalibrationArtifactTool.execute(
+				"register-focus-plane-duplicate",
+				params,
+				undefined,
+				undefined,
+				{ cwd } as never,
+			);
+			expect(duplicate.details.status).toBe("error");
+			expect(duplicate.details.errorCode).toBe("focus_plane_registration_failed");
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}

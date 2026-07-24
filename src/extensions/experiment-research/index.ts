@@ -17,6 +17,7 @@ import {
 	getLabStateTool,
 	getProcedureSpecTemplateTool,
 	recordExperimentIntentTool,
+	registerFocusPlaneCalibrationArtifactTool,
 	runPreflightTool,
 	validateProcedureSpecTool,
 } from "./tools/planner.ts";
@@ -39,6 +40,7 @@ const PLANNER_TOOL_NAMES = [
 	"get_procedure_spec_template",
 	"validate_procedure_spec",
 	"run_preflight",
+	"register_focus_plane_calibration_artifact",
 	"propose_run",
 	"approve_and_start_run",
 	"poll_run",
@@ -76,6 +78,7 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(getProcedureSpecTemplateTool);
 	pi.registerTool(validateProcedureSpecTool);
 	pi.registerTool(runPreflightTool);
+	pi.registerTool(registerFocusPlaneCalibrationArtifactTool);
 	pi.registerTool(ramanGetHardwareStatusTool);
 	pi.registerTool(ramanGetStagePositionTool);
 	pi.registerTool(ramanCaptureFrameTool);
