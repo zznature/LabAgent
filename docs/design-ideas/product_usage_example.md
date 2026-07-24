@@ -138,16 +138,53 @@
 
 12. user: 谱线信号不错，以这个点为中心，开始采集 10 x 10 mapping，x 间距 10 um，y 间距 15 um。
 13. agent:
-   - 我将把这个目标整理成一次新的 bounded run，而不是在上一条单点 run 内直接扩展。
+   - mapping 默认先校正样品倾斜焦平面；如果你要使用固定 Z，需要明确拒绝校正并给出固定 Z。
+   - 你可以指定四个 calibration corner；如果不指定，我会读取当前位置，以当前 XY 为中心生成边长
+     `1000 µm` 的正方形，center 为四角算术平均值。
+   - 建议先执行 calibration run:
+     - procedure: `raman_focus_plane_calibration`
+     - fit anchors: `corner_1..4 + center`
+     - start position: `{current x, current y}`
+     - seed Z: `{current z}`
+     - progressive waypoint max span: `{approved maxXySpanUm}`
+     - autofocus: 围绕上一 accepted focus Z 的 `±100 µm` coarse-to-fine 搜索
+   - calibration 和 mapping 是两次独立 bounded approval；默认校正不授权任何真实运动。
+   - 请先确认 calibration run。
+
+14. user: 确认执行焦平面校准。
+15. agent:
+   - 已启动 calibration run `{calibrationRunId}`
+   - progress 同时显示 navigation waypoints 和 5 个 fit anchors
+   - operator 可在 unit 安全边界 pause / abort
+   - run 不会临时增加 waypoint、扩大 Z 搜索窗口或直接开始 mapping
+
+16. agent:
+   - calibration run `{calibrationRunId}` completed
+   - accepted fit anchors: `5 / 5`
+   - focus-plane model:
+     - equation: `Z = aX + bY + c`
+     - RMSE / max absolute residual: `{diagnostics}`
+     - valid convex region: `{four corners}`
+     - artifact ref: `{calibrationRunId, artifactId, sha256}`
+   - 如果五点证据不完整、四角退化、拟合失败或 Artifact 发布失败，run 不产生可供 mapping 使用的模型。
+
+17. agent:
+   - 我将 mapping 整理成第二份冻结的 `ProcedureSpec`，不会修改 calibration run。
    - 建议 mapping spec:
      - procedure: `raman_grid_mapping`
      - center: `{current approved point}`
      - grid: `10 x 10`
      - pitchXUm: `10`
      - pitchYUm: `15`
+     - surface correction:
+       - kind: `focus_plane`
+       - calibration ref: `{calibrationRunId, artifactId, checksum}`
+       - coefficients: `{a, b, c}`
+       - valid region: `{corner_1..4}`
+       - local autofocus half range: `40 µm`
      - per-point actions:
-       - move_to_point
-       - autofocus
+       - move_to_point（compiler 已把 Predicted Focus Z 冻结进 point unit）
+       - autofocus（只在 predicted Z 周围 `±40 µm`）
        - capture_frame
        - acquire_spectrum
    - 继承的采集参数:
@@ -158,15 +195,17 @@
      - `notice`: 总时长显著增加
      - `confirm_required`: stage 将在网格范围内连续真实运动
      - `confirm_required`: 将进行多点激光采集
-     - `forbidden`: 如果任一点规划越过 Z / motion / power limits，则拒绝启动
+     - `forbidden`: calibration Artifact 缺失，或 checksum、系数、valid region 不匹配
+     - `forbidden`: 任一点在 calibrated convex region 外
+     - `forbidden`: 任一点 Predicted Focus Z、`±40 µm` 窗口、motion 或 power 越过 limits
    - 预估:
      - total points: `100`
      - expected duration: `{eta}`
      - save root: `{param}`
    - 请确认是否启动该 mapping run。
 
-14. user: 确认执行 mapping。
-15. agent:
+18. user: 确认执行 mapping。
+19. agent:
    - 已启动 mapping run `{runId}`
    - current status: `running`
    - progress: `0 / 100`
@@ -175,16 +214,17 @@
      - supervised mode only
      - operator may pause / abort at safe boundaries
      - no automatic expansion beyond approved grid
+     - no runtime refit or mutation of frozen Predicted Focus Z
 
-16. agent:
+20. agent:
    - progress update: `35 / 100`
-   - last completed point: `{row, col, x, y}`
+   - last completed point: `{row, col, x, y, predictedZ}`
    - recent health:
      - autofocus low-confidence count: `{param}`
      - spectrum failures: `{param}`
    - if needed: 可以由用户选择 pause / abort，但系统不会擅自扩大或改写 grid。
 
-17. agent:
+21. agent:
    - mapping run `{runId}` completed
    - resources released
    - outputs:
@@ -206,8 +246,11 @@
 1. 用户看到的是“任务推进”，但系统内部必须拆成多次 bounded run。
 2. agent 可以主动提议下一步，但每次新的 effectful hardware run 都必须经过确认。
 3. 单点采谱成功，不等于系统可以自动开始 mapping；mapping 仍然是一次新的批准。
-4. parameter search 必须有明确 envelope，不能变成无界自动调参。
-5. 风险提示不只是报错文案，而要参与 run 是否允许启动的判定。
+4. 默认焦平面校正只选择规划路径；calibration 和 mapping 仍分别需要用户批准。
+5. calibration Artifact 是跨 run immutable evidence，mapping 只能引用，不能在热路径重拟合。
+6. 用户明确拒绝校正时，mapping 必须冻结 fixed Z，不能以缺失 Z 的 plan 继续。
+7. parameter search 必须有明确 envelope，不能变成无界自动调参。
+8. 风险提示不只是报错文案，而要参与 run 是否允许启动的判定。
 
 ## Open questions still worth freezing later
 

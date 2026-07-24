@@ -199,6 +199,53 @@ lab-config/templates/*.json
 
 如果没有模板匹配，planner 回到自主规划，并在提出 run 前向用户确认关键假设。`ProcedureSpec` schema 不因为模板而增加 provenance 字段；模板应用信息只出现在 planner / proposal details 中，避免污染 kernel 执行输入。
 
+## Focus-Plane Calibration Evidence
+
+倾斜薄膜的大范围 Raman mapping 不在 mapping 热路径中重新拟合焦平面，而是使用两份分别审批、
+冻结和执行的 `ProcedureSpec`：
+
+```text
+raman_focus_plane_calibration
+  -> completed calibration Run
+  -> immutable raman-focus-plane Artifact
+  -> raman_grid_mapping references that Artifact
+```
+
+calibration plan 冻结：
+
+- proposal-time `startPosition`
+- `seedZUm`
+- 用户指定的 `corner_1..4`，或以当前位置为中心的默认 1000 µm 正方形
+- 四角算术平均得到的 `center`
+- `maxXySpanUm`
+- 固定的 `move_to_point -> autofocus -> capture_frame` action 顺序
+
+自定义四角必须互异并形成四顶点凸四边形。compiler 从 `startPosition` 开始生成有限 progressive
+XY waypoint；每段不超过 `maxXySpanUm`。waypoint autofocus 只提供导航与恢复证据，平面拟合只使用
+`center + corner_1..4` 五个 accepted autofocus 结果。
+
+后续 calibration unit 的移动 Z 从该 run 最近的 accepted `raman-autofocus` Artifact 恢复，
+autofocus 再围绕它执行 ±100 µm coarse-to-fine 搜索。最终 anchor unit 完成后拟合：
+
+```text
+Z = aX + bY + c
+```
+
+并发布 `raman-focus-plane` Artifact。当前分支的 Artifact 是 run 目录中的不可覆盖 JSON 文件，
+包含 `calibrationRunId`、`procedureSpecId`、五个 anchors、模型系数、RMSE、最大绝对残差、
+anchor 数量和有效四角区域；`ArtifactRef.metadata` 保存 SHA-256。
+
+mapping plan 使用显式 `surfaceCorrection`：
+
+- 默认路径是引用 `{ calibrationRunId, artifactId, checksum }`
+- 同时冻结 `coefficients`、四角 `validRegion` 和 `localAutofocusHalfRangeUm: 40`
+- compiler 拒绝 calibrated convex region 外的点，并把 Predicted Focus Z 写入每个 point unit
+- runtime 每个 unit 重读原 Artifact，核对 profile、run ID、checksum、系数和 region
+- runtime 严格执行 `move_to_point -> autofocus -> acquire_spectrum`
+
+只有用户明确拒绝校正时才允许 `{ kind: "disabled", reason: "user_declined" }`，且 grid 必须给出固定
+`origin.zUm`。默认选择校正只决定规划路径，不能替代 calibration 和 mapping 各自的 bounded approval。
+
 ## Derived Runtime Object
 
 ### Compiled Units
@@ -336,13 +383,38 @@ type ProcedureSpec = {
     | {
         kind: "grid_scan"
         grid: {
-          origin: { xUm: number; yUm: number }
+          origin: { xUm: number; yUm: number; zUm?: number }
           rows: number
           cols: number
           pitchXUm: number
           pitchYUm: number
           order?: "row_major" | "snake"
         }
+        surfaceCorrection?:
+          | {
+              kind: "focus_plane"
+              calibrationRunId: string
+              artifactId: string
+              checksum: string
+              coefficients: { a: number; b: number; c: number }
+              validRegion: Array<{ anchorId: string; xUm: number; yUm: number }>
+              localAutofocusHalfRangeUm: 40
+            }
+          | {
+              kind: "disabled"
+              reason: "user_declined"
+            }
+        perPoint: SemanticStep[]
+      }
+    | {
+        kind: "focus_plane_calibration"
+        seedZUm: number
+        startPosition: { xUm: number; yUm: number }
+        anchors: {
+          corners: Array<{ anchorId: string; xUm: number; yUm: number }>
+          center: { anchorId: "center"; xUm: number; yUm: number }
+        }
+        maxXySpanUm: number
         perPoint: SemanticStep[]
       }
     | {

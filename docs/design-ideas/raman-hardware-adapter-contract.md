@@ -65,10 +65,12 @@ MVP 至少收敛这些能力：
 | frame provider | LabSpec worker frame provider |
 | autofocus | 单点 autofocus 复合动作 |
 | spectrum acquisition | 单点采谱 |
+| focus-plane calibration | 已实现为独立 bounded run、五点拟合和跨 run Artifact 引用 |
 | XY correction | future/reference only; not part of MVP runtime surface |
 | mapping reference | 参考点执行顺序与 record 结构，不是最终 kernel |
 
 关键判断：多点 workflow state 必须归 kernel/runtime contract 管，不能藏在 Python loop 里。
+Focus-plane calibration 修正倾斜样品的 Z 焦面；XY correction 修正横向图像漂移，两者不是同一能力。
 
 ## 4. Raman 资源注册
 
@@ -283,6 +285,20 @@ MVP 不必一开始拆到 `begin / poll / collect`。
 - `fineCurveArtifact?`
 - `message`
 
+同一个 `autofocus.run_single` contract 当前支持三种 strategy：
+
+- `fixed_absolute`
+  - 使用 spec 给出的 `zStartUm / zEndUm`
+- `calibration_coarse_to_fine`
+  - 围绕当前 unit 恢复出的 previous accepted focus Z 执行 ±100 µm coarse-to-fine 搜索
+  - Python daemon 使用 `AutofocusController.run_single`
+- `mapping_local_correction`
+  - stage 已先移动到 compiler 冻结的 Predicted Focus Z
+  - daemon 使用该 Z 周围 ±40 µm fixed-range 搜索
+
+strategy 的窗口由 TypeScript runtime 解析并传入 daemon；daemon 不持有跨 unit 的 previous focus，
+也不保存或更新焦平面模型。
+
 #### XY Correction（MVP 不实现，reference-only）
 
 > XY correction 在当前 MVP 不接入。本小节保留为 reference，用于未来 mapping 累积误差补偿增量。详见 `implementation-plan.md` 的 Open issues。
@@ -489,10 +505,77 @@ domain:
 - `laserPowerPercent` 是请求的 LabSpec 激光功率百分比档位
 - `limits.maxLaserPowerPercent` 是本次 run 的安全上界
 - Raman lab 的实际硬件功率不是连续值，spectrometer resource config 应声明允许的固定档位，例如 `0.01 / 0.1 / 1 / 3.2 / 5 / 10 / 25 / 50 / 100`
-- `autofocus.params.zStartUm/zEndUm` 表示实验室优化过的固定 Z range autofocus；MVP live daemon 不再支持旧的 `coarseRangeUm/fineRangeUm` coarse/fine path。
+- `autofocus.params.zStartUm/zEndUm` 继续表示实验室优化过的 fixed-range autofocus；只有
+  `calibration_coarse_to_fine` strategy 会由 runtime 生成 ±100 µm 范围，并使用
+  `coarseStepUm / fineHalfRangeUm / fineStepUm`。
 - fixed-range autofocus 当前固定使用 10 点扫描；`pointCount` 可表达调用意图，但 daemon 会归一为有效 10 点，并在返回 payload 的 `params.effectivePointCount` / `params.effectiveSpacingUm` 中记录实际值。
 - `warmupFramesPerZ` 表示每个 Z 采样点丢弃的预热帧数；`framesPerZ` 表示参与评分的帧数。file-backed frame provider 会尽量只保留代表评分帧，减少 bridge 目录堆积。
 - live run 与 operator autofocus 的默认 action timeout 为 150s；daemon 传输层会额外保留短 guard window，用于让 Python 侧返回结构化超时/错误。
+
+### 8.1 焦平面校准与校正 mapping
+
+Issue #3 使用两个独立 `ProcedureSpec` 和两次 bounded approval。
+
+校准 plan 的当前 schema：
+
+```yaml
+procedureId: raman_focus_plane_calibration
+plan:
+  kind: focus_plane_calibration
+  seedZUm: 1500
+  startPosition: { xUm: 1000, yUm: 2000 }
+  anchors:
+    corners:
+      - { anchorId: corner_1, xUm: 500,  yUm: 1500 }
+      - { anchorId: corner_2, xUm: 1500, yUm: 1500 }
+      - { anchorId: corner_3, xUm: 1500, yUm: 2500 }
+      - { anchorId: corner_4, xUm: 500,  yUm: 2500 }
+    center: { anchorId: center, xUm: 1000, yUm: 2000 }
+  maxXySpanUm: 250
+  perPoint:
+    - { kind: move_to_point }
+    - { kind: autofocus }
+    - { kind: capture_frame, laserOff: true }
+```
+
+planner 在用户未指定四角时，以 proposal-time 当前 XY 为中心生成边长 1000 µm 的正方形，
+并把当前 XY/Z 冻结为 `startPosition / seedZUm`。自定义四角必须互异、组成四顶点凸四边形；
+center 必须是四角算术平均值。
+
+compiler 会从 `startPosition` 开始插入有限 waypoint，并拒绝可能被 `maxUnits` 截断的 calibration。
+runtime 从同一 run 已持久化的最新 accepted autofocus Artifact 恢复下一 unit 的 Z；只有五个命名
+anchors 进入平面拟合。最终 anchor unit 发布 `raman-focus-plane` JSON，Python daemon 不负责拟合。
+
+校正 mapping 的当前 schema：
+
+```yaml
+plan:
+  kind: grid_scan
+  grid:
+    origin: { xUm: 1000, yUm: 2000 }
+    rows: 10
+    cols: 10
+    pitchXUm: 10
+    pitchYUm: 15
+    order: snake
+  surfaceCorrection:
+    kind: focus_plane
+    calibrationRunId: calibration-run-id
+    artifactId: focus-plane-artifact-id
+    checksum: sha256:digest
+    coefficients: { a: 0.01, b: -0.02, c: 1530 }
+    validRegion:
+      - { anchorId: corner_1, xUm: 500,  yUm: 1500 }
+      - { anchorId: corner_2, xUm: 1500, yUm: 1500 }
+      - { anchorId: corner_3, xUm: 1500, yUm: 2500 }
+      - { anchorId: corner_4, xUm: 500,  yUm: 2500 }
+    localAutofocusHalfRangeUm: 40
+```
+
+compiler 验证全部 mapping XY 位于 calibrated convex region，计算每点 Predicted Focus Z，并强制
+唯一的 `move_to_point -> autofocus -> acquire_spectrum` 顺序。preflight/runtime 重读 calibration
+Artifact，核对 profile、run ID、checksum、coefficients 和 validRegion。用户明确拒绝时允许
+`{ kind: disabled, reason: user_declined }`，但 grid 必须冻结 `origin.zUm`。
 
 ## 9. 预检与维护工具如何接 Raman
 
@@ -536,9 +619,9 @@ MVP rebuild 应提供单独的 operator tool：
 
 但这类动作不能混入 planner 的 dry-run 语义。
 
-### 9.3 Calibration Tools（MVP 不实现，随 XY correction 一并推迟）
+### 9.3 XY Calibration Tools（MVP 不实现，随 XY correction 一并推迟）
 
-> 标定工具链服务于 XY correction，当前 MVP 不接入。本小节保留为 reference。
+> 本小节只服务于 XY correction，与已实现的 bounded Focus-Plane Calibration Run 无关。
 
 Raman 特有但很现实的一类维护操作是标定：
 
@@ -559,6 +642,7 @@ MVP 最小必需产物应包括：
 - spectrum 原始 txt
 - spectrum plot
 - LabSpec request/result 文件
+- `raman-focus-plane` JSON 及带 SHA-256 的 ArtifactRef
 
 > `XY correction reference/current frame` artifacts remain future/reference only and are outside the MVP artifact baseline.
 
@@ -583,6 +667,10 @@ MVP 最小错误模型建议至少区分：
 - `spectrum_timeout`
 - `worker_result_error`
 - `bridge_protocol_error`
+- `focus_plane_artifact_missing`
+- `focus_plane_artifact_mismatch`
+- `focus_plane_fit_failed`
+- `calibration_action_sequence_incomplete`
 
 > `xy_correction_low_confidence` remains a future/reference error code and is outside the MVP error surface.
 
@@ -612,7 +700,8 @@ legacy mapping runner 的点执行顺序、point record 和离线验证方式有
 2. 收敛 stage / frame / spectrum drivers。
 3. 收敛 autofocus 与 single spectrum acquisition wrapper；XY correction 推迟。
 4. 整理 planner-facing experiment tools 与 operator-facing maintenance tools。
-5. 校验这套分层能否平移到温控台、电化学或别的仪器。
+5. 实现 bounded focus-plane calibration、模型 Artifact、Predicted Focus Z 与 mapping local correction。
+6. 校验这套分层能否平移到温控台、电化学或别的仪器。
 
 ## 14. 结论
 
