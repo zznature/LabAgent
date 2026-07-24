@@ -380,6 +380,11 @@ class AutofocusController:
             0.0,
             min(1.0, statistics.median(verification_scores) / best_score),
         )
+        selected = result.selected or result.best
+        final_reproducibility = max(
+            0.0,
+            min(1.0, result.final_verification.score / max(selected.score, 1e-9)),
+        )
 
         confidence = max(
             0.0,
@@ -388,13 +393,17 @@ class AutofocusController:
                 0.25 * peak_prominence
                 + 0.20 * peak_centeredness
                 + 0.20 * trend_consistency
-                + 0.15 * verification_ratio
+                + 0.08 * verification_ratio
+                + 0.07 * final_reproducibility
                 + 0.20 * max(0.0, min(1.0, top_separation * 4.0)),
             ),
         )
-        selected = result.selected or result.best
+        edge_peak = best_index == 0 or best_index == len(scores) - 1
+        if edge_peak:
+            confidence = min(confidence, 0.35)
         return confidence, {
             "confidenceMethod": "curve_quality",
+            "edgePeak": "true" if edge_peak else "false",
             "peakProminence": peak_prominence,
             "topSeparation": top_separation,
             "peakCenteredness": peak_centeredness,
@@ -402,6 +411,7 @@ class AutofocusController:
             "fallingConsistency": falling_consistency,
             "trendConsistency": trend_consistency,
             "verificationRatio": verification_ratio,
+            "finalReproducibility": final_reproducibility,
             "bestIndex": float(best_index),
             "scanPointCount": float(len(scores)),
             "verificationPointCount": float(len(verification_scores)),

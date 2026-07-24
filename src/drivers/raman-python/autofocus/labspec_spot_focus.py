@@ -1,9 +1,10 @@
 """LabSpec bright-spot autofocus metric.
 
 This metric is tuned for LabSpec video frames where correct focus appears as a
-compact bright spot in the selected ROI. It intentionally does not reward raw
-edge/stripe energy, because defocused LabSpec frames can contain stronger
-fringes than focused frames.
+compact bright spot or a coherent circular interference pattern in the selected
+ROI. It intentionally does not reward raw high-frequency texture by itself,
+because defocused LabSpec frames can contain stronger random texture than
+focused frames.
 """
 
 from __future__ import annotations
@@ -60,7 +61,13 @@ def labspec_spot_compactness(image: np.ndarray, roi: ROI) -> float:
 
 
 def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
-    """Score centered LabSpec focus while penalizing rings and background texture."""
+    """Score coherent LabSpec focus while rejecting random texture peaks.
+
+    Good LabSpec focus can appear as either a compact center spot or a crisp,
+    coherent ring pattern. Defocused frames often contain strong vertical
+    stripes/noise, so this metric rewards spatial coherence rather than raw
+    gradient energy alone.
+    """
     patch = prepare(image, roi, blur=False)
     normalized = _robust_normalize(patch)
 
@@ -81,8 +88,8 @@ def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
 
     rms_radius = float(np.sqrt(np.sum(weighted * radius_sq) / total))
     core_radius = max(8.0, min(normalized.shape) * 0.055)
-    ring_inner = max(core_radius * 1.8, min(normalized.shape) * 0.11)
-    ring_outer = max(ring_inner + 1.0, min(normalized.shape) * 0.32)
+    ring_inner = max(core_radius * 2.0, min(normalized.shape) * 0.18)
+    ring_outer = max(ring_inner + 1.0, min(normalized.shape) * 0.44)
 
     core_mask = radius_sq <= core_radius**2
     ring_mask = (radius_sq > ring_inner**2) & (radius_sq <= ring_outer**2)
@@ -103,15 +110,46 @@ def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
     gy, gx = np.gradient(normalized)
     gradient_energy = gx**2 + gy**2
     background_texture = float(np.mean(gradient_energy[background_mask])) if np.any(background_mask) else 0.0
-    ring_penalty = ring_fraction / max(core_fraction + ring_fraction, 1e-6)
+    texture_penalty = min(1.0, background_texture * 12.0)
 
-    raw_score = (
-        3.2 * compact_score
-        + 1.8 * center_score
-        + 1.2 * local_contrast
-        - 1.4 * ring_penalty
-        - 4.0 * background_texture
+    roi_radius = np.sqrt(roi_radius_sq)
+    center_mask = roi_radius <= max(12.0, min(normalized.shape) * 0.12)
+    mid_ring_mask = (
+        (roi_radius > min(normalized.shape) * 0.22)
+        & (roi_radius <= min(normalized.shape) * 0.43)
     )
+    outer_mask = roi_radius > min(normalized.shape) * 0.48
+    center_mean = float(np.mean(normalized[center_mask])) if np.any(center_mask) else 0.0
+    mid_ring_mean = float(np.mean(normalized[mid_ring_mask])) if np.any(mid_ring_mask) else 0.0
+    outer_mean = float(np.mean(normalized[outer_mask])) if np.any(outer_mask) else 0.0
+    ring_contrast = max(0.0, mid_ring_mean - max(center_mean, outer_mean))
+
+    radius_bins = np.linspace(0.0, float(np.max(roi_radius)), 28)
+    radial_profile: list[float] = []
+    for index in range(1, len(radius_bins)):
+        mask = (roi_radius >= radius_bins[index - 1]) & (roi_radius < radius_bins[index])
+        if np.any(mask):
+            radial_profile.append(float(np.mean(normalized[mask])))
+    radial_coherence = 0.0
+    if len(radial_profile) >= 4:
+        profile = np.asarray(radial_profile, dtype=np.float32)
+        radial_coherence = float(np.std(profile) / max(float(np.mean(profile)), 1e-6))
+        radial_coherence = min(1.0, radial_coherence)
+
+    bright_fraction = float(np.mean(normalized > 0.75))
+    ring_score = (
+        5.0 * ring_contrast
+        + 1.8 * radial_coherence
+        + 1.0 * min(1.0, bright_fraction * 12.0)
+    ) * (1.0 - 0.55 * texture_penalty)
+
+    spot_score = (
+        2.6 * compact_score
+        + 1.5 * center_score
+        + 1.0 * local_contrast
+    ) * (1.0 - 0.70 * texture_penalty)
+
+    raw_score = max(spot_score, ring_score)
     score = 100.0 * max(raw_score, 0.0)
     if not np.isfinite(score):
         return 0.0
