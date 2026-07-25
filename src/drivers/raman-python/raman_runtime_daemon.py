@@ -564,7 +564,13 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
             pass
     if result.coarse is not None:
         response_payload["scanPoints"] = [
-            {"zUm": point.z_um, "score": point.score, "saturationRatio": point.saturation_ratio}
+            {
+                "targetZUm": point.target_z_um,
+                "zUm": point.z_um,
+                "score": point.score,
+                "saturationRatio": point.saturation_ratio,
+                "frames": point.frames or [],
+            }
             for point in result.coarse.points
         ]
     if str(result.status.value) == "ok":

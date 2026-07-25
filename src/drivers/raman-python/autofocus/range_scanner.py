@@ -49,6 +49,7 @@ class FixedRangeScanner:
         *,
         frames_per_z: int | None = None,
         tolerance_um: float | None = None,
+        sample_role: str = "scan",
     ) -> ScoredZPoint:
         self._set_stage_tolerance(
             self.params.target_tolerance_um if tolerance_um is None else tolerance_um
@@ -72,12 +73,14 @@ class FixedRangeScanner:
             scored_frames.append((frame, self.strategy.score(frame.image, frame_roi)))
         scores = [score for _, score in scored_frames]
         score = float(statistics.median(scores))
+        frame_records = self._frame_records(captured, scored_frames, sample_role)
         self._discard_non_representative_frames(captured, scored_frames, score)
 
         return ScoredZPoint(
             target_z_um=float(target_z_um),
             actual_z_um=float(actual_z_um),
             score=score,
+            frames=frame_records,
         )
 
     def move_to_z(self, z_um: float) -> float:
@@ -134,6 +137,29 @@ class FixedRangeScanner:
         discard = getattr(self.frames, "discard_frames", None)
         if callable(discard):
             discard(discard_paths)
+
+    def _frame_records(
+        self,
+        captured: list[Frame],
+        scored_frames: list[tuple[Frame, float]],
+        sample_role: str,
+    ) -> list[dict[str, float | int | str | None]]:
+        score_by_seq = {frame.seq: score for frame, score in scored_frames}
+        records: list[dict[str, float | int | str | None]] = []
+        for index, frame in enumerate(captured):
+            score = score_by_seq.get(frame.seq)
+            records.append(
+                {
+                    "role": "warmup" if index < self.params.warmup_frames_per_z else "scoring",
+                    "sampleRole": sample_role,
+                    "seq": frame.seq,
+                    "path": frame.path,
+                    "timestamp": frame.timestamp,
+                    "score": score,
+                    "usedForPointScore": score is not None,
+                }
+            )
+        return records
 
     def _set_stage_tolerance(self, tolerance_um: float) -> None:
         setter = getattr(self.stage, "set_target_tolerance_um", None)

@@ -115,8 +115,8 @@ class MCNewtonXYZStageController:
         self._stability_tolerance_um = float(stability_tolerance_um)
         self._cap_nf = int(cap_nf)
         self._axis_motion_profiles: dict[str, tuple[str, str, int, int]] = {
-            "x": ("mm", "slide", 30, 1000),
-            "y": ("mm", "slide", 30, 1000),
+            "x": ("mm", "slide", 35, 1000),
+            "y": ("mm", "slide", 35, 1000),
             "z": ("mm", "step", 30, 750),
         }
         self._configured_axis_profiles: dict[str, tuple[str, str, int, int]] = {}
@@ -201,7 +201,7 @@ class MCNewtonXYZStageController:
     def apply_fast_move_profile(
         self,
         *,
-        voltage_v: int = 30,
+        voltage_v: int = 50,
         frequency_hz: int = 1000,
         mode: str = "slide",
         units: str = "mm",
@@ -209,8 +209,8 @@ class MCNewtonXYZStageController:
         z_frequency_hz: int = 750,
         z_mode: str = "step",
     ) -> None:
-        if voltage_v > 30:
-            raise ValueError("fast move profile voltage_v must not exceed 30 V.")
+        if voltage_v > 50:
+            raise ValueError("fast move profile voltage_v must not exceed 50 V.")
         if frequency_hz > 1000:
             raise ValueError("fast move profile frequency_hz must not exceed 1000 Hz.")
         if z_voltage_v > 30:

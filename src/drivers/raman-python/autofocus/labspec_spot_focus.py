@@ -137,16 +137,26 @@ def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
         radial_coherence = min(1.0, radial_coherence)
 
     bright_fraction = float(np.mean(normalized > 0.75))
+    ring_to_core = ring_fraction / max(core_fraction, 1e-9)
+    ring_core_support = min(1.0, core_fraction / 0.05)
+    ring_dominance_penalty = 1.0 / (1.0 + (ring_to_core / 2.5) ** 2)
+    ring_focus_support = (
+        min(1.0, core_fraction / 0.13)
+        / (1.0 + (max(0.0, rms_radius - 27.0) / 6.0) ** 2)
+        / (1.0 + (max(0.0, center_distance - 8.0) / 18.0) ** 2)
+    )
     ring_score = (
         5.0 * ring_contrast
         + 1.8 * radial_coherence
         + 1.0 * min(1.0, bright_fraction * 12.0)
-    ) * (1.0 - 0.55 * texture_penalty)
+    ) * (1.0 - 0.55 * texture_penalty) * ring_core_support * ring_dominance_penalty * ring_focus_support
 
+    spot_context_support = min(1.0, core_fraction / 0.10) / (
+        1.0 + (ring_to_core / 4.0) ** 2
+    )
     spot_score = (
-        2.6 * compact_score
-        + 1.5 * center_score
-        + 1.0 * local_contrast
+        8.0 * compact_score
+        + spot_context_support * (0.8 * center_score + 0.7 * local_contrast)
     ) * (1.0 - 0.70 * texture_penalty)
 
     raw_score = max(spot_score, ring_score)

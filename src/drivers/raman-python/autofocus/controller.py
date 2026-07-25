@@ -4,6 +4,9 @@ import logging
 import math
 import statistics
 from typing import Callable, Optional
+
+import numpy as np
+
 from autofocus.models import (
     ROI, FrameProvider, ZStage, FocusStrategy,
     AutofocusParams, FixedRangeAutofocusParams, FixedRangeAutofocusResult,
@@ -239,7 +242,13 @@ class AutofocusController:
         curve = ScanCurve(
             phase="coarse",
             points=[
-                FocusPoint(z_um=point.actual_z_um, score=point.score, saturation_ratio=0.0)
+                FocusPoint(
+                    z_um=point.actual_z_um,
+                    score=point.score,
+                    saturation_ratio=0.0,
+                    target_z_um=point.target_z_um,
+                    frames=point.frames,
+                )
                 for point in result.points
             ],
         )
@@ -338,15 +347,12 @@ class AutofocusController:
     def _fixed_range_curve_quality_confidence(result: FixedRangeAutofocusResult) -> tuple[float, dict[str, float | str]]:
         scan_points = result.points
         scores = [point.score for point in scan_points]
-        verification_scores = [result.final_verification.score]
-        if result.prediction_verification is not None:
-            verification_scores.append(result.prediction_verification.score)
         if len(scores) < 3:
             return 0.0, {
                 "confidenceMethod": "curve_quality",
                 "reason": "too_few_points",
                 "scanPointCount": float(len(scores)),
-                "verificationPointCount": float(len(verification_scores)),
+                "verificationPointCount": float(1 + int(result.prediction_verification is not None)),
             }
 
         best_index = max(range(len(scores)), key=lambda index: scores[index])
@@ -357,13 +363,18 @@ class AutofocusController:
                 "confidenceMethod": "curve_quality",
                 "reason": "non_positive_best_score",
                 "scanPointCount": float(len(scores)),
-                "verificationPointCount": float(len(verification_scores)),
+                "verificationPointCount": float(1 + int(result.prediction_verification is not None)),
                 "bestIndex": float(best_index),
                 "bestScore": float(best_score),
                 "medianScore": float(median_score),
             }
 
         peak_prominence = max(0.0, min(1.0, (best_score - median_score) / best_score))
+        prediction_verification_score = (
+            result.prediction_verification.score
+            if result.prediction_verification is not None
+            else best_score
+        )
         sorted_scores = sorted(scores, reverse=True)
         top_separation = (
             max(0.0, min(1.0, (sorted_scores[0] - sorted_scores[1]) / sorted_scores[0]))
@@ -376,9 +387,10 @@ class AutofocusController:
         rising_consistency = AutofocusController._monotonic_consistency(scores[:best_index + 1], rising=True)
         falling_consistency = AutofocusController._monotonic_consistency(scores[best_index:], rising=False)
         trend_consistency = (rising_consistency + falling_consistency) / 2.0
-        verification_ratio = max(
+        quadratic = AutofocusController._quadratic_fit_diagnostics(scan_points)
+        prediction_verification_ratio = max(
             0.0,
-            min(1.0, statistics.median(verification_scores) / best_score),
+            min(1.0, prediction_verification_score / best_score),
         )
         selected = result.selected or result.best
         final_reproducibility = max(
@@ -390,17 +402,17 @@ class AutofocusController:
             0.0,
             min(
                 1.0,
-                0.25 * peak_prominence
-                + 0.20 * peak_centeredness
-                + 0.20 * trend_consistency
-                + 0.08 * verification_ratio
-                + 0.07 * final_reproducibility
-                + 0.20 * max(0.0, min(1.0, top_separation * 4.0)),
+                0.30 * peak_prominence
+                + 0.25 * peak_centeredness
+                + 0.15 * trend_consistency
+                + 0.10 * final_reproducibility
+                + 0.15 * max(0.0, min(1.0, top_separation * 4.0))
+                + 0.05 * quadratic["fitQuality"],
             ),
         )
         edge_peak = best_index == 0 or best_index == len(scores) - 1
         if edge_peak:
-            confidence = min(confidence, 0.35)
+            confidence = min(confidence, 0.18)
         return confidence, {
             "confidenceMethod": "curve_quality",
             "edgePeak": "true" if edge_peak else "false",
@@ -410,15 +422,22 @@ class AutofocusController:
             "risingConsistency": rising_consistency,
             "fallingConsistency": falling_consistency,
             "trendConsistency": trend_consistency,
-            "verificationRatio": verification_ratio,
+            "predictionVerificationRatio": prediction_verification_ratio,
             "finalReproducibility": final_reproducibility,
             "bestIndex": float(best_index),
             "scanPointCount": float(len(scores)),
-            "verificationPointCount": float(len(verification_scores)),
+            "verificationPointCount": float(1 + int(result.prediction_verification is not None)),
             "bestScore": best_score,
             "medianScore": median_score,
             "peakEstimateSource": result.peak.source,
             "peakEstimateZUm": result.peak.z_um,
+            "quadraticA": quadratic["a"],
+            "quadraticB": quadratic["b"],
+            "quadraticC": quadratic["c"],
+            "quadraticPeakZUm": quadratic["peakZUm"],
+            "quadraticRSquared": quadratic["rSquared"],
+            "quadraticFitQuality": quadratic["fitQuality"],
+            "quadraticFitReason": quadratic["reason"],
             "sampledBestZUm": result.best.actual_z_um,
             "sampledBestScore": result.best.score,
             "selectedSource": result.selection_source,
@@ -434,6 +453,52 @@ class AutofocusController:
                 if result.prediction_verification is not None
                 else float("nan")
             ),
+        }
+
+    @staticmethod
+    def _quadratic_fit_diagnostics(points: list[ScoredZPoint]) -> dict[str, float | str]:
+        zs = np.asarray([point.actual_z_um for point in points], dtype=float)
+        scores = np.asarray([point.score for point in points], dtype=float)
+        if len(np.unique(zs)) < 3:
+            return {
+                "a": float("nan"),
+                "b": float("nan"),
+                "c": float("nan"),
+                "peakZUm": float("nan"),
+                "rSquared": 0.0,
+                "fitQuality": 0.0,
+                "reason": "too_few_unique_z",
+            }
+        coeffs = np.polyfit(zs, scores, deg=2)
+        a = float(coeffs[0])
+        b = float(coeffs[1])
+        c = float(coeffs[2])
+        fitted = np.polyval(coeffs, zs)
+        residual_sum = float(np.sum((scores - fitted) ** 2))
+        total_sum = float(np.sum((scores - float(np.mean(scores))) ** 2))
+        r_squared = 1.0 - residual_sum / total_sum if total_sum > 1e-12 else 0.0
+        peak_z = float("nan")
+        reason = "ok"
+        fit_quality = max(0.0, min(1.0, r_squared))
+        if abs(a) < 1e-12:
+            reason = "flat_quadratic"
+            fit_quality = 0.0
+        elif a >= 0:
+            reason = "opens_up"
+            fit_quality = 0.0
+        else:
+            peak_z = float(-b / (2.0 * a))
+            if not np.isfinite(peak_z) or peak_z < float(np.min(zs)) or peak_z > float(np.max(zs)):
+                reason = "peak_out_of_range"
+                fit_quality = min(fit_quality, 0.25)
+        return {
+            "a": a,
+            "b": b,
+            "c": c,
+            "peakZUm": peak_z,
+            "rSquared": max(0.0, min(1.0, r_squared)),
+            "fitQuality": fit_quality,
+            "reason": reason,
         }
 
     @staticmethod
@@ -470,6 +535,8 @@ class AutofocusController:
     @staticmethod
     def _recommendation_from_diagnostics(diagnostics: dict[str, float | str]) -> str:
         if diagnostics.get("peakCenteredness") == 0.0:
+            return "expand_range"
+        if diagnostics.get("edgePeak") == "true":
             return "expand_range"
         if diagnostics.get("curveUnimodality", 1.0) < 0.3:
             return "change_roi"
@@ -515,6 +582,7 @@ class FixedRangeAutofocusController:
                 roi,
                 frames_per_z=params.final_verification_frames_per_z,
                 tolerance_um=params.final_tolerance_um,
+                sample_role="prediction_verification",
             )
             if prediction_verification.score > peak.sampled_best.score:
                 selected = prediction_verification
@@ -529,6 +597,7 @@ class FixedRangeAutofocusController:
             roi,
             frames_per_z=params.final_verification_frames_per_z,
             tolerance_um=params.final_tolerance_um,
+            sample_role="final_verification",
         )
         return FixedRangeAutofocusResult(
             best=peak.sampled_best,
