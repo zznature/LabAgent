@@ -23,7 +23,11 @@ import type { ProcedureSpec } from "../schemas/procedure-spec.ts";
 import { ProcedureSpecValidator } from "../schemas/procedure-spec.ts";
 import { readArtifactRecords } from "../store/artifact-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
-import { registerFocusPlaneCalibrationArtifactTool } from "../tools/planner.ts";
+import {
+	calculateFocusPlaneFromXyzPointsTool,
+	registerFocusPlaneCalibrationArtifactTool,
+	validateProcedureSpecTool,
+} from "../tools/planner.ts";
 
 const intent = {
 	intentId: "intent-focus-plane",
@@ -113,6 +117,28 @@ describe("focus-plane calibration and mapping", () => {
 		const truncated = structuredClone(spec);
 		truncated.stoppingRules = { maxUnits: 1 };
 		expect(() => compileProcedureSpec(truncated)).toThrow(/cannot truncate the model-producing run/u);
+	});
+
+	it("reports the concrete focus-plane validation issue in tool content", async () => {
+		const spec = buildProcedureSpec({
+			procedureId: "raman_focus_plane_calibration",
+			intent,
+			resources,
+			limits,
+			autofocus,
+			acquisition,
+			currentPosition: { xUm: 0, yUm: 0, zUm: 1000 },
+			maxXySpanUm: 250,
+		});
+		spec.stoppingRules = { maxUnits: 1 };
+
+		const result = await validateProcedureSpecTool.execute(
+			"validate-focus-plane",
+			{ spec },
+		);
+
+		expect(result.details.status).toBe("error");
+		expect(result.content[0].text).toMatch(/cannot truncate the model-producing run/u);
 	});
 
 	it("bounds the first XY leg from the frozen current position to a custom calibration center", () => {
@@ -301,6 +327,70 @@ describe("focus-plane calibration and mapping", () => {
 			{ kind: "acquire_spectrum" },
 		];
 		expect(() => compileProcedureSpec(wrongOrder)).toThrow(/then one autofocus, then one acquire_spectrum/u);
+	});
+
+	it("calculates a manual three-point focus plane for 1x10 mapping without artifact validation", async () => {
+		const result = await calculateFocusPlaneFromXyzPointsTool.execute(
+			"calculate-manual-focus-plane",
+			{
+				points: [
+					{ pointId: "p1", xUm: 0, yUm: 0, zUm: 1000 },
+					{ pointId: "p2", xUm: 100, yUm: 0, zUm: 1010 },
+					{ pointId: "p3", xUm: 0, yUm: 100, zUm: 995 },
+				],
+			},
+		);
+
+		expect(result.details.status).toBe("success");
+		const surfaceCorrection = result.details.stateAfter.surfaceCorrection as {
+			source: "manual_xyz_points";
+			anchors: Array<{ anchorId: string; xUm: number; yUm: number; zUm: number }>;
+			coefficients: { a: number; b: number; c: number };
+			validRegion: Array<{ anchorId: string; xUm: number; yUm: number }>;
+		};
+		expect(surfaceCorrection.source).toBe("manual_xyz_points");
+		expect(surfaceCorrection.coefficients.a).toBeCloseTo(0.1);
+		expect(surfaceCorrection.coefficients.b).toBeCloseTo(-0.05);
+		expect(surfaceCorrection.coefficients.c).toBeCloseTo(1000);
+
+		const mappingSpec = buildProcedureSpec({
+			procedureId: "raman_grid_mapping",
+			intent,
+			resources,
+			limits,
+			autofocus,
+			acquisition,
+			grid: {
+				origin: { xUm: 0, yUm: 0 },
+				rows: 1,
+				cols: 10,
+				pitchXUm: 10,
+				pitchYUm: 10,
+			},
+			focusPlane: {
+				source: "manual_xyz_points",
+				anchors: surfaceCorrection.anchors,
+				a: surfaceCorrection.coefficients.a,
+				b: surfaceCorrection.coefficients.b,
+				c: surfaceCorrection.coefficients.c,
+				validRegion: surfaceCorrection.validRegion,
+			},
+		});
+
+		expect(ProcedureSpecValidator.Check(mappingSpec)).toBe(true);
+		expect(validateFocusPlaneArtifactReference("unused-cwd", mappingSpec)).toBeUndefined();
+		expect(compileProcedureSpec(mappingSpec).map((unit) => Math.round(unit.point?.zUm ?? 0))).toEqual([
+			1000,
+			1001,
+			1002,
+			1003,
+			1004,
+			1005,
+			1006,
+			1007,
+			1008,
+			1009,
+		]);
 	});
 
 	it("executes calibration coarse-to-fine, publishes a model, then maps with +/-40 um correction", async () => {

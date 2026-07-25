@@ -210,6 +210,7 @@ export const SurfaceCorrectionSchema = Type.Union([
 	Type.Object(
 		{
 			kind: Type.Literal("focus_plane"),
+			source: Type.Optional(Type.Literal("calibration_run")),
 			calibrationRunId: Type.String({ minLength: 1 }),
 			artifactId: Type.String({ minLength: 1 }),
 			checksum: Type.String({ minLength: 1 }),
@@ -230,7 +231,46 @@ export const SurfaceCorrectionSchema = Type.Union([
 					},
 					{ additionalProperties: false },
 				),
-				{ minItems: 4, maxItems: 4 },
+				{ minItems: 3 },
+			),
+			localAutofocusHalfRangeUm: Type.Literal(40),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			kind: Type.Literal("focus_plane"),
+			source: Type.Literal("manual_xyz_points"),
+			anchors: Type.Array(
+				Type.Object(
+					{
+						anchorId: Type.String({ minLength: 1 }),
+						xUm: Type.Number(),
+						yUm: Type.Number(),
+						zUm: Type.Number(),
+					},
+					{ additionalProperties: false },
+				),
+				{ minItems: 3, maxItems: 3 },
+			),
+			coefficients: Type.Object(
+				{
+					a: Type.Number(),
+					b: Type.Number(),
+					c: Type.Number(),
+				},
+				{ additionalProperties: false },
+			),
+			validRegion: Type.Array(
+				Type.Object(
+					{
+						anchorId: Type.String({ minLength: 1 }),
+						xUm: Type.Number(),
+						yUm: Type.Number(),
+					},
+					{ additionalProperties: false },
+				),
+				{ minItems: 3 },
 			),
 			localAutofocusHalfRangeUm: Type.Literal(40),
 		},

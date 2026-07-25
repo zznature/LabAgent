@@ -5,7 +5,12 @@ import { Type, type Static } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ArtifactRef, ExperimentIntent, ProcedureId, ProcedureSpec, RunState } from "../schemas/index.ts";
 import { ExperimentIntentValidator, ProcedureSpecValidator, formatValidationErrors } from "../schemas/index.ts";
-import { fitFocusPlane, validateFocusPlaneCorners, type FocusPlaneAnchor } from "../planner/focus-plane.ts";
+import {
+	fitFocusPlane,
+	validateFocusPlaneCorners,
+	validateFocusPlaneRegion,
+	type FocusPlaneAnchor,
+} from "../planner/focus-plane.ts";
 import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import {
@@ -124,6 +129,23 @@ const FocusPlaneRegistrationParamsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const ManualFocusPlanePointSchema = Type.Object(
+	{
+		pointId: Type.String({ minLength: 1 }),
+		xUm: Type.Number(),
+		yUm: Type.Number(),
+		zUm: Type.Number(),
+	},
+	{ additionalProperties: false },
+);
+
+const ManualFocusPlaneParamsSchema = Type.Object(
+	{
+		points: Type.Array(ManualFocusPlanePointSchema, { minItems: 3, maxItems: 3 }),
+	},
+	{ additionalProperties: false },
+);
+
 interface PlannerToolDetails {
 	status: "success" | "warning" | "error";
 	summary: string;
@@ -136,6 +158,7 @@ type ProcedureSpecTemplateParams = Static<typeof ProcedureSpecTemplateParamsSche
 type ExperimentProcedureTemplateMatchParams = Static<typeof ExperimentProcedureTemplateMatchParamsSchema>;
 type ExperimentIntentParams = Static<typeof ExperimentIntentParamsSchema>;
 type FocusPlaneRegistrationParams = Static<typeof FocusPlaneRegistrationParamsSchema>;
+type ManualFocusPlaneParams = Static<typeof ManualFocusPlaneParamsSchema>;
 
 function success(summary: string, stateAfter: Record<string, unknown>): { content: [{ type: "text"; text: string }]; details: PlannerToolDetails } {
 	return {
@@ -170,6 +193,11 @@ function error(summary: string, errorCode: string, stateAfter: Record<string, un
 			stateAfter,
 		},
 	};
+}
+
+function validationFailureSummary(prefix: string, issues: readonly string[]): string {
+	const firstIssue = issues[0];
+	return firstIssue ? `${prefix}: ${firstIssue}` : prefix;
 }
 
 function asProcedureSpec(params: ProcedureSpecParams): ProcedureSpec {
@@ -269,6 +297,47 @@ function assertRegisteredFocusPlaneAnchors(params: FocusPlaneRegistrationParams)
 		yUm: anchor.yUm,
 		zUm: anchor.zUm,
 	}));
+}
+
+function calculateManualFocusPlane(params: ManualFocusPlaneParams): {
+	model: ReturnType<typeof fitFocusPlane>;
+	anchors: FocusPlaneAnchor[];
+	validRegion: Array<{ anchorId: string; xUm: number; yUm: number }>;
+	surfaceCorrection: Record<string, unknown>;
+} {
+	const anchorIds = new Set(params.points.map((point) => point.pointId));
+	if (anchorIds.size !== 3) {
+		throw new Error("Manual focus-plane calculation requires three unique pointId values.");
+	}
+	const anchors = params.points.map((point) => ({
+		anchorId: point.pointId,
+		xUm: point.xUm,
+		yUm: point.yUm,
+		zUm: point.zUm,
+	}));
+	const model = fitFocusPlane(anchors);
+	const validRegion = validateFocusPlaneRegion(anchors).map((point) => ({
+		anchorId: point.anchorId,
+		xUm: point.xUm,
+		yUm: point.yUm,
+	}));
+	return {
+		model,
+		anchors,
+		validRegion,
+		surfaceCorrection: {
+			kind: "focus_plane",
+			source: "manual_xyz_points",
+			anchors,
+			coefficients: {
+				a: model.a,
+				b: model.b,
+				c: model.c,
+			},
+			validRegion,
+			localAutofocusHalfRangeUm: 40,
+		},
+	};
 }
 
 function writeRegisteredFocusPlaneArtifact(cwd: string, params: FocusPlaneRegistrationParams): {
@@ -684,6 +753,7 @@ export const getLabCapabilitiesTool = {
 				"get_procedure_spec_template",
 				"validate_procedure_spec",
 				"run_preflight",
+				"calculate_focus_plane_from_xyz_points",
 				"register_focus_plane_calibration_artifact",
 				"propose_run",
 				"approve_and_start_run",
@@ -886,7 +956,7 @@ export const validateProcedureSpecTool = {
 		const spec = asProcedureSpec(params);
 		const validation = validateProcedureSpec(spec);
 		if (!validation.valid) {
-			return error("ProcedureSpec validation failed.", "invalid_procedure_spec", {
+			return error(validationFailureSummary("ProcedureSpec validation failed", validation.issues), "invalid_procedure_spec", {
 				valid: false,
 				issues: validation.issues,
 			});
@@ -911,10 +981,14 @@ export const runPreflightTool = {
 		const spec = asProcedureSpec(params);
 		const validation = validateProcedureSpec(spec);
 		if (!validation.valid) {
-			return error("ProcedureSpec preflight failed because the spec is invalid.", "invalid_procedure_spec", {
-				valid: false,
-				issues: validation.issues,
-			});
+			return error(
+				validationFailureSummary("ProcedureSpec preflight failed because the spec is invalid", validation.issues),
+				"invalid_procedure_spec",
+				{
+					valid: false,
+					issues: validation.issues,
+				},
+			);
 		}
 
 		const state = await buildPreflightState(spec, ctx.cwd, params.executionMode ?? "simulation", params.templateApplication);
@@ -949,6 +1023,44 @@ export const runPreflightTool = {
 		return success("ProcedureSpec preflight is ready for supervised proposal approval.", state);
 	},
 } satisfies ToolDefinition<typeof ProcedureSpecParamsSchema, PlannerToolDetails>;
+
+export const calculateFocusPlaneFromXyzPointsTool = {
+	name: "calculate_focus_plane_from_xyz_points",
+	label: "Calculate Focus Plane From XYZ Points",
+	description:
+		"Calculate a Raman focus plane directly from three user-supplied XYZ points without hardware motion, autofocus evidence, approval, or artifact provenance.",
+	promptSnippet:
+		"Use this when the user provides exactly three focused XYZ coordinates and wants a corrected mapping plane",
+	promptGuidelines: [
+		"Use exactly three user-supplied focused XYZ points.",
+		"Do not run autofocus, write calibration artifacts, or ask for operator confirmation for this pure calculation.",
+		"Use the returned surfaceCorrection in the subsequent mapping ProcedureSpec.",
+	],
+	parameters: ManualFocusPlaneParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, params: ManualFocusPlaneParams) {
+		try {
+			const { model, anchors, validRegion, surfaceCorrection } = calculateManualFocusPlane(params);
+			return success("Calculated focus plane from three user-supplied XYZ points.", {
+				model,
+				anchors,
+				validRegion,
+				surfaceCorrection,
+				diagnostics: {
+					rmsErrorUm: model.rmsErrorUm,
+					maxAbsErrorUm: model.maxAbsErrorUm,
+					anchorCount: model.anchorCount,
+				},
+				noHardwareMotion: true,
+				noArtifactRequired: true,
+			});
+		} catch (cause) {
+			return error(cause instanceof Error ? cause.message : String(cause), "manual_focus_plane_calculation_failed", {
+				pointCount: params.points.length,
+			});
+		}
+	},
+} satisfies ToolDefinition<typeof ManualFocusPlaneParamsSchema, PlannerToolDetails>;
 
 export const registerFocusPlaneCalibrationArtifactTool = {
 	name: "register_focus_plane_calibration_artifact",

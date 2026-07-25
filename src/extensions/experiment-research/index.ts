@@ -12,6 +12,7 @@ import {
 	ramanStageMoveRelativeTool,
 } from "./tools/operator.ts";
 import {
+	calculateFocusPlaneFromXyzPointsTool,
 	findExperimentProcedureTemplateTool,
 	getLabCapabilitiesTool,
 	getLabStateTool,
@@ -40,6 +41,7 @@ const PLANNER_TOOL_NAMES = [
 	"get_procedure_spec_template",
 	"validate_procedure_spec",
 	"run_preflight",
+	"calculate_focus_plane_from_xyz_points",
 	"register_focus_plane_calibration_artifact",
 	"propose_run",
 	"approve_and_start_run",
@@ -78,6 +80,7 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(getProcedureSpecTemplateTool);
 	pi.registerTool(validateProcedureSpecTool);
 	pi.registerTool(runPreflightTool);
+	pi.registerTool(calculateFocusPlaneFromXyzPointsTool);
 	pi.registerTool(registerFocusPlaneCalibrationArtifactTool);
 	pi.registerTool(ramanGetHardwareStatusTool);
 	pi.registerTool(ramanGetStagePositionTool);

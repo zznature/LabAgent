@@ -509,10 +509,27 @@ domain:
   `calibration_coarse_to_fine` strategy 会由 runtime 生成 ±100 µm 范围，并使用
   `coarseStepUm / fineHalfRangeUm / fineStepUm`。
 - fixed-range autofocus 当前固定使用 10 点扫描；`pointCount` 可表达调用意图，但 daemon 会归一为有效 10 点，并在返回 payload 的 `params.effectivePointCount` / `params.effectiveSpacingUm` 中记录实际值。
+- fixed-range autofocus 的插值焦点由全部实际 Z 打分点拟合二次曲线顶点得到；如果拟合无有效范围内最大值则回退到采样最高分点。插值点必须再次采样验证，只有验证分数高于采样最高分点时才作为最终焦点。
+- fixed-range autofocus 必须在 `scanPoints[].frames` 记录每张采集帧的 `role = warmup | scoring`、`sampleRole`、路径和单帧 score；agent 不得把 warmup / prediction verification / final verification 帧当成扫描曲线点。
+- 如果扫描最高分在边缘，或全部打分点的二次曲线拟合质量不足，runtime 必须降为低置信并建议 `expand_range`，不能把未 bracket 的边缘峰当成可信焦点。
+- 默认 `labspec_center_spot_focus` metric 的目标是先产生围绕焦点可二次拟合的平滑中心亮斑分数曲线，再按光斑小、亮、居中、低条纹等物理特征打分；不得用会把曲线切断的硬阈值乘法作为主评分路径。
 - `warmupFramesPerZ` 表示每个 Z 采样点丢弃的预热帧数；`framesPerZ` 表示参与评分的帧数。file-backed frame provider 会尽量只保留代表评分帧，减少 bridge 目录堆积。
 - live run 与 operator autofocus 的默认 action timeout 为 150s；daemon 传输层会额外保留短 guard window，用于让 Python 侧返回结构化超时/错误。
 
 ### 8.1 焦平面校准与校正 mapping
+
+Current simplified path:
+
+- When the user already has three focused XYZ coordinates, the agent should call
+  `calculate_focus_plane_from_xyz_points`.
+- This path is pure calculation: it fits `z = a*x + b*y + c`, returns a
+  `surfaceCorrection` with `source: manual_xyz_points`, and performs no hardware
+  motion, autofocus, approval, RunState writes, or artifact provenance checks.
+- Mapping uses the returned coefficients to generate each point's predicted Z.
+  The manual three-point XY triangle is the calibrated region; mapping points
+  outside that region are rejected by the compiler.
+- The older bounded `raman_focus_plane_calibration` run remains available only
+  when the system must actively collect focus anchors with hardware.
 
 Issue #3 使用两个独立 `ProcedureSpec` 和两次 bounded approval。
 

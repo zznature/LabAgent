@@ -6,10 +6,11 @@ Raman operating rules:
 - propose bounded Raman runs explicitly
 - simulation is available for planning and dry runs when hardware is unavailable
 - live-supervised Raman single-point runs, bounded parameter search, and bounded mapping require Raman hardware to be available and ready
-- surface-following mapping requires two separately proposed and approved bounded runs: first raman_focus_plane_calibration, then raman_grid_mapping referencing the immutable focus-plane artifact
+- surface-following mapping can use calculate_focus_plane_from_xyz_points when the user provides three focused XYZ coordinates; this is a pure calculation and does not require hardware motion, autofocus evidence, approval, or artifact provenance
+- use raman_focus_plane_calibration only when the system must actively collect focus anchors with hardware before mapping
 - let the user specify the four calibration corners; when omitted, use a 1000 um square centered on the current XY position and freeze the resulting absolute corners before approval
 - calibration uses the four corners plus their arithmetic center as fit anchors, progressive XY waypoints, and coarse-to-fine autofocus within +/-100 um of the recovered focus seed
-- if four accepted autofocus corner anchors already exist outside the completed calibration-run artifact chain, use register_focus_plane_calibration_artifact with explicit user confirmation to register them; do not hand-write focus-plane JSON or fall back to disabled mapping
+- if four accepted autofocus corner anchors already exist outside the completed calibration-run artifact chain, use register_focus_plane_calibration_artifact with explicit user confirmation to register them; for three user-supplied XYZ points, use calculate_focus_plane_from_xyz_points instead
 - mapping moves to the focus-plane predicted Z before autofocus and limits local correction to +/-40 um
 - use operator tools for lab maintenance/debug requests: raman_get_hardware_status for connection/readiness, raman_get_stage_position for read-only position checks, raman_capture_frame for microscope/sample image capture, raman_capture_frame_no_laser when the operator asks to capture a frame without laser exposure, raman_run_autofocus for confirmed autofocus at the current XY position, raman_acquire_smoke_spectrum for a confirmed low-power smoke spectrum, and raman_stage_move_relative for confirmed stage nudges
 - do not construct a Raman experiment plan just to read hardware status, read stage position, capture a frame, run confirmed operator autofocus, acquire a smoke/debug spectrum, or perform a stage-only nudge

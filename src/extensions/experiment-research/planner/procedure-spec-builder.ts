@@ -5,7 +5,9 @@ import {
 	defaultFocusPlaneCorners,
 	focusPlaneCenter,
 	validateFocusPlaneCorners,
+	validateFocusPlaneRegion,
 	type FocusPlaneCorner,
+	type FocusPlanePoint,
 } from "./focus-plane.ts";
 import type {
 	ExperimentIntent,
@@ -116,13 +118,15 @@ export interface GridMappingBuilderInput extends BaseProcedureBuilderInput {
 		order?: "row_major" | "snake";
 	};
 	focusPlane?: {
-		calibrationRunId: string;
-		artifactId: string;
-		checksum: string;
+		source?: "calibration_run" | "manual_xyz_points";
+		calibrationRunId?: string;
+		artifactId?: string;
+		checksum?: string;
+		anchors?: Array<{ anchorId: string; xUm: number; yUm: number; zUm: number }>;
 		a: number;
 		b: number;
 		c: number;
-		validRegion: FocusPlaneCorner[];
+		validRegion: Array<FocusPlanePoint & { anchorId: string }>;
 	};
 	focusPlaneDecision?: "user_declined";
 }
@@ -204,23 +208,47 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 		if (input.focusPlaneDecision === "user_declined" && input.grid.origin.zUm === undefined) {
 			throw new Error("Uncorrected mapping requires an explicit fixed grid origin zUm.");
 		}
+		if (input.focusPlane?.source === "manual_xyz_points" && input.focusPlane.anchors?.length !== 3) {
+			throw new Error("Manual focus-plane mapping requires exactly three XYZ anchors.");
+		}
+		if (
+			input.focusPlane &&
+			input.focusPlane.source !== "manual_xyz_points" &&
+			(!input.focusPlane.calibrationRunId || !input.focusPlane.artifactId || !input.focusPlane.checksum)
+		) {
+			throw new Error("Calibration-run focus-plane mapping requires calibrationRunId, artifactId, and checksum.");
+		}
 		return {
 			kind: "grid_scan",
 			grid: input.grid,
 			surfaceCorrection: input.focusPlane
-				? {
-						kind: "focus_plane",
-						calibrationRunId: input.focusPlane.calibrationRunId,
-						artifactId: input.focusPlane.artifactId,
-						checksum: input.focusPlane.checksum,
-						coefficients: {
-							a: input.focusPlane.a,
-							b: input.focusPlane.b,
-							c: input.focusPlane.c,
-						},
-						validRegion: validateFocusPlaneCorners(input.focusPlane.validRegion),
-						localAutofocusHalfRangeUm: 40,
-					}
+				? input.focusPlane.source === "manual_xyz_points"
+					? {
+							kind: "focus_plane",
+							source: "manual_xyz_points",
+							anchors: input.focusPlane.anchors ?? [],
+							coefficients: {
+								a: input.focusPlane.a,
+								b: input.focusPlane.b,
+								c: input.focusPlane.c,
+							},
+							validRegion: validateFocusPlaneRegion(input.focusPlane.validRegion),
+							localAutofocusHalfRangeUm: 40,
+						}
+					: {
+							kind: "focus_plane",
+							...(input.focusPlane.source ? { source: input.focusPlane.source } : {}),
+							calibrationRunId: input.focusPlane.calibrationRunId ?? "",
+							artifactId: input.focusPlane.artifactId ?? "",
+							checksum: input.focusPlane.checksum ?? "",
+							coefficients: {
+								a: input.focusPlane.a,
+								b: input.focusPlane.b,
+								c: input.focusPlane.c,
+							},
+							validRegion: validateFocusPlaneCorners(input.focusPlane.validRegion as FocusPlaneCorner[]),
+							localAutofocusHalfRangeUm: 40,
+						}
 				: { kind: "disabled", reason: "user_declined" },
 			perPoint: defaultActions(),
 			interPointDelayMs: input.interPointDelayMs,

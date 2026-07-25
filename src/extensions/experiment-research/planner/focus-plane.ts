@@ -66,6 +66,18 @@ export function validateFocusPlaneCorners<T extends FocusPlanePoint>(corners: re
 	return [...corners];
 }
 
+export function validateFocusPlaneRegion<T extends FocusPlanePoint>(region: readonly T[]): T[] {
+	if (region.length < 3) {
+		throw new Error("Focus-plane region requires at least three points.");
+	}
+	const uniqueCoordinates = new Set(region.map((point) => `${point.xUm}:${point.yUm}`));
+	const hull = convexHull(region);
+	if (uniqueCoordinates.size !== region.length || hull.length < 3) {
+		throw new Error("Focus-plane region points must be unique and non-collinear.");
+	}
+	return hull;
+}
+
 export function focusPlaneCenter(corners: readonly FocusPlanePoint[]): FocusPlanePoint {
 	validateFocusPlaneCorners(corners);
 	return {
@@ -75,7 +87,7 @@ export function focusPlaneCenter(corners: readonly FocusPlanePoint[]): FocusPlan
 }
 
 export function isPointInConvexRegion(point: FocusPlanePoint, region: readonly FocusPlanePoint[]): boolean {
-	const hull = convexHull(validateFocusPlaneCorners(region));
+	const hull = validateFocusPlaneRegion(region);
 	let sign = 0;
 	for (let index = 0; index < hull.length; index++) {
 		const edgeCross = cross(hull[index]!, hull[(index + 1) % hull.length]!, point);

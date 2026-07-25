@@ -35,6 +35,10 @@ planning or simulation instead of inventing device status.
 - After `propose_run`, wait for the user to approve the exact proposal and spec
   hash. Do not call `approve_and_start_run` for live hardware on the user's
   behalf.
+- When the user already has three focused XYZ coordinates, use
+  `calculate_focus_plane_from_xyz_points` as a pure calculation path before
+  mapping; it does not require hardware motion, autofocus evidence, approval,
+  or artifact provenance.
 - When a calibration model was computed from already accepted autofocus corner
   evidence but is not yet part of a completed run artifact chain, use the
   explicit registration tool if available. Do not hand-write trusted artifact

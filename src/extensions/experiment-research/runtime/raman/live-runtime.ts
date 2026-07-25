@@ -629,6 +629,9 @@ export function validateFocusPlaneArtifactReference(cwd: string, spec: Procedure
 	if (surfaceCorrection?.kind !== "focus_plane") {
 		return undefined;
 	}
+	if (surfaceCorrection.source === "manual_xyz_points") {
+		return undefined;
+	}
 	const reference = surfaceCorrection;
 	const calibrationRunState = readRunStateSnapshot(cwd, reference.calibrationRunId);
 	if (calibrationRunState?.status !== "completed") {
