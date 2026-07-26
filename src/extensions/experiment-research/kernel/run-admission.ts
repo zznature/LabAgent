@@ -24,7 +24,11 @@ export interface OperatorApproval {
 export interface ApproveAndFreezeInput {
 	cwd: string;
 	proposalId: string;
-	spec: ProcedureSpec;
+	/**
+	 * The proposal's specHash as quoted by the caller. The stored proposal already holds the
+	 * spec, so this is a checksum against the right proposal, not a source of spec content.
+	 */
+	specHash: string;
 	mode: ExecutionMode;
 	admission?: RunAdmission;
 	operatorApproval?: OperatorApproval;
@@ -142,14 +146,18 @@ export function approveAndFreezeProcedureSpec(input: ApproveAndFreezeInput): App
 	}
 
 	if (proposal.status !== "proposed") {
-		throw new RunAdmissionError(`Proposal ${input.proposalId} is already approved.`, "proposal_not_pending");
+		throw new RunAdmissionError(
+			`Proposal ${input.proposalId} is ${proposal.status}, not pending approval.`,
+			"proposal_not_pending",
+			{ status: proposal.status, supersededBy: proposal.supersededBy },
+		);
 	}
 
-	const requestedHash = hashProcedureSpec(input.spec);
-	if (requestedHash !== proposal.specHash) {
+	if (input.specHash !== proposal.specHash) {
 		throw new RunAdmissionError(
-			`Proposal ${input.proposalId} no longer matches the provided ProcedureSpec. Approval rejected.`,
+			`Proposal ${input.proposalId} has specHash ${proposal.specHash}, not the supplied ${input.specHash}. Approval rejected.`,
 			"proposal_spec_mismatch",
+			{ proposalId: proposal.proposalId, specHash: proposal.specHash, suppliedSpecHash: input.specHash },
 		);
 	}
 

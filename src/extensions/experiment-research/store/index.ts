@@ -39,6 +39,7 @@ export {
 	hashProcedureSpec,
 	listProcedureProposals,
 	readProcedureProposal,
+	supersedeProcedureProposal,
 	type ProcedureProposalRecord,
 	type ProposalStatus,
 } from "./proposal-store.ts";

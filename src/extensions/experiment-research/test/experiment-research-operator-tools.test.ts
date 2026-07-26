@@ -27,6 +27,9 @@ interface MutablePosition {
 interface OperatorRuntimeOptions {
 	autofocusZBestUm?: number;
 	capturedLaserOffValues?: boolean[];
+	/** Per-move X undershoot in um, emulating an axis that reports success without reaching the target. */
+	moveUndershootXUm?: number;
+	stageMoveTargets?: Array<{ xUm: number; yUm: number; zUm: number }>;
 }
 
 const tempRoots: string[] = [];
@@ -107,7 +110,8 @@ function createOperatorRuntime(position: MutablePosition, options: OperatorRunti
 				});
 			},
 			moveAbsoluteAndWait(action) {
-				position.xUm = action.target.xUm;
+				options.stageMoveTargets?.push({ ...action.target, zUm: action.target.zUm ?? position.zUm });
+				position.xUm = action.target.xUm - (options.moveUndershootXUm ?? 0);
 				position.yUm = action.target.yUm;
 				position.zUm = action.target.zUm ?? position.zUm;
 				return successActionResult("Stage moved.", {
@@ -243,6 +247,103 @@ describe("experiment research operator tools", () => {
 			{ type: "text", text: "Stage position read: X=100 um, Y=200 um, Z=300 um." },
 		]);
 		expect(positionState.position).toEqual({ xUm: 100, yUm: 200, zUm: 300 });
+	});
+
+	it("moves to an absolute target in one confirmed call and reports the verified residual", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const position = { xUm: 100, yUm: 200, zUm: 300 };
+		const stageMoveTargets: Array<{ xUm: number; yUm: number; zUm: number }> = [];
+		registerRamanLiveRuntime(cwd, createOperatorRuntime(position, { stageMoveTargets }));
+		const context = { cwd } as ExtensionContext;
+
+		const proposalResult = await extension.tools
+			.get("raman_stage_move_absolute")
+			?.execute("absolute-proposal", { xUm: 150, yUm: 250 }, undefined, undefined, context);
+		const proposalDetails = asRecord(proposalResult?.details);
+		const proposalState = asRecord(proposalDetails.stateAfter);
+
+		expect(proposalDetails.status).toBe("warning");
+		expect(asRecord(proposalResult).content).toEqual([
+			{
+				type: "text",
+				text: "Absolute stage move requires explicit confirmation before execution. Current: X=100 um, Y=200 um, Z=300 um. Target: X=150 um, Y=250 um, Z=300 um. Delta: dX=50 um, dY=50 um, dZ=0 um. Settle tolerance: 5 um.",
+			},
+		]);
+		expect(proposalState.target).toEqual({ xUm: 150, yUm: 250, zUm: 300 });
+		expect(stageMoveTargets).toEqual([]);
+		expect(position).toEqual({ xUm: 100, yUm: 200, zUm: 300 });
+
+		const moveResult = await extension.tools
+			.get("raman_stage_move_absolute")
+			?.execute("absolute-confirmed", { xUm: 150, yUm: 250, confirmed: true }, undefined, undefined, context);
+		const moveDetails = asRecord(moveResult?.details);
+		const moveState = asRecord(moveDetails.stateAfter);
+
+		expect(moveDetails.status).toBe("success");
+		expect(asRecord(moveResult).content).toEqual([
+			{
+				type: "text",
+				text: "Absolute stage move completed within the 5 um settle tolerance after 0 correction(s). Final: X=150 um, Y=250 um, Z=300 um. Residual: dX=0 um, dY=0 um, dZ=0 um.",
+			},
+		]);
+		expect(moveState.withinTolerance).toBe(true);
+		expect(moveState.corrections).toBe(0);
+		// One absolute move replaces the read/nudge/verify chain that per-axis relative moves required.
+		expect(stageMoveTargets).toEqual([{ xUm: 150, yUm: 250, zUm: 300 }]);
+		expect(position).toEqual({ xUm: 150, yUm: 250, zUm: 300 });
+	});
+
+	it("corrects an undershooting axis up to maxCorrections and warns when the residual stays outside tolerance", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const position = { xUm: 100, yUm: 200, zUm: 300 };
+		const stageMoveTargets: Array<{ xUm: number; yUm: number; zUm: number }> = [];
+		registerRamanLiveRuntime(cwd, createOperatorRuntime(position, { moveUndershootXUm: 12, stageMoveTargets }));
+		const context = { cwd } as ExtensionContext;
+
+		const moveResult = await extension.tools
+			.get("raman_stage_move_absolute")
+			?.execute("absolute-undershoot", { xUm: 150, confirmed: true, maxCorrections: 2 }, undefined, undefined, context);
+		const moveDetails = asRecord(moveResult?.details);
+		const moveState = asRecord(moveDetails.stateAfter);
+
+		expect(moveDetails.status).toBe("warning");
+		expect(asRecord(moveResult).content).toEqual([
+			{
+				type: "text",
+				text: "Absolute stage move stopped 12 um from target after 2 correction(s); settle tolerance is 5 um. Final: X=138 um, Y=200 um, Z=300 um. Residual: dX=12 um, dY=0 um, dZ=0 um.",
+			},
+		]);
+		expect(moveState.withinTolerance).toBe(false);
+		expect(moveState.corrections).toBe(2);
+		expect((moveState.attempts as unknown[]).length).toBe(3);
+		expect(stageMoveTargets.length).toBe(3);
+	});
+
+	it("holds unspecified axes and stops an absolute move that leaves the stage limits", async () => {
+		const cwd = createTempCwd();
+		const extension = loadExperimentExtension();
+		const position = { xUm: 100, yUm: 200, zUm: 300 };
+		const stageMoveTargets: Array<{ xUm: number; yUm: number; zUm: number }> = [];
+		registerRamanLiveRuntime(cwd, createOperatorRuntime(position, { stageMoveTargets }));
+		const context = { cwd } as ExtensionContext;
+
+		const zOnlyResult = await extension.tools
+			.get("raman_stage_move_absolute")
+			?.execute("absolute-z-only", { zUm: 400, confirmed: true }, undefined, undefined, context);
+		expect(asRecord(zOnlyResult?.details).status).toBe("success");
+		expect(stageMoveTargets).toEqual([{ xUm: 100, yUm: 200, zUm: 400 }]);
+
+		const outOfBoundsResult = await extension.tools
+			.get("raman_stage_move_absolute")
+			?.execute("absolute-out-of-bounds", { yUm: 9_000, confirmed: true }, undefined, undefined, context);
+		const outOfBoundsDetails = asRecord(outOfBoundsResult?.details);
+
+		expect(outOfBoundsDetails.status).toBe("error");
+		expect(outOfBoundsDetails.errorCode).toBe("motion_out_of_bounds");
+		expect(stageMoveTargets.length).toBe(1);
+		expect(position).toEqual({ xUm: 100, yUm: 200, zUm: 400 });
 	});
 
 	it("requires confirmation for stage relative motion and then executes within stage limits", async () => {

@@ -370,7 +370,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-missing-runtime",
 			{
 				proposalId,
-				spec,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -408,6 +408,37 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(state.requestedModeSupported).toBe(true);
 	});
 
+	it("names the failing anchor check in the live preflight result text", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const runtime = createLiveRuntime(true, true);
+		registerRamanLiveRuntime(cwd, {
+			...runtime,
+			stage: {
+				...runtime.stage,
+				getPosition() {
+					return successActionResult("Stage position read.", {
+						position: { xUm: 1000, yUm: 2000, zUm: 900 },
+					});
+				},
+			},
+		});
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+
+		const result = await extension.tools
+			.get("run_preflight")
+			?.execute("live-preflight-drift", { spec, executionMode: "live-supervised" }, undefined, undefined, context);
+		const details = result?.details as Record<string, unknown>;
+		const text = result?.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(details.status).toBe("warning");
+		// The operator must be able to act on the failure without grepping run records.
+		expect(text).toContain("preflight_stage_outside_autofocus_range");
+		expect(text).toContain("Current Z=900 um is outside autofocus range [220, 300] um with 5 um drift allowance.");
+	});
+
 	it("rejects live supervised start without explicit operator approval", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
@@ -421,7 +452,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-without-operator",
 			{
 				proposalId,
-				spec,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -449,7 +480,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live",
 			{
 				proposalId,
-				spec,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -493,7 +524,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-current-position",
 			{
 				proposalId,
-				spec,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -537,7 +568,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-laser-off-frame",
 			{
 				proposalId,
-				spec,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -577,7 +608,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-search",
 			{
 				proposalId,
-				spec,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -620,7 +651,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-blocked",
 			{
 				proposalId: safeProposalId,
-				spec: safeSpec,
+				specHash: hashProcedureSpec(safeSpec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -642,7 +673,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-power",
 			{
 				proposalId: highPowerProposalId,
-				spec: highPowerSpec,
+				specHash: hashProcedureSpec(highPowerSpec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,
@@ -666,7 +697,7 @@ describe("experiment research real supervised single-point runtime", () => {
 			"approve-live-clearance",
 			{
 				proposalId: lowClearanceProposalId,
-				spec: lowClearanceSpec,
+				specHash: hashProcedureSpec(lowClearanceSpec as ProcedureSpec),
 				executionMode: "live-supervised",
 				admission: {
 					preflightReady: true,

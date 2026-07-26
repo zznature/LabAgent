@@ -11,7 +11,7 @@ import {
 	validateFocusPlaneRegion,
 	type FocusPlaneAnchor,
 } from "../planner/focus-plane.ts";
-import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts";
+import { summarizeProcedureProposal, type ProposalRisk } from "../planner/procedure-spec-builder.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import {
 	getRamanLiveRuntime,
@@ -198,6 +198,19 @@ function error(summary: string, errorCode: string, stateAfter: Record<string, un
 function validationFailureSummary(prefix: string, issues: readonly string[]): string {
 	const firstIssue = issues[0];
 	return firstIssue ? `${prefix}: ${firstIssue}` : prefix;
+}
+
+function diagnosticSummary(prefix: string, details: unknown): string {
+	if (typeof details !== "object" || details === null) {
+		return prefix;
+	}
+	const record = details as Record<string, unknown>;
+	const errorCode = typeof record.errorCode === "string" ? record.errorCode : undefined;
+	const message = typeof record.message === "string" ? record.message : undefined;
+	if (errorCode && message) {
+		return `${prefix} ${errorCode}: ${message}`;
+	}
+	return message ? `${prefix} ${message}` : errorCode ? `${prefix} ${errorCode}.` : prefix;
 }
 
 function asProcedureSpec(params: ProcedureSpecParams): ProcedureSpec {
@@ -993,23 +1006,39 @@ export const runPreflightTool = {
 
 		const state = await buildPreflightState(spec, ctx.cwd, params.executionMode ?? "simulation", params.templateApplication);
 		if (state.requiredRolesPresent !== true) {
-			return error("ProcedureSpec preflight failed because required Raman resources are missing.", "preflight_missing_resources", state);
+			const declaredRoles = spec.resources.map((resource) => resource.role).join(", ");
+			return error(
+				`ProcedureSpec preflight failed because required Raman resources are missing. Roles stage, frame_provider, and spectrometer are required; the spec declares: ${declaredRoles || "none"}.`,
+				"preflight_missing_resources",
+				state,
+			);
 		}
 
 		if (state.requestedModeSupported !== true) {
 			return warning("Requested execution mode is not supported for this ProcedureSpec in the current MVP phase.", state);
 		}
 
-		if ((state.risks as Array<{ level: string }>).some((risk) => risk.level === "forbidden")) {
-			return warning("ProcedureSpec preflight found forbidden risks that must be resolved before approval.", state);
+		const forbiddenRisks = (state.risks as ProposalRisk[]).filter((risk) => risk.level === "forbidden");
+		if (forbiddenRisks.length > 0) {
+			const riskText = forbiddenRisks.map((risk) => `${risk.code}: ${risk.message}`).join("; ");
+			return warning(`ProcedureSpec preflight found forbidden risks that must be resolved before approval. ${riskText}`, state);
 		}
 
 		if (state.preflightReady !== true || state.controlAvailable !== true) {
-			return warning("ProcedureSpec preflight is waiting on live runtime readiness or control availability.", state);
+			return warning(
+				`ProcedureSpec preflight is waiting on live runtime readiness or control availability. preflightReady=${state.preflightReady}, controlAvailable=${state.controlAvailable}, runtime details: ${JSON.stringify(state.livePreflightDetails ?? {})}.`,
+				state,
+			);
 		}
 
 		if (state.stageAnchorValid === false) {
-			return warning("ProcedureSpec preflight found current stage position inconsistent with the approved autofocus envelope.", state);
+			return warning(
+				diagnosticSummary(
+					"ProcedureSpec preflight found current stage position inconsistent with the approved autofocus envelope.",
+					state.stageAnchorDetails,
+				),
+				state,
+			);
 		}
 		const plan = asProcedureSpec(params).plan;
 		if (
@@ -1017,7 +1046,10 @@ export const runPreflightTool = {
 			plan.surfaceCorrection?.kind === "focus_plane" &&
 			(state.focusPlaneValidation as Record<string, unknown>).valid !== true
 		) {
-			return warning("ProcedureSpec preflight could not validate the referenced focus-plane artifact.", state);
+			return warning(
+				diagnosticSummary("ProcedureSpec preflight could not validate the referenced focus-plane artifact.", state.focusPlaneValidation),
+				state,
+			);
 		}
 
 		return success("ProcedureSpec preflight is ready for supervised proposal approval.", state);

@@ -14,6 +14,7 @@ import type {
 	FocusPlaneCalibrationPlan,
 	GridScanPlan,
 	Point,
+	PointListGenerator,
 	PointListPlan,
 	ProcedureSpec,
 	SurfaceCorrection,
@@ -91,15 +92,61 @@ function applyPointListSurfaceCorrection(point: Point, correction: SurfaceCorrec
 	};
 }
 
+/**
+ * Expand a parametric point-list description server-side. Having the model serialize a
+ * hundred coordinates by hand is both expensive and prone to rounding drift.
+ */
+function expandPointListGenerator(generator: PointListGenerator): Point[] {
+	const dx = generator.to.xUm - generator.from.xUm;
+	const dy = generator.to.yUm - generator.from.yUm;
+	const length = Math.hypot(dx, dy);
+	if (length === 0) {
+		throw new Error("point_list line generator requires distinct from and to points.");
+	}
+	const inset = generator.insetUm ?? 0;
+	if (2 * inset >= length) {
+		throw new Error(
+			`point_list line generator inset ${inset} um leaves no span on a ${length} um line.`,
+		);
+	}
+	const insetFraction = inset / length;
+	const startFraction = insetFraction;
+	const endFraction = 1 - insetFraction;
+	const step = (endFraction - startFraction) / (generator.count - 1);
+	const hasZ = generator.from.zUm !== undefined && generator.to.zUm !== undefined;
+	return Array.from({ length: generator.count }, (_unused, index) => {
+		const fraction = startFraction + index * step;
+		return {
+			xUm: generator.from.xUm + fraction * dx,
+			yUm: generator.from.yUm + fraction * dy,
+			zUm: hasZ ? generator.from.zUm! + fraction * (generator.to.zUm! - generator.from.zUm!) : undefined,
+		};
+	});
+}
+
+function pointListPoints(plan: PointListPlan): Point[] {
+	if (plan.points && plan.generator) {
+		throw new Error("point_list accepts either an explicit points array or a generator, not both.");
+	}
+	if (plan.generator) {
+		return expandPointListGenerator(plan.generator);
+	}
+	if (!plan.points) {
+		throw new Error("point_list requires either an explicit points array or a generator.");
+	}
+	return plan.points;
+}
+
 function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): ExecutionUnit[] {
 	const correction = requireMappingSurfaceCorrection(spec, plan);
 	if (spec.procedureId === "raman_grid_mapping" && correction.kind === "focus_plane") {
 		assertFocusPlaneMappingActions(plan);
 	}
+	const declaredPoints = pointListPoints(plan);
 	const points =
 		spec.procedureId === "raman_grid_mapping"
-			? plan.points.map((point) => applyPointListSurfaceCorrection(point, correction))
-			: plan.points;
+			? declaredPoints.map((point) => applyPointListSurfaceCorrection(point, correction))
+			: declaredPoints;
 	return points.map((point, index) => ({
 		unitId: createUnitId(spec.procedureSpecId, index),
 		index,
@@ -108,7 +155,7 @@ function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): Executio
 		point: toExecutionPoint(point),
 		actions: plan.perPoint,
 		limits: spec.limits,
-		interUnitDelayMs: index < plan.points.length - 1 ? plan.interPointDelayMs : undefined,
+		interUnitDelayMs: index < points.length - 1 ? plan.interPointDelayMs : undefined,
 		resumeKey: createResumeKey(spec.procedureSpecId, index),
 		artifactScope: {
 			artifactPathPrefix: createArtifactPrefix(spec.procedureSpecId, index),

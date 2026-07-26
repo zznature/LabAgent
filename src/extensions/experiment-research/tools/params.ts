@@ -84,11 +84,20 @@ export const RunProcedureParamsSchema = Type.Object(
 export const ProposalIdParamsSchema = Type.Object(
 	{
 		proposalId: Type.String({ minLength: 1 }),
-		spec: ProcedureSpecSchema,
+		specHash: Type.String({ minLength: 1 }),
 		simulation: Type.Optional(SimulationControlsSchema),
 		executionMode: Type.Optional(ExecutionModeSchema),
 		admission: Type.Optional(AdmissionSchema),
 		operatorApproval: Type.Optional(OperatorApprovalSchema),
+	},
+	{ additionalProperties: false },
+);
+
+export const ReviseProposalParamsSchema = Type.Object(
+	{
+		proposalId: Type.String({ minLength: 1 }),
+		patch: Type.Record(Type.String(), Type.Unknown()),
+		reason: Type.Optional(Type.String({ minLength: 1 })),
 	},
 	{ additionalProperties: false },
 );
@@ -100,6 +109,14 @@ export const RunIdParamsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const ResumeRunParamsSchema = Type.Object(
+	{
+		runId: Type.String({ minLength: 1 }),
+		confirmed: Type.Optional(Type.Boolean()),
+	},
+	{ additionalProperties: false },
+);
+
 export type ExecutionMode = Static<typeof ExecutionModeSchema>;
 export type Admission = Static<typeof AdmissionSchema>;
 export type OperatorApproval = Static<typeof OperatorApprovalSchema>;
@@ -107,4 +124,6 @@ export type TemplateApplication = Static<typeof TemplateApplicationSchema>;
 export type ProcedureSpecParams = Static<typeof ProcedureSpecParamsSchema>;
 export type RunProcedureParams = Static<typeof RunProcedureParamsSchema>;
 export type ProposalIdParams = Static<typeof ProposalIdParamsSchema>;
+export type ReviseProposalParams = Static<typeof ReviseProposalParamsSchema>;
 export type RunIdParams = Static<typeof RunIdParamsSchema>;
+export type ResumeRunParams = Static<typeof ResumeRunParamsSchema>;

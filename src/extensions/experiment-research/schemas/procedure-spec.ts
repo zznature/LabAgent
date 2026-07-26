@@ -347,10 +347,23 @@ export const FocusPlaneCalibrationPlanSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const PointListGeneratorSchema = Type.Object(
+	{
+		kind: Type.Literal("line"),
+		from: PointSchema,
+		to: PointSchema,
+		count: Type.Integer({ minimum: 2 }),
+		/** Shrink the line symmetrically by this much at both ends before spacing the points. */
+		insetUm: Type.Optional(Type.Number({ minimum: 0 })),
+	},
+	{ additionalProperties: false },
+);
+
 export const PointListPlanSchema = Type.Object(
 	{
 		kind: Type.Literal("point_list"),
-		points: Type.Array(PointSchema, { minItems: 1 }),
+		points: Type.Optional(Type.Array(PointSchema, { minItems: 1 })),
+		generator: Type.Optional(PointListGeneratorSchema),
 		surfaceCorrection: Type.Optional(SurfaceCorrectionSchema),
 		perPoint: Type.Array(SemanticStepSchema, { minItems: 1 }),
 		interPointDelayMs: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -418,6 +431,7 @@ export type ProcedureDomain = Static<typeof ProcedureDomainSchema>;
 export type SurfaceCorrection = Static<typeof SurfaceCorrectionSchema>;
 export type GridScanPlan = Static<typeof GridScanPlanSchema>;
 export type PointListPlan = Static<typeof PointListPlanSchema>;
+export type PointListGenerator = Static<typeof PointListGeneratorSchema>;
 export type CurrentPositionPlan = Static<typeof CurrentPositionPlanSchema>;
 export type FocusPlaneCalibrationPlan = Static<typeof FocusPlaneCalibrationPlanSchema>;
 export type ProcedurePlan = Static<typeof ProcedurePlanSchema>;

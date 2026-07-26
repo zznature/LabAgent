@@ -683,6 +683,120 @@ docs freeze
 
 `Add operator-facing Raman hardware status, position read, and confirmed stage relative move tools to the MVP rebuild.`
 
+## Phase 10.6: Cut Supervised-Session Overhead
+
+依据 `docs/proposals/agent-session-friction-analysis.md` 对 2026-07-24 现场会话的实测：
+四小时会话里近一半人类输入是协议仪式，agent 的失败重试基本是盲目的。
+本阶段只做两件根因修复，不改审批模型本身。
+
+### Scope
+
+- 工具文本自带诊断：模型只看得到 `content`，因此凡是 `details` 里已算出的失败原因都必须进文本
+- 绝对定位一次到位：底层已有 `stage.move_absolute_and_wait`，工具面不应只暴露单轴相对移动
+
+### Checklist
+
+- [x] `run_preflight` 在文本里带出 `stageAnchorDetails` / `focusPlaneValidation` 的 `errorCode` 与 `message`
+- [x] `run_preflight` 资源缺失时列出 spec 已声明的 role，forbidden risk 时列出 risk code 与 message
+- [x] `run_preflight` 等待 runtime 时给出 `preflightReady` / `controlAvailable` 实际取值
+- [x] `summarize_run` / `poll_run` 文本带出 `errorState`；无 `errorState` 时带出最近一次失败的 point attempt
+- [x] `PointAttemptRecord` 增加可选 `message`，失败原因不再只存在于 events.jsonl
+- [x] `propose_run` 文本返回 `specHash`，operator 不需要去别处查
+- [x] `pause_run` / `abort_run` 的 `run_not_active` 带出当前实际 status 和失败原因
+- [x] 新增 `raman_stage_move_absolute`：未指定的轴保持当前值、三轴 limits 校验、确认后闭环到 settle tolerance、读回实测 residual
+- [x] settle tolerance 默认 5 um（硬件 settle tolerance），未收敛时返回 warning 与实测 residual 而不是谎称到位
+- [x] prompt 规定绝对目标只走一次 `raman_stage_move_absolute`，不再拆成多次单轴 relative move，也不再追 residual
+
+### Exit Criteria
+
+- preflight 失败时 agent 能直接说出是哪一项越界、差多少，不需要靠改参数试探。
+- run 失败或点位失败时 agent 不需要 grep `lab-records/**/events.jsonl` 才能回答「失败原因」。
+- 一次绝对定位是 1 次确认 + 1 次工具调用，而不是 3 轴 × (读位置 + 相对移动 + 复核)。
+
+### Suggested Codex Goal
+
+`Surface tool diagnostics in result text and add a closed-loop absolute stage move tool.`
+
+## Phase 10.7: Stop Discarding Run State (P1) — 已实现
+
+依据 `docs/proposals/agent-session-friction-analysis.md` §5.3。
+本阶段的共同判断：服务端已经持有的状态，不应要求人或模型再提供一遍。
+审批模型的三段式不变。
+
+### Scope
+
+- paused run 可续跑，暂停不再等于作废
+- 审批只对 hash，不重传 spec
+- run 终态主动推送，取代人工轮询
+
+### Checklist
+
+- [x] `ActiveRun.startIndex`；`startRun` 接受初始 RunState，resume 路径不覆盖已有快照，只把 status 置回 `running` 并清 `pauseReason`
+- [x] `executeLinearRun` / `executeMappingRun` / `executeParameterSearchRun` 从 `startIndex` 开始遍历
+- [x] `planRunResume` / `resumeRun`：读 paused RunState、取冻结 spec（不接受调用方传 spec）、重新 compile、校验 `units[currentUnit.index].unitId` 一致，否则 `resume_unit_mismatch` fail closed
+- [x] `resume_run(runId, confirmed?)` 工具：未确认时只报将从哪个 unit / 坐标继续；不支持 resume 到任意 unit
+- [x] prompt 规定 paused run 一律先 `resume_run`，禁止用 abort + 重新 propose 代替
+- [x] `ApproveAndFreezeInput.spec` → `specHash`；`ProposalIdParamsSchema` 去掉 `spec`、新增必填 `specHash`
+- [x] `operatorApproval.acknowledgedSpecHash` 保持独立，人与模型的复述都必须等于 `proposal.specHash`
+- [x] `revise_proposal(proposalId, patch)`：JSON merge patch → validate → 重算 hash → 旧 proposal 标 `superseded` → 返回新 proposalId + specHash；不继承批准
+- [x] `point_list` 支持 `generator: { kind: "line", from, to, count, insetUm? }`，点表由 compiler 展开
+- [x] `run-controller.ts` 的 `setRunTerminalObserver`；paused / failed / completed / aborted 四个终态回调，回调抛错不影响状态写入
+- [x] extension 在 `session_start` 注册 observer，用 `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 推送 `runSummaryText`（含 P0 诊断）；不推送进度心跳
+
+### Exit Criteria
+
+- 1/10 点处暂停后继续实验是 1 次确认 + 1 次工具调用，已完成的点不重跑。
+- `approve_and_start_run` 的请求体不含 ProcedureSpec，改一个参数走 `revise_proposal` 而非重发整份 spec。
+- run 失败或暂停后 agent 无需人类 `查看状态` 即可报告原因。
+
+### Design Note
+
+按 hash 审批与 `revise_proposal` 已实现。行为等价性依据：`approveAndFreezeProcedureSpec`
+冻结的一直是 `proposal.spec`，原先传入的 spec 只被用来算一次哈希。
+`kernel-execution-model.md` 的 admission 段落需要用户确认后同步这一措辞。
+
+### Suggested Codex Goal
+
+`Add resume_run, hash-only approval with revise_proposal, and run-terminal push notifications.`
+
+## Phase 10.8: Fail Fast On Real Faults (P2)
+
+依据 `docs/proposals/agent-session-friction-analysis.md` §5.4。
+现场四小时里有大段时间是在等一个已经确定失败的硬件重复失败。
+
+### Scope
+
+- 同因故障熔断，瞬时故障重试，二者分开
+- 未实现的参数不得静默丢弃
+- preflight 不再检查一个即将被覆盖的状态
+
+### Checklist
+
+- [ ] `executeMappingRun` 增加因果键计数器（`errorCode` + `payload.axis`），连续 N 次（默认 2）同键失败即 pause（`repeated_same_cause_failure`）并带出该键与实测数值；选 pause 是为了让 Phase 10.7 的 `resume_run` 接手
+- [ ] `validate_procedure_spec` 在 `maxConsecutiveFailures >= maxUnits` 时报 `notice`：该规则不可能生效
+- [ ] `python-runtime.ts` 对连接类 `retrySafe` 错误（`stage_connection_error` / `python_runtime_spawn_failed`）退避重试至多 2 次（500ms / 1500ms），重试前重置 daemon；重试次数与最终错误进返回文本
+- [ ] `stage_timeout` 明确不重试，交给熔断
+- [ ] autofocus strategy 声明各自消费的 `domain.raman.autofocus.params` 字段；出现不被消费的字段即 `forbidden` 级风险
+- [ ] `focus_plane_calibration` 的 coarse 窗口提升为 plan 字段 `coarseHalfRangeUm`（默认 100），未给出时行为不变
+- [ ] compile 出的 `units[0]` 是指向冻结起点的 `move_to_point` 时跳过 XY anchor drift 检查；Z 范围检查保留
+- [ ] 其余情形 `allowedDriftUm` 从 stage resource config 读取（新增可选 `settleToleranceUm`，默认 5），下界取 `max(settleTolerance, 2 × 读数抖动)`
+- [ ] prompt 明确：同一绝对目标因 settle 超时未达成时重发不需要新确认，只有目标坐标改变才需要；不引入会话级移动白名单（属 `RunPolicy` 目标态）
+
+### Exit Criteria
+
+- 同一 `errorCode + axis` 连续失败两次即暂停，不再逐点烧 120s。
+- COM 连接瞬时失败由系统重试，不再要求用户重发同一句话。
+- spec 里写下的参数要么生效，要么在 validate 期被拒；不存在被静默忽略的第三种结果。
+- 提交 calibration 前不需要先手动把台子挪到第 1 个点。
+
+### Design Confirmation Required
+
+anchor 容差与跳过条件触及 preflight 的 fail-closed 语义，须用户确认后才回写设计文档。
+
+### Suggested Codex Goal
+
+`Add same-cause circuit breaking, transient-connection retry, param applicability validation, and anchor-gate fixes.`
+
 ## Open Issues
 
 以下问题在本计划中已显式记录，留待后续冻结，但不阻塞已排期的 Phase：

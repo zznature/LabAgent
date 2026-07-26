@@ -7,6 +7,7 @@ import type {
 	RuntimeError,
 } from "../schemas/index.ts";
 import { appendRunEvent, type RunEvent } from "../store/event-store.ts";
+import { readProcedureSpec } from "../store/procedure-spec-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
 import {
 	getRamanLiveRuntime,
@@ -36,6 +37,8 @@ export interface ActiveRun {
 	spec: ProcedureSpec;
 	units: ExecutionUnit[];
 	mode: ExecutionMode;
+	/** First unit index this execution should attempt; non-zero only on resume. */
+	startIndex: number;
 	controls?: SimulationControls;
 	pauseRequested: boolean;
 	abortRequested: boolean;
@@ -69,6 +72,35 @@ export interface RunExecutionContext {
 
 const activeRuns = new Map<string, ActiveRun>();
 
+/**
+ * Observer notified once per run terminal transition (paused / failed / completed / aborted).
+ * The extension host uses it to push run outcomes instead of making the operator poll.
+ * Progress transitions are deliberately not reported: a mapping run would interrupt the
+ * agent at every point.
+ */
+export type RunTerminalObserver = (runState: RunState) => void;
+
+let runTerminalObserver: RunTerminalObserver | undefined;
+
+export function setRunTerminalObserver(observer: RunTerminalObserver | undefined): void {
+	runTerminalObserver = observer;
+}
+
+function notifyRunTerminal(cwd: string, runId: string): void {
+	if (!runTerminalObserver) {
+		return;
+	}
+	const runState = readRunStateSnapshot(cwd, runId);
+	if (!runState) {
+		return;
+	}
+	try {
+		runTerminalObserver(runState);
+	} catch {
+		// A failing observer must never corrupt run bookkeeping.
+	}
+}
+
 const DEFAULT_MAPPING_MAX_CONSECUTIVE_FAILURES = 3;
 const INTER_UNIT_DELAY_HEARTBEAT_MS = 1_000;
 
@@ -98,12 +130,13 @@ function limitedUnitsForSpec(spec: ProcedureSpec, units: ExecutionUnit[]): Execu
 	return units.slice(0, maxUnitsForSpec(spec, units));
 }
 
-function createBaseRunState(runId: string, spec: ProcedureSpec, units: ExecutionUnit[]): RunState {
+function createBaseRunState(runId: string, spec: ProcedureSpec, units: ExecutionUnit[], mode: ExecutionMode): RunState {
 	const now = timestamp();
 	return {
 		runId,
 		experimentId: spec.experimentId,
 		procedureSpecId: spec.procedureSpecId,
+		executionMode: mode,
 		status: "queued",
 		progress: {
 			completedUnits: 0,
@@ -151,7 +184,7 @@ async function executeUnit(
 
 function appendRunStartedEvent(activeRun: ActiveRun): void {
 	appendEvent(activeRun.cwd, {
-		eventId: `${activeRun.runId}-started`,
+		eventId: activeRun.startIndex > 0 ? `${activeRun.runId}-resumed-${activeRun.startIndex}` : `${activeRun.runId}-started`,
 		runId: activeRun.runId,
 		experimentId: activeRun.spec.experimentId,
 		eventType: "run_started",
@@ -159,6 +192,7 @@ function appendRunStartedEvent(activeRun: ActiveRun): void {
 		payload: {
 			totalUnits: activeRun.units.length,
 			mode: activeRun.mode,
+			startIndex: activeRun.startIndex,
 		},
 	});
 }
@@ -275,6 +309,7 @@ function pauseActiveRun(activeRun: ActiveRun, unit: ExecutionUnit, reason: strin
 		},
 	});
 	activeRuns.delete(activeRun.runId);
+	notifyRunTerminal(activeRun.cwd, activeRun.runId);
 }
 
 function failActiveRun(
@@ -293,6 +328,7 @@ function failActiveRun(
 	}));
 	appendUnitFailedEvent(activeRun, unit, failure, resultArtifacts);
 	activeRuns.delete(activeRun.runId);
+	notifyRunTerminal(activeRun.cwd, activeRun.runId);
 }
 
 function completeActiveRun(activeRun: ActiveRun): void {
@@ -317,6 +353,7 @@ function completeActiveRun(activeRun: ActiveRun): void {
 		},
 	});
 	activeRuns.delete(activeRun.runId);
+	notifyRunTerminal(activeRun.cwd, activeRun.runId);
 }
 
 function applyCompletedProgress(
@@ -441,6 +478,7 @@ function abortActiveRun(activeRun: ActiveRun, unit: ExecutionUnit): void {
 		payload: { unitId: unit.unitId, index: unit.index },
 	});
 	activeRuns.delete(activeRun.runId);
+	notifyRunTerminal(activeRun.cwd, activeRun.runId);
 }
 
 function markActiveUnitStarted(activeRun: ActiveRun, unit: ExecutionUnit, attempt?: UnitAttemptContext): RunState {
@@ -525,8 +563,8 @@ async function executeManagedRun(activeRun: ActiveRun): Promise<void> {
 	await executeMappingRun(context, spec.stoppingRules?.maxConsecutiveFailures ?? DEFAULT_MAPPING_MAX_CONSECUTIVE_FAILURES);
 }
 
-function startRun(activeRun: ActiveRun): RunState {
-	const queuedState = setRunState(activeRun.cwd, createBaseRunState(activeRun.runId, activeRun.spec, activeRun.units));
+function startRun(activeRun: ActiveRun, initialState: RunState): RunState {
+	const queuedState = setRunState(activeRun.cwd, initialState);
 	activeRun.promise = executeManagedRun(activeRun).catch((error) => {
 		updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 			...current,
@@ -543,9 +581,14 @@ function startRun(activeRun: ActiveRun): RunState {
 			endedAt: timestamp(),
 		}));
 		activeRuns.delete(activeRun.runId);
+		notifyRunTerminal(activeRun.cwd, activeRun.runId);
 	});
 	activeRuns.set(activeRun.runId, activeRun);
 	return queuedState;
+}
+
+function startFreshRun(activeRun: ActiveRun): RunState {
+	return startRun(activeRun, createBaseRunState(activeRun.runId, activeRun.spec, activeRun.units, activeRun.mode));
 }
 
 export function startSimulationRun(
@@ -553,12 +596,13 @@ export function startSimulationRun(
 	spec: ProcedureSpec,
 	controls: SimulationControls = {},
 ): RunState {
-	return startRun({
+	return startFreshRun({
 		runId: `sim-run-${randomUUID().slice(0, 8)}`,
 		cwd,
 		spec,
 		units: limitedUnitsForSpec(spec, compileProcedureSpec(spec)),
 		mode: "simulation",
+		startIndex: 0,
 		controls,
 		pauseRequested: false,
 		abortRequested: false,
@@ -574,12 +618,13 @@ export function startLiveRamanRun(
 		throw new Error(`live Raman runtime not registered for cwd ${cwd}`);
 	}
 
-	return startRun({
+	return startFreshRun({
 		runId: `live-run-${randomUUID().slice(0, 8)}`,
 		cwd,
 		spec,
 		units: limitedUnitsForSpec(spec, compileProcedureSpec(spec)),
 		mode: "live-supervised",
+		startIndex: 0,
 		pauseRequested: false,
 		abortRequested: false,
 		promise: Promise.resolve(),
@@ -619,3 +664,123 @@ export function abortRun(cwd: string, runId: string): RunState {
 export const pollSimulationRun = pollRun;
 export const pauseSimulationRun = pauseRun;
 export const abortSimulationRun = abortRun;
+
+export class RunResumeError extends Error {
+	constructor(
+		message: string,
+		readonly code: string,
+		readonly stateAfter: Record<string, unknown> = {},
+	) {
+		super(message);
+		this.name = "RunResumeError";
+	}
+}
+
+export interface RunResumePlan {
+	runState: RunState;
+	spec: ProcedureSpec;
+	units: ExecutionUnit[];
+	mode: ExecutionMode;
+	startIndex: number;
+	unitId: string;
+	point?: ExecutionUnit["point"];
+}
+
+function resumeExecutionMode(runState: RunState): ExecutionMode {
+	// Snapshots written before executionMode was persisted only carry it in the runId prefix.
+	return runState.executionMode ?? (runState.runId.startsWith("live-run-") ? "live-supervised" : "simulation");
+}
+
+/**
+ * Resolve where a paused run would continue, without touching hardware or run state.
+ * Resume deliberately reads the frozen spec from disk rather than accepting one from the
+ * caller: a resume that could carry a spec would be an approval bypass.
+ */
+export function planRunResume(cwd: string, runId: string): RunResumePlan {
+	const runState = readRunStateSnapshot(cwd, runId);
+	if (!runState) {
+		throw new RunResumeError(`Run ${runId} was not found.`, "run_not_found");
+	}
+	if (runState.status !== "paused") {
+		throw new RunResumeError(
+			`Run ${runId} is not paused; current status is ${runState.status}. Only a paused run can be resumed.`,
+			"run_not_paused",
+			{ status: runState.status },
+		);
+	}
+	if (activeRuns.has(runId)) {
+		throw new RunResumeError(`Run ${runId} is still finishing its pause boundary.`, "run_still_active");
+	}
+	if (!runState.currentUnit) {
+		throw new RunResumeError(
+			`Run ${runId} has no recorded current unit, so the resume point is unknown.`,
+			"resume_point_unknown",
+		);
+	}
+
+	const spec = readProcedureSpec(cwd, runState.experimentId, runState.procedureSpecId);
+	if (!spec) {
+		throw new RunResumeError(
+			`Frozen ProcedureSpec ${runState.procedureSpecId} was not found; run ${runId} cannot be resumed.`,
+			"frozen_spec_missing",
+		);
+	}
+
+	const units = limitedUnitsForSpec(spec, compileProcedureSpec(spec));
+	const startIndex = runState.currentUnit.index;
+	const unit = units[startIndex];
+	if (!unit || unit.unitId !== runState.currentUnit.unitId) {
+		throw new RunResumeError(
+			`Recompiled unit at index ${startIndex} is ${unit?.unitId ?? "missing"}, not the paused unit ${runState.currentUnit.unitId}.`,
+			"resume_unit_mismatch",
+			{ expectedUnitId: runState.currentUnit.unitId, compiledUnitId: unit?.unitId, totalUnits: units.length },
+		);
+	}
+
+	return {
+		runState,
+		spec,
+		units,
+		mode: resumeExecutionMode(runState),
+		startIndex,
+		unitId: unit.unitId,
+		point: unit.point,
+	};
+}
+
+export function resumeRun(cwd: string, runId: string): RunState {
+	const plan = planRunResume(cwd, runId);
+	if (plan.mode === "live-supervised" && !getRamanLiveRuntime(cwd)) {
+		throw new RunResumeError(
+			`No live Raman runtime is registered for this workspace; run ${runId} cannot be resumed.`,
+			"live_runtime_unavailable",
+		);
+	}
+
+	const resumedState: RunState = {
+		...plan.runState,
+		status: "running",
+		executionMode: plan.mode,
+		pauseReason: undefined,
+		errorState: undefined,
+		endedAt: undefined,
+		resumedFromUnitIndexes: (plan.runState.resumedFromUnitIndexes ?? []).concat(plan.startIndex),
+		heartbeatAt: timestamp(),
+		updatedAt: timestamp(),
+	};
+
+	return startRun(
+		{
+			runId,
+			cwd,
+			spec: plan.spec,
+			units: plan.units,
+			mode: plan.mode,
+			startIndex: plan.startIndex,
+			pauseRequested: false,
+			abortRequested: false,
+			promise: Promise.resolve(),
+		},
+		resumedState,
+	);
+}

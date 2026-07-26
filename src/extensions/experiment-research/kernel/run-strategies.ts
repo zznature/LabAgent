@@ -124,6 +124,7 @@ function recordAttempt(
 		failureType: failure?.failureType,
 		failureReason: failure?.failureReason,
 		errorCode: failure?.failure.errorCode,
+		message: failure?.failure.message,
 		finalForPoint,
 		artifactIds: artifactIds(artifacts),
 	});
@@ -270,13 +271,17 @@ function parameterSearchOptions(
 	};
 }
 
+function pendingUnits(context: RunExecutionContext): ExecutionUnit[] {
+	return context.activeRun.units.slice(context.activeRun.startIndex);
+}
+
 export async function executeLinearRun(
 	context: RunExecutionContext,
 	unitOptions: UnitOptionsProvider = () => undefined,
 ): Promise<void> {
 	const { activeRun } = context;
 
-	for (const unit of activeRun.units) {
+	for (const unit of pendingUnits(context)) {
 		if (activeRun.abortRequested) {
 			context.abortAt(unit);
 			return;
@@ -312,6 +317,10 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 	const searchObservations: RamanObservationMetrics[] = [];
 
 	for (const [attemptIndex, attempt] of attempts.entries()) {
+		// On resume, earlier attempts already ran; their observations are not replayed.
+		if (attemptIndex < activeRun.startIndex) {
+			continue;
+		}
 		const unit = attempt.unit;
 		if (activeRun.abortRequested) {
 			context.abortAt(unit);
@@ -499,7 +508,7 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 		return "run_failed";
 	}
 
-	for (const unit of activeRun.units) {
+	for (const unit of pendingUnits(context)) {
 		const outcome = await runMappingAttempt(unit, { phase: "initial", attemptIndex: 0 });
 		if (outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
 			return;

@@ -9,6 +9,7 @@ import {
 	ramanGetHardwareStatusTool,
 	ramanGetStagePositionTool,
 	ramanRunAutofocusTool,
+	ramanStageMoveAbsoluteTool,
 	ramanStageMoveRelativeTool,
 } from "./tools/operator.ts";
 import {
@@ -28,9 +29,13 @@ import {
 	pauseRunTool,
 	pollRunTool,
 	proposeRunTool,
+	resumeRunTool,
+	reviseProposalTool,
 	runProcedureTool,
+	runSummaryText,
 	summarizeRunTool,
 } from "./tools/runtime.ts";
+import { setRunTerminalObserver } from "./kernel/run-controller.ts";
 import { registerConfiguredRamanPythonRuntime } from "./runtime/raman/index.ts";
 
 const PLANNER_TOOL_NAMES = [
@@ -44,10 +49,12 @@ const PLANNER_TOOL_NAMES = [
 	"calculate_focus_plane_from_xyz_points",
 	"register_focus_plane_calibration_artifact",
 	"propose_run",
+	"revise_proposal",
 	"approve_and_start_run",
 	"poll_run",
 	"summarize_run",
 	"pause_run",
+	"resume_run",
 	"abort_run",
 	"raman_get_hardware_status",
 	"raman_get_stage_position",
@@ -55,6 +62,7 @@ const PLANNER_TOOL_NAMES = [
 	"raman_capture_frame_no_laser",
 	"raman_run_autofocus",
 	"raman_acquire_smoke_spectrum",
+	"raman_stage_move_absolute",
 	"raman_stage_move_relative",
 ];
 
@@ -88,19 +96,37 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(ramanCaptureFrameNoLaserTool);
 	pi.registerTool(ramanRunAutofocusTool);
 	pi.registerTool(ramanAcquireSmokeSpectrumTool);
+	pi.registerTool(ramanStageMoveAbsoluteTool);
 	pi.registerTool(ramanStageMoveRelativeTool);
 	pi.registerTool(proposeRunTool);
+	pi.registerTool(reviseProposalTool);
 	pi.registerTool(approveAndStartRunTool);
 	pi.registerTool(runProcedureTool);
 	pi.registerTool(pollRunTool);
 	pi.registerTool(summarizeRunTool);
 	pi.registerTool(pauseRunTool);
+	pi.registerTool(resumeRunTool);
 	pi.registerTool(abortRunTool);
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx?.cwd) {
 			registerConfiguredRamanPythonRuntime(ctx.cwd);
 		}
+		setRunTerminalObserver((runState) => {
+			const nextStep =
+				runState.status === "paused"
+					? " Call resume_run to continue from the paused unit; do not abort and re-propose."
+					: "";
+			pi.sendMessage(
+				{
+					customType: "run_terminal",
+					content: `${runSummaryText(runState)}${nextStep}`,
+					display: true,
+					details: { runId: runState.runId, status: runState.status },
+				},
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		});
 		const activeTools = new Set(pi.getActiveTools());
 		for (const toolName of PLANNER_TOOL_NAMES) {
 			activeTools.add(toolName);

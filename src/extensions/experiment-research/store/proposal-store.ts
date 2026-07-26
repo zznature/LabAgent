@@ -4,7 +4,7 @@ import { experimentRoot, experimentsRoot } from "./layout.ts";
 import { listDirectories, listJsonFiles, readJsonFile, writeJsonFile } from "./storage.ts";
 import { join } from "node:path";
 
-export type ProposalStatus = "proposed" | "approved";
+export type ProposalStatus = "proposed" | "approved" | "superseded";
 
 export interface ProcedureProposalRecord {
 	proposalId: string;
@@ -16,6 +16,11 @@ export interface ProcedureProposalRecord {
 	spec: ProcedureSpec;
 	createdAt: string;
 	approvedAt?: string;
+	/** Set when revise_proposal replaced this proposal with a new one. */
+	supersededBy?: string;
+	supersededAt?: string;
+	/** Set on a proposal created by revising an earlier one. */
+	revisionOf?: string;
 }
 
 function stableCanonicalize(value: unknown): string {
@@ -47,7 +52,11 @@ export function hashProcedureSpec(spec: ProcedureSpec): string {
 	return createHash("sha256").update(stableCanonicalize(spec)).digest("hex");
 }
 
-export function createProcedureProposal(cwd: string, spec: ProcedureSpec): ProcedureProposalRecord {
+export function createProcedureProposal(
+	cwd: string,
+	spec: ProcedureSpec,
+	revisionOf?: string,
+): ProcedureProposalRecord {
 	const proposal: ProcedureProposalRecord = {
 		proposalId: `proposal-${randomUUID().slice(0, 8)}`,
 		experimentId: spec.experimentId,
@@ -57,6 +66,7 @@ export function createProcedureProposal(cwd: string, spec: ProcedureSpec): Proce
 		requiresConfirmation: true,
 		spec,
 		createdAt: now(),
+		revisionOf,
 	};
 	writeJsonFile(proposalPath(cwd, spec.experimentId, proposal.proposalId), proposal);
 	return proposal;
@@ -94,4 +104,19 @@ export function approveProcedureProposal(cwd: string, proposal: ProcedureProposa
 	};
 	writeJsonFile(proposalPath(cwd, proposal.experimentId, proposal.proposalId), approved);
 	return approved;
+}
+
+export function supersedeProcedureProposal(
+	cwd: string,
+	proposal: ProcedureProposalRecord,
+	supersededBy: string,
+): ProcedureProposalRecord {
+	const superseded: ProcedureProposalRecord = {
+		...proposal,
+		status: "superseded",
+		supersededBy,
+		supersededAt: now(),
+	};
+	writeJsonFile(proposalPath(cwd, proposal.experimentId, proposal.proposalId), superseded);
+	return superseded;
 }

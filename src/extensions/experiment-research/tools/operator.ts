@@ -21,6 +21,20 @@ const StageRelativeMoveParamsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const StageAbsoluteMoveParamsSchema = Type.Object(
+	{
+		xUm: Type.Optional(Type.Number()),
+		yUm: Type.Optional(Type.Number()),
+		zUm: Type.Optional(Type.Number()),
+		confirmed: Type.Optional(Type.Boolean()),
+		toleranceUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+		maxCorrections: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
+		timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+		minObjectiveClearanceUm: Type.Optional(Type.Number({ minimum: 0 })),
+	},
+	{ additionalProperties: false },
+);
+
 const SmokeSpectrumParamsSchema = Type.Object(
 	{
 		confirmed: Type.Optional(Type.Boolean()),
@@ -68,9 +82,12 @@ const AutofocusParamsSchema = Type.Object(
 );
 
 type StageRelativeMoveParams = Static<typeof StageRelativeMoveParamsSchema>;
+type StageAbsoluteMoveParams = Static<typeof StageAbsoluteMoveParamsSchema>;
 type SmokeSpectrumParams = Static<typeof SmokeSpectrumParamsSchema>;
 type OperatorAutofocusParams = Static<typeof AutofocusParamsSchema>;
 type StageAxis = Static<typeof StageAxisSchema>;
+
+const STAGE_AXES: readonly StageAxis[] = ["x", "y", "z"];
 
 const DEFAULT_SMOKE_SPECTRUM_INTEGRATION_TIME_MS = 1000;
 const DEFAULT_SMOKE_SPECTRUM_LASER_POWER_PERCENT = 0.1;
@@ -80,6 +97,10 @@ const MAX_SMOKE_SPECTRUM_LASER_POWER_PERCENT = 0.1;
 const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
 const DEFAULT_AUTOFOCUS_MIN_OBJECTIVE_CLEARANCE_UM = 200;
 const DEFAULT_AUTOFOCUS_ROI = { x: 100, y: 100, width: 64, height: 64 };
+// The MC.Newton driver settles axes to a 5 um tolerance; closing tighter than that only chases readout noise.
+const DEFAULT_STAGE_MOVE_TOLERANCE_UM = 5;
+const DEFAULT_STAGE_MOVE_MAX_CORRECTIONS = 2;
+const DEFAULT_STAGE_ABSOLUTE_MOVE_TIMEOUT_MS = 60_000;
 
 interface OperatorToolDetails {
 	status: "success" | "warning" | "error";
@@ -178,6 +199,30 @@ function readString(record: Record<string, unknown>, key: string): string | unde
 
 function formatStagePosition(position: StagePosition): string {
 	return `X=${position.xUm} um, Y=${position.yUm} um, Z=${position.zUm} um`;
+}
+
+interface StageResidual {
+	dxUm: number;
+	dyUm: number;
+	dzUm: number;
+	maxAbsUm: number;
+}
+
+function residualTo(current: StagePosition, target: StagePosition): StageResidual {
+	const round = (value: number): number => Number(value.toFixed(4));
+	const dxUm = round(target.xUm - current.xUm);
+	const dyUm = round(target.yUm - current.yUm);
+	const dzUm = round(target.zUm - current.zUm);
+	return {
+		dxUm,
+		dyUm,
+		dzUm,
+		maxAbsUm: round(Math.max(Math.abs(dxUm), Math.abs(dyUm), Math.abs(dzUm))),
+	};
+}
+
+function formatResidual(residual: StageResidual): string {
+	return `dX=${residual.dxUm} um, dY=${residual.dyUm} um, dZ=${residual.dzUm} um`;
 }
 
 async function readStagePosition(runtime: RamanLiveRuntime, timeoutMs: number): Promise<ActionResult> {
@@ -611,6 +656,162 @@ export const ramanRunAutofocusTool = {
 		return success(summary, stateAfter);
 	},
 } satisfies ToolDefinition<typeof AutofocusParamsSchema, OperatorToolDetails>;
+
+export const ramanStageMoveAbsoluteTool = {
+	name: "raman_stage_move_absolute",
+	label: "Raman Stage Move Absolute",
+	description: "Prepare or execute a confirmed absolute Raman stage move that closes on the target within a settle tolerance.",
+	promptSnippet: "Move the Raman stage to an absolute XYZ target after explicit operator confirmation",
+	promptGuidelines: [
+		"Use this whenever the operator names an absolute destination; do not decompose an absolute target into per-axis relative nudges.",
+		"Call first without confirmed=true to present the current position, target, and delta, then call with confirmed=true only after explicit confirmation.",
+		"Omit an axis to hold it at its current value.",
+		"The tool verifies the achieved position and corrects it up to maxCorrections times; do not add further correction calls once it reports success.",
+		"Report the returned residual instead of chasing it below toleranceUm, which is the hardware settle tolerance.",
+	],
+	parameters: StageAbsoluteMoveParamsSchema,
+	executionMode: "sequential",
+	async execute(_toolCallId, params: StageAbsoluteMoveParams, _signal, _onUpdate, ctx) {
+		const runtime = getRamanLiveRuntime(ctx.cwd);
+		if (!runtime) {
+			return runtimeUnavailableState();
+		}
+		if (params.xUm === undefined && params.yUm === undefined && params.zUm === undefined) {
+			return error(
+				"Absolute stage move requires at least one of xUm, yUm, or zUm.",
+				"stage_move_target_missing",
+				{ stageResourceId: runtime.stage.resource.resourceId },
+				false,
+			);
+		}
+
+		const toleranceUm = params.toleranceUm ?? DEFAULT_STAGE_MOVE_TOLERANCE_UM;
+		const maxCorrections = params.maxCorrections ?? DEFAULT_STAGE_MOVE_MAX_CORRECTIONS;
+		const timeoutMs = params.timeoutMs ?? DEFAULT_STAGE_ABSOLUTE_MOVE_TIMEOUT_MS;
+
+		const startResult = await readStagePosition(runtime, 10_000);
+		if (startResult.status !== "success") {
+			return error(startResult.summary, startResult.errorCode ?? "stage_position_read_failed", {
+				stageResourceId: runtime.stage.resource.resourceId,
+				actionStatus: startResult.status,
+				payload: startResult.payload ?? {},
+			}, startResult.retrySafe);
+		}
+		const start = positionFromActionResult(startResult);
+		if (!start) {
+			return error("Stage position result did not include xUm, yUm, and zUm.", "invalid_stage_position_result", {
+				stageResourceId: runtime.stage.resource.resourceId,
+				payload: startResult.payload ?? {},
+			}, false);
+		}
+
+		const target: StagePosition = {
+			xUm: params.xUm ?? start.xUm,
+			yUm: params.yUm ?? start.yUm,
+			zUm: params.zUm ?? start.zUm,
+		};
+		for (const axis of STAGE_AXES) {
+			const limitCheck = checkMoveLimits(runtime, target, axis, params.minObjectiveClearanceUm);
+			if (!limitCheck.ok) {
+				return error(limitCheck.message, limitCheck.code, {
+					stageResourceId: runtime.stage.resource.resourceId,
+					current: start,
+					...limitCheck.state,
+				}, false);
+			}
+		}
+
+		const proposalState: Record<string, unknown> = {
+			stageResourceId: runtime.stage.resource.resourceId,
+			current: start,
+			target,
+			toleranceUm,
+			maxCorrections,
+			timeoutMs,
+			stageLimits: runtime.stage.resource.limits,
+			requiresConfirmation: true,
+			confirmed: params.confirmed === true,
+		};
+		if (params.confirmed !== true) {
+			const pending = residualTo(start, target);
+			return warning(
+				`Absolute stage move requires explicit confirmation before execution. Current: ${formatStagePosition(start)}. Target: ${formatStagePosition(target)}. Delta: ${formatResidual(pending)}. Settle tolerance: ${toleranceUm} um.`,
+				{ ...proposalState, pendingDelta: pending },
+			);
+		}
+
+		const attempts: Array<Record<string, unknown>> = [];
+		let position = start;
+		let residual = residualTo(start, target);
+		let corrections = 0;
+		for (;;) {
+			const moveResult = await runtime.stage.moveAbsoluteAndWait({
+				action: "stage.move_absolute_and_wait",
+				resourceId: runtime.stage.resource.resourceId,
+				target,
+				timeoutMs,
+			});
+			if (moveResult.status !== "success") {
+				return error(moveResult.summary, moveResult.errorCode ?? "stage_move_failed", {
+					...proposalState,
+					corrections,
+					attempts,
+					lastVerifiedPosition: position,
+					actionStatus: moveResult.status,
+					payload: moveResult.payload ?? {},
+				}, moveResult.retrySafe);
+			}
+
+			const verifyResult = await readStagePosition(runtime, 10_000);
+			if (verifyResult.status !== "success") {
+				return error(verifyResult.summary, verifyResult.errorCode ?? "stage_position_read_failed", {
+					...proposalState,
+					corrections,
+					attempts,
+					lastVerifiedPosition: position,
+					actionStatus: verifyResult.status,
+					payload: verifyResult.payload ?? {},
+				}, verifyResult.retrySafe);
+			}
+			const verified = positionFromActionResult(verifyResult);
+			if (!verified) {
+				return error("Stage position result did not include xUm, yUm, and zUm.", "invalid_stage_position_result", {
+					...proposalState,
+					corrections,
+					attempts,
+					payload: verifyResult.payload ?? {},
+				}, false);
+			}
+
+			position = verified;
+			residual = residualTo(position, target);
+			attempts.push({ correctionIndex: corrections, position, residual });
+			if (residual.maxAbsUm <= toleranceUm || corrections >= maxCorrections) {
+				break;
+			}
+			corrections += 1;
+		}
+
+		const stateAfter: Record<string, unknown> = {
+			...proposalState,
+			position,
+			residual,
+			corrections,
+			attempts,
+			withinTolerance: residual.maxAbsUm <= toleranceUm,
+		};
+		if (residual.maxAbsUm > toleranceUm) {
+			return warning(
+				`Absolute stage move stopped ${residual.maxAbsUm} um from target after ${corrections} correction(s); settle tolerance is ${toleranceUm} um. Final: ${formatStagePosition(position)}. Residual: ${formatResidual(residual)}.`,
+				stateAfter,
+			);
+		}
+		return success(
+			`Absolute stage move completed within the ${toleranceUm} um settle tolerance after ${corrections} correction(s). Final: ${formatStagePosition(position)}. Residual: ${formatResidual(residual)}.`,
+			stateAfter,
+		);
+	},
+} satisfies ToolDefinition<typeof StageAbsoluteMoveParamsSchema, OperatorToolDetails>;
 
 export const ramanStageMoveRelativeTool = {
 	name: "raman_stage_move_relative",

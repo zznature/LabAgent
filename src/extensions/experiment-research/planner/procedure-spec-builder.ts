@@ -360,12 +360,10 @@ function classifyMotionRangeRisks(spec: ProcedureSpec): ProposalRisk[] {
 		return [];
 	}
 
-	const points =
-		spec.plan.kind === "point_list"
-			? spec.plan.points
-			: compileProcedureSpec(spec)
-					.filter(hasPoint)
-					.map((unit) => ({ xUm: unit.point.xUm, yUm: unit.point.yUm, zUm: unit.point.zUm }));
+	// Compiling covers explicit point lists and server-expanded generators alike.
+	const points = compileProcedureSpec(spec)
+		.filter(hasPoint)
+		.map((unit) => ({ xUm: unit.point.xUm, yUm: unit.point.yUm, zUm: unit.point.zUm }));
 	const risks: ProposalRisk[] = [];
 
 	for (const point of points) {

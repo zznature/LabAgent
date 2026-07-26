@@ -365,12 +365,14 @@ operator 需要的不是完整实验入口，而是现场维护与证据链工�
 
 - `poll_run`
 - `pause_run`
+- `resume_run`
 - `abort_run`
 - `raman_get_hardware_status`
 - `raman_get_stage_position`
 - `raman_capture_frame`
 - `raman_run_autofocus`
 - `raman_acquire_smoke_spectrum`
+- `raman_stage_move_absolute`
 - `raman_stage_move_relative`
 - `raman_active_probe`
 - `raman_record_xy_calibration`（MVP 不实现，随 XY correction 一并推迟）
@@ -378,9 +380,16 @@ operator 需要的不是完整实验入口，而是现场维护与证据链工�
 - `raman_check_hardware_validation`
 
 这些 tool 可以有更明确的硬件意味，但仍然不应退化成裸驱动命令。
-其中 `raman_stage_move_relative` 属于 operator 确认后的 stage-only nudge：
+其中 `raman_stage_move_absolute` 属于 operator 确认后的 stage-only 定位：
+operator 说出绝对目标时应只用这一个工具，未指定的轴保持当前值；
+它应读取起始位置、对三个轴做 runtime stage resource limits 校验、执行 `stage.move_absolute_and_wait`、
+读回实际位置并报告 residual；residual 超出 settle tolerance 时在 `maxCorrections` 次数内重发同一个绝对目标，
+仍未收敛则返回 warning 和实测 residual，而不是声称已到位。
+tolerance 默认取硬件 settle tolerance（5 um），低于该值的追补只是在追读数噪声。
+其中 `raman_stage_move_relative` 属于 operator 确认后的单轴 stage-only nudge：
 它应读取当前位置、计算目标、用 runtime stage resource limits 做硬边界校验；
-它不应为了单轴移动构造 Raman 采谱 `ProcedureSpec`，也不应要求 frame provider / spectrometer 参与。
+它不应为了单轴移动构造 Raman 采谱 `ProcedureSpec`，也不应要求 frame provider / spectrometer 参与；
+绝对目标不应被拆成多次单轴 relative move。
 其中 `raman_capture_frame` 属于 operator 的现场观察能力：
 它应通过 runtime 的 `frame.capture_latest` 复合 action 返回 frame artifact/path，
 不应暴露 `start_video_session`、文件夹 glob 或相机底层驱动细节。
@@ -564,7 +573,10 @@ runtime 从同一 run 已持久化的最新 accepted autofocus Artifact 恢复�
 anchors 进入平面拟合。最终 anchor unit 发布 `raman-focus-plane` JSON，Python daemon 不负责拟合。
 
 校正 mapping 的当前 schema（`grid_scan` 和 `point_list` mapping 都使用同一个
-`surfaceCorrection` gate；line scan / rotated 1xN mapping 可用 `point_list`）：
+`surfaceCorrection` gate；line scan / rotated 1xN mapping 可用 `point_list`）。
+`point_list` 的点表可以显式给出 `points`，也可以给出 `generator`
+（`{ kind: line, from, to, count, insetUm? }`）由 compiler 展开；两者互斥。
+参数化描述避免模型逐点序列化上百个坐标，也避免手写点表带来的浮点舍入不一致：
 
 ```yaml
 plan:
@@ -609,8 +621,18 @@ spec 冻结字段一致。缺失、未完成或不匹配都 fail closed。
 注册入口只要求四个角点互异并组成非退化凸四边形；不要求长方形，也不要求中心点参与拟合。
 
 live-supervised `approve_and_start_run` 还要求 operator approval payload 复述 proposalId 和
-specHash。preflight ready 与 control available 只表示可进入审批，不表示 agent 可以代替用户批准
+specHash。approval 调用只传 `proposalId + specHash`：proposal 已在服务端冻结，重传 spec 只是让模型
+重新序列化一份可能出错的 JSON。参数微调走 `revise_proposal(proposalId, patch)`，它重算 hash、把旧
+proposal 标为 `superseded`，且**不继承批准**——新 hash 必须由 operator 重新复述。
+preflight ready 与 control available 只表示可进入审批，不表示 agent 可以代替用户批准
 真实硬件运动或激光采集。
+
+paused run 通过 `resume_run(runId, confirmed?)` 从 `RunState.currentUnit.index` 续跑，
+使用磁盘上的冻结 spec 重新编译并校验该下标的 `unitId` 一致；不一致即 `resume_unit_mismatch` fail closed。
+resume 不接受调用方传入 spec，否则它会成为绕过审批的改 spec 入口；也不支持 resume 到任意 unit。
+live-supervised resume 仍是真实硬件运动，必须显式确认。
+run 进入 paused / failed / completed / aborted 终态时，runtime 通过 observer 主动把该 run 的
+诊断文本推给会话，operator 不需要轮询 `poll_run`。
 
 ## 9. 预检与维护工具如何接 Raman
 

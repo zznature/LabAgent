@@ -715,7 +715,7 @@ function autofocusRange(spec: ProcedureSpec): { zStartUm: number; zEndUm: number
 function zAnchorFromSpec(spec: ProcedureSpec): number | undefined {
 	const plan = spec.plan;
 	if (plan.kind === "point_list") {
-		return plan.points.find((point) => typeof point.zUm === "number")?.zUm;
+		return plan.points?.find((point) => typeof point.zUm === "number")?.zUm ?? plan.generator?.from.zUm;
 	}
 	if (plan.kind === "focus_plane_calibration") {
 		return plan.seedZUm;

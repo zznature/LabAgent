@@ -3,16 +3,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
+import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import { buildProcedureSpec } from "../planner/procedure-spec-builder.ts";
-import type { ProcedureSpec } from "../schemas/index.ts";
-import { readArtifactRecords, readRunEvents } from "../store/index.ts";
+import type { ProcedureSpec, RunState } from "../schemas/index.ts";
+import { readArtifactRecords, readRunEvents, writeRunStateSnapshot } from "../store/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 type CapturedHandler = (...args: unknown[]) => unknown;
 
+interface CapturedMessage {
+	customType: string;
+	content: string;
+	details?: unknown;
+}
+
 interface CapturedExtension {
 	tools: Map<string, ToolDefinition>;
 	handlers: Map<string, CapturedHandler[]>;
+	messages: CapturedMessage[];
 	getActiveTools(): string[];
 }
 
@@ -34,6 +42,7 @@ afterEach(() => {
 function loadExperimentExtension(): CapturedExtension {
 	const tools = new Map<string, ToolDefinition>();
 	const handlers = new Map<string, CapturedHandler[]>();
+	const messages: CapturedMessage[] = [];
 	let activeTools = ["read"];
 	const api = {
 		registerTool(tool: ToolDefinition) {
@@ -44,6 +53,9 @@ function loadExperimentExtension(): CapturedExtension {
 			existing.push(handler);
 			handlers.set(event, existing);
 		},
+		sendMessage(message: CapturedMessage) {
+			messages.push(message);
+		},
 		getActiveTools() {
 			return activeTools;
 		},
@@ -53,7 +65,7 @@ function loadExperimentExtension(): CapturedExtension {
 	} as unknown as ExtensionAPI;
 
 	experimentResearchExtension(api);
-	return { tools, handlers, getActiveTools: () => activeTools };
+	return { tools, handlers, messages, getActiveTools: () => activeTools };
 }
 
 function createProcedureSpec(pointCount = 3): ProcedureSpec {
@@ -175,10 +187,11 @@ async function proposeAndStart(
 		?.execute("propose", { spec, simulation }, undefined, undefined, context);
 	const proposalState = (proposed?.details as Record<string, unknown>).stateAfter as Record<string, unknown>;
 	const proposalId = proposalState.proposalId as string;
+	const specHash = proposalState.specHash as string;
 
 	const started = await extension.tools
 		.get("approve_and_start_run")
-		?.execute("approve", { proposalId, spec, simulation }, undefined, undefined, context);
+		?.execute("approve", { proposalId, specHash, simulation }, undefined, undefined, context);
 	return (started?.details as Record<string, unknown>).runId as string;
 }
 
@@ -213,6 +226,8 @@ describe("experiment research simulation runtime", () => {
 		expect(extension.tools.has("run_procedure")).toBe(true);
 		expect(extension.tools.has("poll_run")).toBe(true);
 		expect(extension.tools.has("pause_run")).toBe(true);
+		expect(extension.tools.has("resume_run")).toBe(true);
+		expect(extension.tools.has("revise_proposal")).toBe(true);
 		expect(extension.tools.has("abort_run")).toBe(true);
 
 		await sessionStart?.({ type: "session_start", sessionId: "test-session" }, {});
@@ -222,12 +237,101 @@ describe("experiment research simulation runtime", () => {
 				"get_lab_capabilities",
 				"get_lab_state",
 				"propose_run",
+				"revise_proposal",
 				"approve_and_start_run",
 				"poll_run",
 				"pause_run",
+				"resume_run",
 				"abort_run",
 			]),
 		);
+	});
+
+	it("returns the specHash to approve in the propose_run result text", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+
+		const proposed = await extension.tools
+			.get("propose_run")
+			?.execute("propose-hash", { spec: createProcedureSpec(1) }, undefined, undefined, context);
+		const proposalState = (proposed?.details as Record<string, unknown>).stateAfter as Record<string, unknown>;
+		const text = proposed?.content[0]?.type === "text" ? proposed.content[0].text : "";
+
+		// The operator approves by specHash, so the agent must be able to quote it without an external lookup.
+		expect(text).toContain(`Run proposal ${proposalState.proposalId as string} created`);
+		expect(text).toContain(`specHash=${proposalState.specHash as string}`);
+	});
+
+	it("surfaces run and point failure causes in run summary text and in not-active errors", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const baseRunState: RunState = {
+			runId: "run-diagnostics-001",
+			experimentId: "exp-diagnostics-001",
+			procedureSpecId: "proc-diagnostics-001",
+			status: "failed",
+			progress: { completedUnits: 1, failedUnits: 1, totalUnits: 6, unitKind: "point" },
+			currentUnit: { unitId: "proc-diagnostics-001:unit:0001", index: 1 },
+			errorState: {
+				errorCode: "stage_move_failed",
+				message: "Stage did not settle within 120000 ms (delta x=-775.341; tolerance x=5.000)",
+				retrySafe: false,
+				needsOperator: true,
+				safeToResume: false,
+				scope: "unit",
+			},
+			artifactRefs: [],
+			startedAt: "2026-07-24T21:00:00.000Z",
+			updatedAt: "2026-07-24T21:02:00.000Z",
+		};
+		writeRunStateSnapshot(cwd, baseRunState);
+
+		const failedSummary = await extension.tools
+			.get("summarize_run")
+			?.execute("summarize-failed", { runId: baseRunState.runId }, undefined, undefined, context);
+		const failedText = failedSummary?.content[0]?.type === "text" ? failedSummary.content[0].text : "";
+		expect(failedText).toContain("Run failure stage_move_failed: Stage did not settle within 120000 ms");
+
+		const pauseResult = await extension.tools
+			.get("pause_run")
+			?.execute("pause-failed", { runId: baseRunState.runId }, undefined, undefined, context);
+		const pauseDetails = pauseResult?.details as Record<string, unknown>;
+		const pauseText = pauseResult?.content[0]?.type === "text" ? pauseResult.content[0].text : "";
+		expect(pauseDetails.errorCode).toBe("run_not_active");
+		expect(pauseText).toContain("current status is failed");
+		expect(pauseText).toContain("stage_move_failed");
+
+		// A run that keeps going after point failures has no errorState; the latest attempt carries the cause.
+		writeRunStateSnapshot(cwd, {
+			...baseRunState,
+			status: "running",
+			errorState: undefined,
+			pointAttempts: [
+				{
+					pointUnitId: "proc-diagnostics-001:unit:0001",
+					attemptId: "proc-diagnostics-001:unit:0001:initial:0",
+					attemptIndex: 0,
+					phase: "initial",
+					status: "failed",
+					failureType: "execution",
+					failureReason: "timeout",
+					errorCode: "stage_move_failed",
+					message: "Stage did not settle within 120000 ms",
+					timestamp: "2026-07-24T21:01:00.000Z",
+				},
+			],
+		});
+
+		const runningSummary = await extension.tools
+			.get("summarize_run")
+			?.execute("summarize-running", { runId: baseRunState.runId }, undefined, undefined, context);
+		const runningText = runningSummary?.content[0]?.type === "text" ? runningSummary.content[0].text : "";
+		expect(runningText).toContain("Latest point failure on proc-diagnostics-001:unit:0001 (initial attempt 0)");
+		expect(runningText).toContain("stage_move_failed/timeout: Stage did not settle within 120000 ms");
 	});
 
 	it("runs a simulation procedure to completion and persists snapshots, events, and artifact refs", async () => {
@@ -535,7 +639,7 @@ describe("experiment research simulation runtime", () => {
 		);
 	});
 
-	it("rejects direct run execution and rejects approval if the spec changes after proposal", async () => {
+	it("rejects direct run execution and rejects approval that quotes a different specHash", async () => {
 		const cwd = createTempCwd();
 		tempRoots.push(cwd);
 		const extension = loadExperimentExtension();
@@ -553,28 +657,170 @@ describe("experiment research simulation runtime", () => {
 		const proposalId = (((proposed?.details as Record<string, unknown>).stateAfter as Record<string, unknown>)
 			.proposalId ?? "") as string;
 
-		const mutatedSpec = {
-			...spec,
-			domain: {
-				raman: {
-					...spec.domain.raman,
-					acquisition: {
-						...spec.domain.raman.acquisition,
-						laserPowerPercent: 1,
-					},
-				},
-			},
-		};
-
 		const approval = await extension.tools
 			.get("approve_and_start_run")
 			?.execute(
-				"approve-mutated",
-				{ proposalId, spec: mutatedSpec, simulation: { perUnitDelayMs: 5 } },
+				"approve-stale-hash",
+				{ proposalId, specHash: "sha256-of-some-other-spec", simulation: { perUnitDelayMs: 5 } },
 				undefined,
 				undefined,
 				context,
 			);
 		expect((approval?.details as Record<string, unknown>).errorCode).toBe("proposal_spec_mismatch");
+	});
+
+	it("resumes a paused run from the paused unit without repeating completed units", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const [sessionStart] = extension.handlers.get("session_start") ?? [];
+		await sessionStart?.({ type: "session_start", sessionId: "resume-session" }, { cwd });
+		const context = { cwd } as ExtensionContext;
+
+		const runId = await proposeAndStart(extension, createProcedureSpec(4), context, {
+			operatorPauseAtUnit: 2,
+			perUnitDelayMs: 5,
+		});
+		const paused = await pollUntilTerminal(extension, runId, context, ["paused"]);
+		expect((paused.progress as Record<string, unknown>).completedUnits).toBe(2);
+		expect((paused.currentUnit as Record<string, unknown>).index).toBe(2);
+
+		// The terminal push carries the reason and the next step, so nobody has to poll for it.
+		const pausedMessage = extension.messages.at(-1);
+		expect(pausedMessage?.customType).toBe("run_terminal");
+		expect(pausedMessage?.content).toContain("Call resume_run");
+
+		const preview = await extension.tools
+			.get("resume_run")
+			?.execute("resume-preview", { runId }, undefined, undefined, context);
+		const previewText = preview?.content[0]?.type === "text" ? preview.content[0].text : "";
+		expect((preview?.details as Record<string, unknown>).status).toBe("warning");
+		expect(previewText).toContain("unit 2");
+		expect(previewText).toContain("2 units are already completed");
+
+		const resumed = await extension.tools
+			.get("resume_run")
+			?.execute("resume", { runId, confirmed: true }, undefined, undefined, context);
+		expect((resumed?.details as Record<string, unknown>).status).toBe("success");
+
+		const completed = await pollUntilTerminal(extension, runId, context, ["completed"]);
+		expect((completed.progress as Record<string, unknown>).completedUnits).toBe(4);
+
+		// Completed units are never repeated; the paused unit itself did not finish, so it reruns.
+		const startedUnits = readRunEvents(cwd, runId)
+			.filter((event) => event.eventType === "unit_started")
+			.map((event) => (event.payload as Record<string, unknown>).index);
+		expect(startedUnits).toEqual([0, 1, 2, 2, 3]);
+	});
+
+	it("refuses to resume a run that is not paused", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+
+		const missing = await extension.tools
+			.get("resume_run")
+			?.execute("resume-missing", { runId: "sim-run-nonexistent" }, undefined, undefined, context);
+		expect((missing?.details as Record<string, unknown>).errorCode).toBe("run_not_found");
+
+		const runId = await proposeAndStart(extension, createProcedureSpec(1), context, { perUnitDelayMs: 5 });
+		await pollUntilTerminal(extension, runId, context, ["completed"]);
+		const completedResume = await extension.tools
+			.get("resume_run")
+			?.execute("resume-completed", { runId }, undefined, undefined, context);
+		const completedText = completedResume?.content[0]?.type === "text" ? completedResume.content[0].text : "";
+		expect((completedResume?.details as Record<string, unknown>).errorCode).toBe("run_not_paused");
+		expect(completedText).toContain("current status is completed");
+	});
+
+	it("revises a pending proposal with a merge patch and supersedes the original", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createProcedureSpec(2);
+
+		const proposed = await extension.tools
+			.get("propose_run")
+			?.execute("propose", { spec }, undefined, undefined, context);
+		const proposalState = (proposed?.details as Record<string, unknown>).stateAfter as Record<string, unknown>;
+		const proposalId = proposalState.proposalId as string;
+
+		const revised = await extension.tools.get("revise_proposal")?.execute(
+			"revise",
+			{
+				proposalId,
+				patch: { domain: { raman: { acquisition: { integrationTimeMs: 4000 } } } },
+				reason: "operator asked for a longer integration time",
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const revisedState = (revised?.details as Record<string, unknown>).stateAfter as Record<string, unknown>;
+		const revisedText = revised?.content[0]?.type === "text" ? revised.content[0].text : "";
+		expect(revisedState.revisionOf).toBe(proposalId);
+		expect(revisedState.specHash).not.toBe(proposalState.specHash);
+		expect(revisedText).toContain("does not carry over");
+
+		// The superseded proposal can no longer be approved, and the revision keeps the patched value.
+		const staleApproval = await extension.tools
+			.get("approve_and_start_run")
+			?.execute(
+				"approve-superseded",
+				{ proposalId, specHash: proposalState.specHash as string },
+				undefined,
+				undefined,
+				context,
+			);
+		expect((staleApproval?.details as Record<string, unknown>).errorCode).toBe("proposal_not_pending");
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-revised",
+			{
+				proposalId: revisedState.proposalId as string,
+				specHash: revisedState.specHash as string,
+				simulation: { perUnitDelayMs: 5 },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		await pollUntilTerminal(extension, runId, context, ["completed"]);
+		const acquisitionEvent = readRunEvents(cwd, runId).find((event) => event.eventType === "unit_completed");
+		expect(acquisitionEvent).toBeDefined();
+	});
+
+	it("expands a point_list line generator server-side", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createProcedureSpec(1);
+		const lineSpec: ProcedureSpec = {
+			...spec,
+			procedureSpecId: "proc-spec-line",
+			plan: {
+				kind: "point_list",
+				generator: { kind: "line", from: { xUm: 0, yUm: 0, zUm: 1500 }, to: { xUm: 100, yUm: 0, zUm: 1500 }, count: 5 },
+				surfaceCorrection: { kind: "disabled", reason: "user_declined" },
+				perPoint: [{ kind: "move_to_point" }, { kind: "autofocus" }, { kind: "acquire_spectrum" }],
+			},
+			stoppingRules: { maxRuntimeMinutes: 20, maxUnits: 5, stopOnError: true },
+		};
+
+		const runId = await proposeAndStart(extension, lineSpec, context, { perUnitDelayMs: 1 });
+		const completed = await pollUntilTerminal(extension, runId, context, ["completed"]);
+		expect((completed.progress as Record<string, unknown>).completedUnits).toBe(5);
+		expect(compileProcedureSpec(lineSpec).map((unit) => unit.point?.xUm)).toEqual([0, 25, 50, 75, 100]);
+
+		const inset: ProcedureSpec = {
+			...lineSpec,
+			procedureSpecId: "proc-spec-line-inset",
+			plan: { ...lineSpec.plan, generator: { kind: "line", from: { xUm: 0, yUm: 0, zUm: 1500 }, to: { xUm: 100, yUm: 0, zUm: 1500 }, count: 3, insetUm: 10 } },
+		} as ProcedureSpec;
+		expect(compileProcedureSpec(inset).map((unit) => unit.point?.xUm)).toEqual([10, 50, 90]);
 	});
 });

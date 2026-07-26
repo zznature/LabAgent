@@ -51,6 +51,7 @@ export const PointAttemptRecordSchema = Type.Object(
 		failureType: Type.Optional(RetryFailureTypeSchema),
 		failureReason: Type.Optional(RetryFailureReasonSchema),
 		errorCode: Type.Optional(Type.String({ minLength: 1 })),
+		message: Type.Optional(Type.String({ minLength: 1 })),
 		finalForPoint: Type.Optional(Type.Boolean()),
 		artifactIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 		timestamp: Type.String({ minLength: 1 }),
@@ -58,11 +59,17 @@ export const PointAttemptRecordSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const RunExecutionModeSchema = Type.Union([
+	Type.Literal("simulation"),
+	Type.Literal("live-supervised"),
+]);
+
 export const RunStateSchema = Type.Object(
 	{
 		runId: Type.String({ minLength: 1 }),
 		experimentId: Type.String({ minLength: 1 }),
 		procedureSpecId: Type.String({ minLength: 1 }),
+		executionMode: Type.Optional(RunExecutionModeSchema),
 		status: RunStatusSchema,
 		progress: RunProgressSchema,
 		currentUnit: Type.Optional(CurrentUnitRefSchema),
@@ -73,6 +80,7 @@ export const RunStateSchema = Type.Object(
 		qualityState: Type.Optional(Type.String({ minLength: 1 })),
 		pointAttempts: Type.Optional(Type.Array(PointAttemptRecordSchema)),
 		artifactRefs: Type.Array(ArtifactRefSchema),
+		resumedFromUnitIndexes: Type.Optional(Type.Array(Type.Integer({ minimum: 0 }))),
 		startedAt: Type.String({ minLength: 1 }),
 		updatedAt: Type.String({ minLength: 1 }),
 		endedAt: Type.Optional(Type.String({ minLength: 1 })),
@@ -81,6 +89,7 @@ export const RunStateSchema = Type.Object(
 );
 
 export type RunStatus = Static<typeof RunStatusSchema>;
+export type RunExecutionMode = Static<typeof RunExecutionModeSchema>;
 export type RunProgress = Static<typeof RunProgressSchema>;
 export type CurrentUnitRef = Static<typeof CurrentUnitRefSchema>;
 export type PointAttemptPhase = Static<typeof PointAttemptPhaseSchema>;
