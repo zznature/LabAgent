@@ -2,10 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-	FOCUS_PLANE_CORNER_IDS,
 	fitFocusPlane,
-	validateFocusPlaneCorners,
-	type FocusPlaneCorner,
+	validateFocusPlaneRegion,
+	type FocusPlaneAnchor,
 } from "../../planner/focus-plane.ts";
 import type { ArtifactRef, RunState } from "../../schemas/index.ts";
 import {
@@ -15,7 +14,10 @@ import {
 	writeRunStateSnapshot,
 } from "../../store/index.ts";
 
-export interface OperatorFocusPlaneAnchor extends FocusPlaneCorner {
+export interface OperatorFocusPlanePoint {
+	pointId: string;
+	xUm: number;
+	yUm: number;
 	zUm: number;
 }
 
@@ -31,7 +33,7 @@ export interface OperatorFocusPlaneRegistration {
 	calibrationRunId: string;
 	procedureSpecId: string;
 	experimentId: string;
-	anchors: OperatorFocusPlaneAnchor[];
+	points: OperatorFocusPlanePoint[];
 	operatorConfirmation: OperatorFocusPlaneConfirmation;
 }
 
@@ -39,7 +41,7 @@ export interface RegisteredOperatorFocusPlane {
 	artifact: ArtifactRef;
 	runState: RunState;
 	model: ReturnType<typeof fitFocusPlane>;
-	validRegion: FocusPlaneCorner[];
+	validRegion: Array<{ anchorId: string; xUm: number; yUm: number }>;
 }
 
 export function registerOperatorFocusPlaneCalibration(
@@ -58,15 +60,21 @@ export function registerOperatorFocusPlaneCalibration(
 		throw new Error(`Calibration artifact already exists for ${input.calibrationRunId}.`);
 	}
 
-	const anchorIds = new Set(input.anchors.map((anchor) => anchor.anchorId));
-	if (
-		anchorIds.size !== 4 ||
-		!FOCUS_PLANE_CORNER_IDS.every((anchorId) => anchorIds.has(anchorId))
-	) {
-		throw new Error("Operator focus-plane calibration requires exactly corner_1 through corner_4.");
+	const pointIds = new Set(input.points.map((point) => point.pointId));
+	if (input.points.length !== 3 || pointIds.size !== 3) {
+		throw new Error("Operator focus-plane calibration requires exactly three unique pointId values.");
 	}
-	const anchors = validateFocusPlaneCorners(input.anchors);
-	const validRegion = anchors.map(({ anchorId, xUm, yUm }) => ({ anchorId, xUm, yUm }));
+	const anchors: FocusPlaneAnchor[] = input.points.map((point) => ({
+		anchorId: point.pointId,
+		xUm: point.xUm,
+		yUm: point.yUm,
+		zUm: point.zUm,
+	}));
+	const validRegion = validateFocusPlaneRegion(anchors).map(({ anchorId, xUm, yUm }) => ({
+		anchorId,
+		xUm,
+		yUm,
+	}));
 	const model = fitFocusPlane(anchors);
 	const content = `${JSON.stringify(
 		{
@@ -110,7 +118,7 @@ export function registerOperatorFocusPlaneCalibration(
 		experimentId: input.experimentId,
 		procedureSpecId: input.procedureSpecId,
 		status: "completed",
-		progress: { completedUnits: 4, failedUnits: 0, totalUnits: 4, unitKind: "point" },
+		progress: { completedUnits: 3, failedUnits: 0, totalUnits: 3, unitKind: "point" },
 		qualityState: "completed",
 		artifactRefs: [artifact],
 		startedAt: recordedAt,

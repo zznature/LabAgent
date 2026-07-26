@@ -3,7 +3,6 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ExperimentIntent, ProcedureId, ProcedureSpec } from "../schemas/index.ts";
 import { ExperimentIntentValidator, ProcedureSpecValidator, formatValidationErrors } from "../schemas/index.ts";
 import {
-	FOCUS_PLANE_CORNER_IDS,
 	fitFocusPlane,
 	validateFocusPlaneRegion,
 	type FocusPlaneAnchor,
@@ -81,14 +80,9 @@ const ExperimentIntentParamsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const OperatorSuppliedFocusPlaneAnchorSchema = Type.Object(
+const ManualFocusPlanePointSchema = Type.Object(
 	{
-		anchorId: Type.Union([
-			Type.Literal(FOCUS_PLANE_CORNER_IDS[0]),
-			Type.Literal(FOCUS_PLANE_CORNER_IDS[1]),
-			Type.Literal(FOCUS_PLANE_CORNER_IDS[2]),
-			Type.Literal(FOCUS_PLANE_CORNER_IDS[3]),
-		]),
+		pointId: Type.String({ minLength: 1 }),
 		xUm: Type.Number(),
 		yUm: Type.Number(),
 		zUm: Type.Number(),
@@ -101,7 +95,7 @@ const FocusPlaneRegistrationParamsSchema = Type.Object(
 		calibrationRunId: Type.String({ minLength: 1 }),
 		procedureSpecId: Type.String({ minLength: 1 }),
 		experimentId: Type.String({ minLength: 1 }),
-		anchors: Type.Array(OperatorSuppliedFocusPlaneAnchorSchema, { minItems: 4, maxItems: 4 }),
+		points: Type.Array(ManualFocusPlanePointSchema, { minItems: 3, maxItems: 3 }),
 		operatorConfirmation: Type.Object(
 			{
 				approvedBy: Type.Literal("user"),
@@ -112,16 +106,6 @@ const FocusPlaneRegistrationParamsSchema = Type.Object(
 			},
 			{ additionalProperties: false },
 		),
-	},
-	{ additionalProperties: false },
-);
-
-const ManualFocusPlanePointSchema = Type.Object(
-	{
-		pointId: Type.String({ minLength: 1 }),
-		xUm: Type.Number(),
-		yUm: Type.Number(),
-		zUm: Type.Number(),
 	},
 	{ additionalProperties: false },
 );
@@ -984,12 +968,13 @@ export const registerOperatorFocusPlaneCalibrationTool = {
 	name: "register_operator_focus_plane_calibration",
 	label: "Register Operator Focus-Plane Calibration",
 	description:
-		"Register four operator-supplied Raman XYZ corner anchors as a completed focus-plane calibration artifact without moving hardware.",
+		"Register three operator-supplied Raman XYZ points as a reusable focus-plane calibration artifact without moving hardware.",
 	promptSnippet:
-		"Use only when the operator supplies four focused XYZ corners and explicitly confirms registering them",
+		"Use when the operator supplies three focused XYZ points and explicitly confirms registering them for reuse across runs",
 	promptGuidelines: [
 		"Treat the coordinates as operator-supplied values, not as verified runtime autofocus evidence.",
 		"Require explicit user confirmation before calling; this tool writes a completed calibration RunState and artifact but performs no hardware motion.",
+		"Reuse the returned artifact across runs only while the sample has not been repositioned.",
 		"Use the returned surfaceCorrection object in the subsequent mapping ProcedureSpec.",
 	],
 	parameters: FocusPlaneRegistrationParamsSchema,

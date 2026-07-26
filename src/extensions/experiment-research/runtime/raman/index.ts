@@ -72,7 +72,7 @@ export {
 } from "./live-runtime.ts";
 export {
 	registerOperatorFocusPlaneCalibration,
-	type OperatorFocusPlaneAnchor,
+	type OperatorFocusPlanePoint,
 	type OperatorFocusPlaneConfirmation,
 	type OperatorFocusPlaneRegistration,
 	type RegisteredOperatorFocusPlane,

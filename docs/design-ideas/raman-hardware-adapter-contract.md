@@ -613,16 +613,18 @@ artifact 必须同时存在于该 run 的 artifact JSONL index 和 completed Run
 内容中的 `calibrationRunId / procedureSpecId / checksum / coefficients / validRegion` 必须与 mapping
 spec 冻结字段一致。缺失、未完成或不匹配都 fail closed。
 
-如果 operator 已经持有四个聚焦 XYZ 角点，可以通过
+如果 operator 已经持有三个不共线的聚焦 XYZ 点，并希望跨 run 复用校正，可以通过
 `register_operator_focus_plane_calibration` 显式注册。在用户通过
 `acknowledgedOperatorSuppliedXyz = true` 和 `acknowledgedNoHardwareMotion = true`
-确认“这些坐标由 operator 提供、无硬件运动、注册指定 calibrationRunId”后，工具重新拟合四个角点、重算 residual 和 SHA-256，
+确认“这些坐标由 operator 提供、无硬件运动、注册指定 calibrationRunId”后，工具从三点拟合平面、
+派生三角形有效区域并计算 SHA-256，
 并写入正式 `lab-records/runs/{calibrationRunId}/run-state.json`、`artifacts.jsonl` 与
 `focus-plane.json`。artifact 必须明确标记 `source.kind = operator_supplied_xyz`，不得声称这些坐标
-已经由 runtime autofocus evidence 验证。planner tool 只接收 `corner_1..4` 四个 XYZ 和确认信息；
+已经由 runtime autofocus evidence 验证。planner tool 只接收三个 XYZ 点和确认信息；
 Raman runtime registration module 负责派生 `validRegion`、拟合、写 artifact 和产生 RunState，
-planner 不预写 runtime truth。该入口不放宽 mapping preflight；四个角点必须互异并组成非退化
-凸四边形，不要求长方形，也不要求中心点参与拟合。
+planner 不预写 runtime truth。该入口不放宽 mapping preflight，mapping 点必须位于三点形成的
+三角形内。artifact 可以被后续 run 持续引用；当前阶段不引入 sample placement ID 或自动失效机制，
+样品被取下、平移、旋转或重新固定后，由 operator 停止复用旧 artifact。
 
 live-supervised `approve_and_start_run` 还要求 operator approval payload 复述 proposalId 和
 specHash。approval 调用只传 `proposalId + specHash`：proposal 已在服务端冻结，重传 spec 只是让模型

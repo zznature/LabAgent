@@ -604,21 +604,19 @@ describe("focus-plane calibration and mapping", () => {
 		try {
 			const calibrationRunId = "registered-calibration-run";
 			const procedureSpecId = "registered-calibration-spec";
-			const validRegion: FocusPlaneCorner[] = [
-				{ anchorId: "corner_1", xUm: -600, yUm: -400 },
-				{ anchorId: "corner_2", xUm: 700, yUm: -300 },
-				{ anchorId: "corner_3", xUm: 500, yUm: 650 },
-				{ anchorId: "corner_4", xUm: -550, yUm: 450 },
+			const validRegion = [
+				{ anchorId: "p1", xUm: -600, yUm: -400 },
+				{ anchorId: "p2", xUm: 700, yUm: -300 },
+				{ anchorId: "p3", xUm: 500, yUm: 650 },
 			];
 			const params = {
 				calibrationRunId,
 				procedureSpecId,
 				experimentId: intent.experimentId,
-				anchors: [
-					{ anchorId: "corner_1" as const, xUm: -600, yUm: -400, zUm: 974 },
-					{ anchorId: "corner_2" as const, xUm: 700, yUm: -300, zUm: 1038 },
-					{ anchorId: "corner_3" as const, xUm: 500, yUm: 650, zUm: 1012 },
-					{ anchorId: "corner_4" as const, xUm: -550, yUm: 450, zUm: 955 },
+				points: [
+					{ pointId: "p1", xUm: -600, yUm: -400, zUm: 974 },
+					{ pointId: "p2", xUm: 700, yUm: -300, zUm: 1038 },
+					{ pointId: "p3", xUm: 500, yUm: 650, zUm: 1012 },
 				],
 				operatorConfirmation: {
 					approvedBy: "user" as const,
@@ -632,19 +630,16 @@ describe("focus-plane calibration and mapping", () => {
 			expect(
 				Value.Check(registerOperatorFocusPlaneCalibrationTool.parameters, {
 					...params,
-					anchors: params.anchors.map((anchor) => ({
-						...anchor,
-						evidenceRefs: [`autofocus:${anchor.anchorId}`],
+					points: params.points.map((point) => ({
+						...point,
+						evidenceRefs: [`autofocus:${point.pointId}`],
 					})),
 				}),
 			).toBe(false);
 			expect(
 				Value.Check(registerOperatorFocusPlaneCalibrationTool.parameters, {
 					...params,
-					anchors: params.anchors.map((anchor, index) => ({
-						...anchor,
-						anchorId: index === 0 ? "top_left" : anchor.anchorId,
-					})),
+					points: params.points.concat({ pointId: "p4", xUm: -550, yUm: 450, zUm: 955 }),
 				}),
 			).toBe(false);
 
@@ -663,6 +658,7 @@ describe("focus-plane calibration and mapping", () => {
 			const artifactRecords = readArtifactRecords(cwd, calibrationRunId);
 			expect(artifactRecords).toHaveLength(1);
 			expect(artifactRecords[0]!.artifact.kind).toBe("raman-focus-plane");
+			expect(artifactRecords[0]!.artifact.metadata?.anchorCount).toBe(3);
 			expect(artifactRecords[0]!.artifact.metadata?.source).toBe("operator_supplied_xyz");
 			const artifactPayload = JSON.parse(
 				readFileSync(join(cwd, "lab-records", "runs", calibrationRunId, "focus-plane.json"), "utf8"),
@@ -711,6 +707,30 @@ describe("focus-plane calibration and mapping", () => {
 			);
 			expect(duplicate.details.status).toBe("error");
 			expect(duplicate.details.errorCode).toBe("focus_plane_registration_failed");
+
+			const collinearRunId = "collinear-registration-run";
+			const collinear = await registerOperatorFocusPlaneCalibrationTool.execute(
+				"register-focus-plane-collinear",
+				{
+					...params,
+					calibrationRunId: collinearRunId,
+					points: [
+						{ pointId: "p1", xUm: 0, yUm: 0, zUm: 1000 },
+						{ pointId: "p2", xUm: 100, yUm: 100, zUm: 1010 },
+						{ pointId: "p3", xUm: 200, yUm: 200, zUm: 1020 },
+					],
+					operatorConfirmation: {
+						...params.operatorConfirmation,
+						acknowledgedCalibrationRunId: collinearRunId,
+					},
+				},
+				undefined,
+				undefined,
+				{ cwd } as never,
+			);
+			expect(collinear.details.status).toBe("error");
+			expect(collinear.details.errorCode).toBe("focus_plane_registration_failed");
+			expect(readRunStateSnapshot(cwd, collinearRunId)).toBeUndefined();
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}

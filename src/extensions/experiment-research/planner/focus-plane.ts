@@ -82,6 +82,16 @@ export function validateFocusPlaneRegion<T extends FocusPlanePoint>(region: read
 	return hull;
 }
 
+export function validateFocusPlaneArtifactRegion<T extends FocusPlanePoint>(region: readonly T[]): T[] {
+	if (region.length === 3) {
+		return validateFocusPlaneRegion(region);
+	}
+	if (region.length === 4) {
+		return validateFocusPlaneCorners(region);
+	}
+	throw new Error("Focus-plane artifact region requires either three operator points or four calibration corners.");
+}
+
 export function focusPlaneCenter(corners: readonly FocusPlanePoint[]): FocusPlanePoint {
 	validateFocusPlaneCorners(corners);
 	return {

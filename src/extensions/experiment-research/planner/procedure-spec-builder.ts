@@ -4,6 +4,7 @@ import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import {
 	defaultFocusPlaneCorners,
 	focusPlaneCenter,
+	validateFocusPlaneArtifactRegion,
 	validateFocusPlaneCorners,
 	validateFocusPlaneRegion,
 	type FocusPlaneCorner,
@@ -246,7 +247,7 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 								b: input.focusPlane.b,
 								c: input.focusPlane.c,
 							},
-							validRegion: validateFocusPlaneCorners(input.focusPlane.validRegion as FocusPlaneCorner[]),
+							validRegion: validateFocusPlaneArtifactRegion(input.focusPlane.validRegion),
 							localAutofocusHalfRangeUm: 40,
 						}
 				: { kind: "disabled", reason: "user_declined" },

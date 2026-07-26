@@ -47,6 +47,7 @@ function createBaseProcedureSpec() {
 				pitchYUm: 10,
 				order: "snake",
 			},
+			surfaceCorrection: { kind: "disabled", reason: "user_declined" },
 			perPoint: [
 				{ kind: "move_to_point" },
 				{ kind: "autofocus" },

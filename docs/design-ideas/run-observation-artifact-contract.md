@@ -56,7 +56,7 @@ artifacts，拟合 `Z = aX + bY + c`，并创建：
 lab-records/runs/{calibrationRunId}/focus-plane.json
 ```
 
-当前 payload 形状：
+正式 hardware calibration payload 形状：
 
 ```ts
 type RamanFocusPlaneArtifact = {
@@ -86,6 +86,45 @@ type RamanFocusPlaneArtifact = {
 }
 ```
 
+operator-supplied payload 复用相同的 profile 和 model 字段，但由 `source` 明确区分：
+
+```ts
+type OperatorSuppliedRamanFocusPlaneArtifact = {
+  profile: "raman-focus-plane"
+  calibrationRunId: string
+  procedureSpecId: string
+  source: {
+    kind: "operator_supplied_xyz"
+    operatorConfirmation: {
+      approvedBy: "user"
+      approvedAt: string
+      acknowledgedCalibrationRunId: string
+      acknowledgedOperatorSuppliedXyz: true
+      acknowledgedNoHardwareMotion: true
+    }
+  }
+  anchors: Array<{
+    anchorId: string
+    xUm: number
+    yUm: number
+    zUm: number
+  }> // exactly 3
+  model: {
+    a: number
+    b: number
+    c: number
+    rmsErrorUm: number
+    maxAbsErrorUm: number
+    anchorCount: 3
+  }
+  validRegion: Array<{
+    anchorId: string
+    xUm: number
+    yUm: number
+  }> // the triangle derived from the same 3 anchors
+}
+```
+
 对应 `ArtifactRef`：
 
 ```ts
@@ -95,22 +134,29 @@ type RamanFocusPlaneArtifact = {
   path: "focus-plane.json"
   metadata: {
     checksum: `sha256:${digest}`
-    anchorCount: 5
+    anchorCount: 3 | 5
     rmsErrorUm: number
+    source?: "operator_supplied_xyz"
   }
 }
 ```
 
+正式 hardware calibration 使用 `anchorCount: 5` 且不需要 `source`；operator 三点变体使用
+`anchorCount: 3` 和 `source: operator_supplied_xyz`。
+
 live publication 使用 exclusive create；同一路径已存在时只读取并重新计算 checksum，不覆盖模型。
 simulation runtime 发布相同核心字段，并额外标记 `simulated: true`。
 
-operator 已有四个聚焦 XYZ 角点时，可以通过
-`register_operator_focus_plane_calibration` 创建同一核心形状的 artifact。该路径不伪装成 runtime
+operator 已有三个不共线的聚焦 XYZ 点时，可以通过
+`register_operator_focus_plane_calibration` 创建上述三点变体。该路径不伪装成 runtime
 autofocus evidence：payload 使用 `source.kind = operator_supplied_xyz` 并记录显式
 operator confirmation，ArtifactRef metadata 同样使用 `source = operator_supplied_xyz`。
-调用方不提供 `evidenceRefs` 或 `validRegion`；Raman runtime registration module 从
-`corner_1..4` 的 XY 确定性派生区域并产生 RunState。系统只保证坐标的数学自洽、凸区域约束、
+调用方不提供 `evidenceRefs` 或 `validRegion`；Raman runtime registration module 从三个 XY
+确定性派生三角形区域并产生 RunState。系统只保证坐标的数学自洽、区域约束、
 确定性拟合和后续 mapping 引用校验，不声明坐标已经被 runtime 独立验证。
+该 artifact 不因单个 mapping run 结束而失效，可由后续 run 继续按
+`calibrationRunId + artifactId + checksum` 引用。当前不记录 sample placement ID，也不自动判断
+样品是否移动；样品重新放置后停止复用旧 artifact 是 operator 责任。
 
 当前分支没有把 `raman-focus-plane` 注册为 `main` 中的 canonical profile，也没有 source /
 representation descriptor。这里的 `profile` 是 payload 自描述字段，`kind` 是当前 ArtifactRef 类型。
