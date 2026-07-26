@@ -10,7 +10,7 @@ deployment layer (`deploy/`), design notes, and product tests. See
 ```sh
 npm install --ignore-scripts
 npm run check
-npm test
+./test.sh
 ```
 
 ## Setup a Lab Workspace
@@ -81,7 +81,7 @@ repository and changes cwd to the lab workspace before starting the agent.
 
 1. Pin the new exact `@earendil-works/pi-coding-agent` version in `package.json`.
 2. Run `npm install --package-lock-only --ignore-scripts`.
-3. Run `npm run check`, `npm test`, and `npm run smoke:mac`.
+3. Run `npm run check`, `./test.sh`, and `npm run smoke:mac`.
 4. Re-run a Windows lab-machine smoke before deploying to the Raman computer.
 
 ## Product Boundary
