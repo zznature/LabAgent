@@ -1,13 +1,10 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { Type, type Static } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { ArtifactRef, ExperimentIntent, ProcedureId, ProcedureSpec, RunState } from "../schemas/index.ts";
+import type { ExperimentIntent, ProcedureId, ProcedureSpec } from "../schemas/index.ts";
 import { ExperimentIntentValidator, ProcedureSpecValidator, formatValidationErrors } from "../schemas/index.ts";
 import {
+	FOCUS_PLANE_CORNER_IDS,
 	fitFocusPlane,
-	validateFocusPlaneCorners,
 	validateFocusPlaneRegion,
 	type FocusPlaneAnchor,
 } from "../planner/focus-plane.ts";
@@ -16,17 +13,14 @@ import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import {
 	getRamanLiveRuntime,
 	getRamanPythonRuntimeConfigInfo,
+	registerOperatorFocusPlaneCalibration,
 	validateFocusPlaneArtifactReference,
 	validateRuntimeAnchorState,
 } from "../runtime/raman/index.ts";
 import {
-	appendArtifactRecord,
 	findExperimentProcedureTemplate,
 	listExperimentProcedureTemplates,
-	readRunStateSnapshot,
-	runRoot,
 	saveExperimentIntent,
-	writeRunStateSnapshot,
 } from "../store/index.ts";
 import {
 	ProcedureSpecParamsSchema,
@@ -87,13 +81,17 @@ const ExperimentIntentParamsSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const RegisteredFocusPlaneAnchorSchema = Type.Object(
+const OperatorSuppliedFocusPlaneAnchorSchema = Type.Object(
 	{
-		anchorId: Type.String({ minLength: 1 }),
+		anchorId: Type.Union([
+			Type.Literal(FOCUS_PLANE_CORNER_IDS[0]),
+			Type.Literal(FOCUS_PLANE_CORNER_IDS[1]),
+			Type.Literal(FOCUS_PLANE_CORNER_IDS[2]),
+			Type.Literal(FOCUS_PLANE_CORNER_IDS[3]),
+		]),
 		xUm: Type.Number(),
 		yUm: Type.Number(),
 		zUm: Type.Number(),
-		evidenceRefs: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
 	},
 	{ additionalProperties: false },
 );
@@ -103,24 +101,13 @@ const FocusPlaneRegistrationParamsSchema = Type.Object(
 		calibrationRunId: Type.String({ minLength: 1 }),
 		procedureSpecId: Type.String({ minLength: 1 }),
 		experimentId: Type.String({ minLength: 1 }),
-		anchors: Type.Array(RegisteredFocusPlaneAnchorSchema, { minItems: 4, maxItems: 4 }),
-		validRegion: Type.Array(
-			Type.Object(
-				{
-					anchorId: Type.String({ minLength: 1 }),
-					xUm: Type.Number(),
-					yUm: Type.Number(),
-				},
-				{ additionalProperties: false },
-			),
-			{ minItems: 4, maxItems: 4 },
-		),
-		localAutofocusHalfRangeUm: Type.Optional(Type.Literal(40)),
+		anchors: Type.Array(OperatorSuppliedFocusPlaneAnchorSchema, { minItems: 4, maxItems: 4 }),
 		operatorConfirmation: Type.Object(
 			{
 				approvedBy: Type.Literal("user"),
 				approvedAt: Type.String({ minLength: 1 }),
 				acknowledgedCalibrationRunId: Type.String({ minLength: 1 }),
+				acknowledgedOperatorSuppliedXyz: Type.Literal(true),
 				acknowledgedNoHardwareMotion: Type.Literal(true),
 			},
 			{ additionalProperties: false },
@@ -288,30 +275,6 @@ function hasRequiredRamanRoles(spec: ProcedureSpec): boolean {
 	return roles.has("stage") && roles.has("frame_provider") && roles.has("spectrometer");
 }
 
-function assertRegisteredFocusPlaneAnchors(params: FocusPlaneRegistrationParams): FocusPlaneAnchor[] {
-	if (params.operatorConfirmation.acknowledgedCalibrationRunId !== params.calibrationRunId) {
-		throw new Error("Operator confirmation must acknowledge the exact calibrationRunId being registered.");
-	}
-	const anchorIds = new Set(params.anchors.map((anchor) => anchor.anchorId));
-	if (anchorIds.size !== 4) {
-		throw new Error("Focus-plane registration requires four unique corner anchors.");
-	}
-	validateFocusPlaneCorners(params.validRegion);
-	const validRegionKeys = new Set(params.validRegion.map((corner) => `${corner.xUm}:${corner.yUm}`));
-	if (
-		params.anchors.length !== 4 ||
-		params.anchors.some((anchor) => !validRegionKeys.has(`${anchor.xUm}:${anchor.yUm}`))
-	) {
-		throw new Error("The four anchors must match the registered validRegion coordinates.");
-	}
-	return params.anchors.map((anchor) => ({
-		anchorId: anchor.anchorId,
-		xUm: anchor.xUm,
-		yUm: anchor.yUm,
-		zUm: anchor.zUm,
-	}));
-}
-
 function calculateManualFocusPlane(params: ManualFocusPlaneParams): {
 	model: ReturnType<typeof fitFocusPlane>;
 	anchors: FocusPlaneAnchor[];
@@ -351,83 +314,6 @@ function calculateManualFocusPlane(params: ManualFocusPlaneParams): {
 			localAutofocusHalfRangeUm: 40,
 		},
 	};
-}
-
-function writeRegisteredFocusPlaneArtifact(cwd: string, params: FocusPlaneRegistrationParams): {
-	artifact: ArtifactRef;
-	runState: RunState;
-	model: ReturnType<typeof fitFocusPlane>;
-} {
-	if (readRunStateSnapshot(cwd, params.calibrationRunId)) {
-		throw new Error(`Calibration run ${params.calibrationRunId} already has a RunState.`);
-	}
-	const root = runRoot(cwd, params.calibrationRunId);
-	const focusPlanePath = join(root, "focus-plane.json");
-	if (existsSync(focusPlanePath)) {
-		throw new Error(`Calibration artifact already exists for ${params.calibrationRunId}.`);
-	}
-	const anchors = assertRegisteredFocusPlaneAnchors(params);
-	const model = fitFocusPlane(anchors);
-	const content = `${JSON.stringify(
-		{
-			profile: "raman-focus-plane",
-			calibrationRunId: params.calibrationRunId,
-			procedureSpecId: params.procedureSpecId,
-			source: {
-				kind: "agent_registered_accepted_autofocus_evidence",
-				operatorConfirmation: params.operatorConfirmation,
-				evidenceRefsByAnchor: Object.fromEntries(
-					params.anchors.map((anchor) => [anchor.anchorId, anchor.evidenceRefs]),
-				),
-			},
-			anchors: params.anchors.map((anchor) => ({
-				anchorId: anchor.anchorId,
-				xUm: anchor.xUm,
-				yUm: anchor.yUm,
-				zUm: anchor.zUm,
-				evidenceRefs: anchor.evidenceRefs,
-			})),
-			model,
-			validRegion: params.validRegion,
-		},
-		null,
-		2,
-	)}\n`;
-	mkdirSync(root, { recursive: true });
-	writeFileSync(focusPlanePath, content, { encoding: "utf-8", flag: "wx" });
-	const artifact: ArtifactRef = {
-		artifactId: `${params.calibrationRunId}-focus-plane`,
-		kind: "raman-focus-plane",
-		path: "focus-plane.json",
-		label: "Registered Raman focus-plane calibration",
-		metadata: {
-			checksum: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-			anchorCount: anchors.length,
-			rmsErrorUm: model.rmsErrorUm,
-			maxAbsErrorUm: model.maxAbsErrorUm,
-			source: "agent_registered_accepted_autofocus_evidence",
-		},
-	};
-	const recordedAt = params.operatorConfirmation.approvedAt;
-	appendArtifactRecord(cwd, {
-		runId: params.calibrationRunId,
-		recordedAt,
-		artifact,
-	});
-	const runState: RunState = {
-		runId: params.calibrationRunId,
-		experimentId: params.experimentId,
-		procedureSpecId: params.procedureSpecId,
-		status: "completed",
-		progress: { completedUnits: 4, failedUnits: 0, totalUnits: 4, unitKind: "point" },
-		qualityState: "completed",
-		artifactRefs: [artifact],
-		startedAt: recordedAt,
-		updatedAt: recordedAt,
-		endedAt: recordedAt,
-	};
-	writeRunStateSnapshot(cwd, runState);
-	return { artifact, runState, model };
 }
 
 function templateForProcedure(procedureId: ProcedureId): Record<string, unknown> {
@@ -767,7 +653,7 @@ export const getLabCapabilitiesTool = {
 				"validate_procedure_spec",
 				"run_preflight",
 				"calculate_focus_plane_from_xyz_points",
-				"register_focus_plane_calibration_artifact",
+				"register_operator_focus_plane_calibration",
 				"propose_run",
 				"approve_and_start_run",
 			],
@@ -1094,24 +980,23 @@ export const calculateFocusPlaneFromXyzPointsTool = {
 	},
 } satisfies ToolDefinition<typeof ManualFocusPlaneParamsSchema, PlannerToolDetails>;
 
-export const registerFocusPlaneCalibrationArtifactTool = {
-	name: "register_focus_plane_calibration_artifact",
-	label: "Register Focus-Plane Calibration Artifact",
+export const registerOperatorFocusPlaneCalibrationTool = {
+	name: "register_operator_focus_plane_calibration",
+	label: "Register Operator Focus-Plane Calibration",
 	description:
-		"Register four accepted Raman autofocus corner anchors as a completed focus-plane calibration artifact without moving hardware.",
+		"Register four operator-supplied Raman XYZ corner anchors as a completed focus-plane calibration artifact without moving hardware.",
 	promptSnippet:
-		"Use only after four accepted autofocus corner anchors exist and the user approves registering them as a focus-plane calibration artifact",
+		"Use only when the operator supplies four focused XYZ corners and explicitly confirms registering them",
 	promptGuidelines: [
-		"Do not use this to import arbitrary focus-plane JSON.",
-		"Use this when four accepted autofocus evidence records already exist outside the completed calibration-run artifact chain.",
-		"Require explicit user confirmation before calling; this tool writes a completed calibration RunState and artifact provenance but performs no hardware motion.",
+		"Treat the coordinates as operator-supplied values, not as verified runtime autofocus evidence.",
+		"Require explicit user confirmation before calling; this tool writes a completed calibration RunState and artifact but performs no hardware motion.",
 		"Use the returned surfaceCorrection object in the subsequent mapping ProcedureSpec.",
 	],
 	parameters: FocusPlaneRegistrationParamsSchema,
 	executionMode: "sequential",
 	async execute(_toolCallId, params: FocusPlaneRegistrationParams, _signal, _onUpdate, ctx) {
 		try {
-			const { artifact, runState, model } = writeRegisteredFocusPlaneArtifact(ctx.cwd, params);
+			const { artifact, runState, model, validRegion } = registerOperatorFocusPlaneCalibration(ctx.cwd, params);
 			const surfaceCorrection = {
 				kind: "focus_plane" as const,
 				calibrationRunId: params.calibrationRunId,
@@ -1122,13 +1007,14 @@ export const registerFocusPlaneCalibrationArtifactTool = {
 					b: model.b,
 					c: model.c,
 				},
-				validRegion: params.validRegion,
+				validRegion,
 				localAutofocusHalfRangeUm: 40,
 			};
-			return success("Registered focus-plane calibration artifact from accepted autofocus evidence.", {
+			return success("Registered focus-plane calibration artifact from operator-supplied XYZ coordinates.", {
 				calibrationRunId: params.calibrationRunId,
 				procedureSpecId: params.procedureSpecId,
 				experimentId: params.experimentId,
+				source: "operator_supplied_xyz",
 				runStateStatus: runState.status,
 				artifact,
 				surfaceCorrection,

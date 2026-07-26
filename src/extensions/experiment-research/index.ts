@@ -19,7 +19,7 @@ import {
 	getLabStateTool,
 	getProcedureSpecTemplateTool,
 	recordExperimentIntentTool,
-	registerFocusPlaneCalibrationArtifactTool,
+	registerOperatorFocusPlaneCalibrationTool,
 	runPreflightTool,
 	validateProcedureSpecTool,
 } from "./tools/planner.ts";
@@ -47,7 +47,7 @@ const PLANNER_TOOL_NAMES = [
 	"validate_procedure_spec",
 	"run_preflight",
 	"calculate_focus_plane_from_xyz_points",
-	"register_focus_plane_calibration_artifact",
+	"register_operator_focus_plane_calibration",
 	"propose_run",
 	"revise_proposal",
 	"approve_and_start_run",
@@ -89,7 +89,7 @@ export default function experimentResearchExtension(pi: ExtensionAPI) {
 	pi.registerTool(validateProcedureSpecTool);
 	pi.registerTool(runPreflightTool);
 	pi.registerTool(calculateFocusPlaneFromXyzPointsTool);
-	pi.registerTool(registerFocusPlaneCalibrationArtifactTool);
+	pi.registerTool(registerOperatorFocusPlaneCalibrationTool);
 	pi.registerTool(ramanGetHardwareStatusTool);
 	pi.registerTool(ramanGetStagePositionTool);
 	pi.registerTool(ramanCaptureFrameTool);

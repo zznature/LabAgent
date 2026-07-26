@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import {
@@ -25,7 +26,7 @@ import { readArtifactRecords } from "../store/artifact-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
 import {
 	calculateFocusPlaneFromXyzPointsTool,
-	registerFocusPlaneCalibrationArtifactTool,
+	registerOperatorFocusPlaneCalibrationTool,
 	validateProcedureSpecTool,
 } from "../tools/planner.ts";
 
@@ -598,7 +599,7 @@ describe("focus-plane calibration and mapping", () => {
 		}
 	});
 
-	it("registers four agent-computed focus-plane corner anchors as a completed calibration artifact", async () => {
+	it("registers operator-supplied XYZ anchors without claiming autofocus evidence", async () => {
 		const cwd = mkdtempSync(join(tmpdir(), "focus-plane-registration-"));
 		try {
 			const calibrationRunId = "registered-calibration-run";
@@ -613,22 +614,41 @@ describe("focus-plane calibration and mapping", () => {
 				calibrationRunId,
 				procedureSpecId,
 				experimentId: intent.experimentId,
-				validRegion,
 				anchors: [
-					{ anchorId: "corner_1", xUm: -600, yUm: -400, zUm: 974, evidenceRefs: ["autofocus:corner_1"] },
-					{ anchorId: "corner_2", xUm: 700, yUm: -300, zUm: 1038, evidenceRefs: ["autofocus:corner_2"] },
-					{ anchorId: "corner_3", xUm: 500, yUm: 650, zUm: 1012, evidenceRefs: ["autofocus:corner_3"] },
-					{ anchorId: "corner_4", xUm: -550, yUm: 450, zUm: 955, evidenceRefs: ["autofocus:corner_4"] },
+					{ anchorId: "corner_1" as const, xUm: -600, yUm: -400, zUm: 974 },
+					{ anchorId: "corner_2" as const, xUm: 700, yUm: -300, zUm: 1038 },
+					{ anchorId: "corner_3" as const, xUm: 500, yUm: 650, zUm: 1012 },
+					{ anchorId: "corner_4" as const, xUm: -550, yUm: 450, zUm: 955 },
 				],
 				operatorConfirmation: {
 					approvedBy: "user" as const,
 					approvedAt: "2026-07-24T00:00:00.000Z",
 					acknowledgedCalibrationRunId: calibrationRunId,
+					acknowledgedOperatorSuppliedXyz: true as const,
 					acknowledgedNoHardwareMotion: true as const,
 				},
 			};
+			expect(Value.Check(registerOperatorFocusPlaneCalibrationTool.parameters, params)).toBe(true);
+			expect(
+				Value.Check(registerOperatorFocusPlaneCalibrationTool.parameters, {
+					...params,
+					anchors: params.anchors.map((anchor) => ({
+						...anchor,
+						evidenceRefs: [`autofocus:${anchor.anchorId}`],
+					})),
+				}),
+			).toBe(false);
+			expect(
+				Value.Check(registerOperatorFocusPlaneCalibrationTool.parameters, {
+					...params,
+					anchors: params.anchors.map((anchor, index) => ({
+						...anchor,
+						anchorId: index === 0 ? "top_left" : anchor.anchorId,
+					})),
+				}),
+			).toBe(false);
 
-			const result = await registerFocusPlaneCalibrationArtifactTool.execute(
+			const result = await registerOperatorFocusPlaneCalibrationTool.execute(
 				"register-focus-plane",
 				params,
 				undefined,
@@ -636,10 +656,22 @@ describe("focus-plane calibration and mapping", () => {
 				{ cwd } as never,
 			);
 			expect(result.details.status).toBe("success");
+			expect(result.content[0].text).toContain("operator-supplied XYZ");
+			expect(result.content[0].text).not.toContain("autofocus evidence");
+			expect(result.details.stateAfter.source).toBe("operator_supplied_xyz");
 			expect(readRunStateSnapshot(cwd, calibrationRunId)?.status).toBe("completed");
 			const artifactRecords = readArtifactRecords(cwd, calibrationRunId);
 			expect(artifactRecords).toHaveLength(1);
 			expect(artifactRecords[0]!.artifact.kind).toBe("raman-focus-plane");
+			expect(artifactRecords[0]!.artifact.metadata?.source).toBe("operator_supplied_xyz");
+			const artifactPayload = JSON.parse(
+				readFileSync(join(cwd, "lab-records", "runs", calibrationRunId, "focus-plane.json"), "utf8"),
+			) as Record<string, unknown>;
+			expect(artifactPayload.source).toEqual({
+				kind: "operator_supplied_xyz",
+				operatorConfirmation: params.operatorConfirmation,
+			});
+			expect(JSON.stringify(artifactPayload)).not.toContain("evidenceRefs");
 
 			const surfaceCorrection = result.details.stateAfter.surfaceCorrection as {
 				artifactId: string;
@@ -670,7 +702,7 @@ describe("focus-plane calibration and mapping", () => {
 			});
 			expect(validateFocusPlaneArtifactReference(cwd, mappingSpec)).toBeUndefined();
 
-			const duplicate = await registerFocusPlaneCalibrationArtifactTool.execute(
+			const duplicate = await registerOperatorFocusPlaneCalibrationTool.execute(
 				"register-focus-plane-duplicate",
 				params,
 				undefined,

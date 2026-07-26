@@ -71,6 +71,13 @@ export {
 	type LiveRamanUnitOptions,
 } from "./live-runtime.ts";
 export {
+	registerOperatorFocusPlaneCalibration,
+	type OperatorFocusPlaneAnchor,
+	type OperatorFocusPlaneConfirmation,
+	type OperatorFocusPlaneRegistration,
+	type RegisteredOperatorFocusPlane,
+} from "./operator-calibration.ts";
+export {
 	RAMAN_PYTHON_RUNTIME_LOCAL_CONFIG_PATH,
 	RAMAN_PYTHON_RUNTIME_LAB_CONFIG_PATH,
 	RAMAN_HARDWARE_PYTHON_DRIVER_PATH,

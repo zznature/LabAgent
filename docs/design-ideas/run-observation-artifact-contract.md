@@ -104,6 +104,14 @@ type RamanFocusPlaneArtifact = {
 live publication 使用 exclusive create；同一路径已存在时只读取并重新计算 checksum，不覆盖模型。
 simulation runtime 发布相同核心字段，并额外标记 `simulated: true`。
 
+operator 已有四个聚焦 XYZ 角点时，可以通过
+`register_operator_focus_plane_calibration` 创建同一核心形状的 artifact。该路径不伪装成 runtime
+autofocus evidence：payload 使用 `source.kind = operator_supplied_xyz` 并记录显式
+operator confirmation，ArtifactRef metadata 同样使用 `source = operator_supplied_xyz`。
+调用方不提供 `evidenceRefs` 或 `validRegion`；Raman runtime registration module 从
+`corner_1..4` 的 XY 确定性派生区域并产生 RunState。系统只保证坐标的数学自洽、凸区域约束、
+确定性拟合和后续 mapping 引用校验，不声明坐标已经被 runtime 独立验证。
+
 当前分支没有把 `raman-focus-plane` 注册为 `main` 中的 canonical profile，也没有 source /
 representation descriptor。这里的 `profile` 是 payload 自描述字段，`kind` 是当前 ArtifactRef 类型。
 

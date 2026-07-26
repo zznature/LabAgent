@@ -3,8 +3,12 @@ export interface FocusPlanePoint {
 	yUm: number;
 }
 
+export const FOCUS_PLANE_CORNER_IDS = ["corner_1", "corner_2", "corner_3", "corner_4"] as const;
+
+export type FocusPlaneCornerId = (typeof FOCUS_PLANE_CORNER_IDS)[number];
+
 export interface FocusPlaneCorner extends FocusPlanePoint {
-	anchorId: "corner_1" | "corner_2" | "corner_3" | "corner_4";
+	anchorId: FocusPlaneCornerId;
 }
 
 export interface FocusPlaneAnchor extends FocusPlanePoint {
