@@ -85,6 +85,17 @@ def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
     cy = float(np.sum(weighted * rows) / total)
     radius_sq = (cols - cx) ** 2 + (rows - cy) ** 2
     roi_radius_sq = (cols - roi_cx) ** 2 + (rows - roi_cy) ** 2
+    centered_cols = cols - cx
+    centered_rows = rows - cy
+    cov_xx = float(np.sum(weighted * centered_cols * centered_cols) / total)
+    cov_yy = float(np.sum(weighted * centered_rows * centered_rows) / total)
+    cov_xy = float(np.sum(weighted * centered_cols * centered_rows) / total)
+    trace = cov_xx + cov_yy
+    determinant = cov_xx * cov_yy - cov_xy * cov_xy
+    discriminant = max(0.0, trace * trace - 4.0 * determinant)
+    major = max((trace + float(np.sqrt(discriminant))) / 2.0, 1e-6)
+    minor = max((trace - float(np.sqrt(discriminant))) / 2.0, 0.0)
+    circularity = float(np.sqrt(minor / major))
 
     rms_radius = float(np.sqrt(np.sum(weighted * radius_sq) / total))
     core_radius = max(8.0, min(normalized.shape) * 0.055)
@@ -151,15 +162,25 @@ def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
         + 1.0 * min(1.0, bright_fraction * 12.0)
     ) * (1.0 - 0.55 * texture_penalty) * ring_core_support * ring_dominance_penalty * ring_focus_support
 
+    near_focus_ring_balance = float(np.exp(-(((ring_to_core - 3.0) / 1.5) ** 2)))
+    near_focus_radius_support = 1.0 / (1.0 + (max(0.0, rms_radius - 38.0) / 8.0) ** 2)
+    outer_quiet_support = 1.0 / (1.0 + (outer_mean / 0.08) ** 2)
+    near_focus_ring_score = (
+        0.9 * near_focus_ring_balance
+        + 0.7 * min(1.0, core_fraction / 0.08)
+        + 0.6 * radial_coherence
+    ) * near_focus_radius_support * outer_quiet_support
+
     spot_context_support = min(1.0, core_fraction / 0.10) / (
         1.0 + (ring_to_core / 4.0) ** 2
     )
+    spot_shape_support = 0.20 + 0.80 * max(0.0, min(1.0, circularity))
     spot_score = (
         8.0 * compact_score
         + spot_context_support * (0.8 * center_score + 0.7 * local_contrast)
-    ) * (1.0 - 0.70 * texture_penalty)
+    ) * (1.0 - 0.70 * texture_penalty) * spot_shape_support
 
-    raw_score = max(spot_score, ring_score)
+    raw_score = max(spot_score, ring_score, near_focus_ring_score)
     score = 100.0 * max(raw_score, 0.0)
     if not np.isfinite(score):
         return 0.0

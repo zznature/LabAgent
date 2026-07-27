@@ -19,6 +19,7 @@ reference-only and must not be imported here.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import statistics
 import sys
@@ -44,13 +45,23 @@ def _trace(message: str, payload: dict | None = None) -> None:
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         record = {"ts": __import__("time").time(), "message": message, "payload": payload or {}}
         with trace_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(_json_safe(record), ensure_ascii=False, allow_nan=False) + "\n")
     except Exception:
         pass
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def emit(value: dict) -> None:
-    _REAL_STDOUT.write(json.dumps(value, ensure_ascii=False) + "\n")
+    _REAL_STDOUT.write(json.dumps(_json_safe(value), ensure_ascii=False, allow_nan=False) + "\n")
     _REAL_STDOUT.flush()
 
 
@@ -557,7 +568,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         response_payload["autofocusResultPath"] = str(point_dir / "autofocus_result_0001.json")
         try:
             (point_dir / "autofocus_result_0001.json").write_text(
-                json.dumps(response_payload, indent=2, ensure_ascii=False),
+                json.dumps(_json_safe(response_payload), indent=2, ensure_ascii=False, allow_nan=False),
                 encoding="utf-8",
             )
         except Exception:

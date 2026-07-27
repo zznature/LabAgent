@@ -373,6 +373,19 @@ export class RamanPythonDaemon {
 		try {
 			parsed = JSON.parse(line);
 		} catch {
+			const pending = this.pending;
+			if (pending) {
+				this.pending = undefined;
+				pending.settle({
+					ok: false,
+					errorCode: "python_runtime_parse_failed",
+					message: "Python Raman runtime returned a non-JSON protocol line.",
+					retrySafe: false,
+					needsOperator: true,
+					safeToResume: false,
+					payload: { line: line.slice(0, 500) },
+				});
+			}
 			return;
 		}
 		const pending = this.pending;

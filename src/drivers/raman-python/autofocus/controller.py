@@ -412,7 +412,7 @@ class AutofocusController:
         )
         edge_peak = best_index == 0 or best_index == len(scores) - 1
         if edge_peak:
-            confidence = min(confidence, 0.18)
+            confidence *= 0.85
         return confidence, {
             "confidenceMethod": "curve_quality",
             "edgePeak": "true" if edge_peak else "false",
@@ -589,6 +589,21 @@ class FixedRangeAutofocusController:
                 selection_source = "parabolic_verified"
             else:
                 selection_source = "sampled_after_prediction_check"
+        else:
+            local_refinement = self._sample_local_refinement(
+                scanner,
+                points,
+                peak.sampled_best,
+                roi,
+                params,
+            )
+            if local_refinement is not None:
+                prediction_verification = local_refinement
+                if local_refinement.score > peak.sampled_best.score:
+                    selected = local_refinement
+                    selection_source = "local_refinement_verified"
+                else:
+                    selection_source = "sampled_after_local_refinement"
 
         final_target_um = selected.actual_z_um
         final_z_um = scanner.move_to_z(final_target_um)
@@ -610,3 +625,54 @@ class FixedRangeAutofocusController:
             prediction_verification=prediction_verification,
             selection_source=selection_source,
         )
+
+    def _sample_local_refinement(
+        self,
+        scanner: FixedRangeScanner,
+        points: list[ScoredZPoint],
+        sampled_best: ScoredZPoint,
+        roi: ROI,
+        params: FixedRangeAutofocusParams,
+    ) -> ScoredZPoint | None:
+        candidates = self._local_refinement_targets(points, sampled_best)
+        if not candidates:
+            return None
+        refined_points = [
+            scanner.sample(
+                target_z_um,
+                roi,
+                frames_per_z=params.final_verification_frames_per_z,
+                tolerance_um=params.final_tolerance_um,
+                sample_role="local_refinement",
+            )
+            for target_z_um in candidates
+        ]
+        return max(refined_points, key=lambda point: point.score)
+
+    @staticmethod
+    def _local_refinement_targets(
+        points: list[ScoredZPoint],
+        sampled_best: ScoredZPoint,
+    ) -> list[float]:
+        ordered = sorted(points, key=lambda point: point.actual_z_um)
+        best_index = next(
+            (
+                index
+                for index, point in enumerate(ordered)
+                if point.actual_z_um == sampled_best.actual_z_um
+            ),
+            -1,
+        )
+        if best_index <= 0 or best_index >= len(ordered) - 1:
+            return []
+
+        left_z = ordered[best_index - 1].actual_z_um
+        best_z = ordered[best_index].actual_z_um
+        right_z = ordered[best_index + 1].actual_z_um
+        left_gap = best_z - left_z
+        right_gap = right_z - best_z
+        if left_gap <= 0 or right_gap <= 0:
+            return []
+
+        step_um = min(4.0, max(2.0, min(left_gap, right_gap) / 2.0))
+        return [best_z - step_um, best_z + step_um]

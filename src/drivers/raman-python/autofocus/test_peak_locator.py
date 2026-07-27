@@ -1,6 +1,7 @@
 import unittest
 
 from autofocus.controller import AutofocusController
+from autofocus.controller import FixedRangeAutofocusController
 from autofocus.models import FixedRangeAutofocusResult
 from autofocus.models import ScoredZPoint
 from autofocus.peak_locator import PeakLocator
@@ -39,7 +40,7 @@ class PeakLocatorTest(unittest.TestCase):
         self.assertEqual(estimate.source, "sampled")
         self.assertEqual(estimate.z_um, 3.0)
 
-    def test_curve_quality_rejects_edge_peak_without_bracketed_focus(self) -> None:
+    def test_curve_quality_penalizes_edge_peak_without_forcing_low_confidence(self) -> None:
         points = [
             point(1503.102, 149.070497346),
             point(1480.879778, 131.529299647),
@@ -64,7 +65,7 @@ class PeakLocatorTest(unittest.TestCase):
 
         confidence, diagnostics = AutofocusController._fixed_range_curve_quality_confidence(result)
 
-        self.assertLess(confidence, 0.2)
+        self.assertGreater(confidence, 0.2)
         self.assertEqual(diagnostics["edgePeak"], "true")
         self.assertLess(diagnostics["quadraticFitQuality"], 0.55)
         self.assertEqual(AutofocusController._recommendation_from_diagnostics(diagnostics), "expand_range")
@@ -101,6 +102,22 @@ class PeakLocatorTest(unittest.TestCase):
         self.assertLess(diagnostics["quadraticFitQuality"], 0.55)
         self.assertLess(diagnostics["predictionVerificationRatio"], 0.5)
         self.assertEqual(AutofocusController._recommendation_from_diagnostics(diagnostics), "accept")
+
+    def test_local_refinement_targets_require_bracketed_sampled_best(self) -> None:
+        points = [
+            point(0.0, 1.0),
+            point(8.0, 10.0),
+            point(16.0, 3.0),
+        ]
+
+        self.assertEqual(
+            FixedRangeAutofocusController._local_refinement_targets(points, points[1]),
+            [4.0, 12.0],
+        )
+        self.assertEqual(
+            FixedRangeAutofocusController._local_refinement_targets(points, points[0]),
+            [],
+        )
 
 
 if __name__ == "__main__":
