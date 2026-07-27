@@ -22,7 +22,7 @@ class PeakLocator:
         best_index = max(range(len(ordered)), key=lambda index: ordered[index].score)
         sampled_best = ordered[best_index]
 
-        if not interpolate or best_index == 0 or best_index == len(ordered) - 1:
+        if not interpolate:
             return PeakEstimate(
                 z_um=sampled_best.actual_z_um,
                 score=sampled_best.score,
@@ -30,8 +30,7 @@ class PeakLocator:
                 sampled_best=sampled_best,
             )
 
-        neighbours = ordered[best_index - 1 : best_index + 2]
-        peak_z = self._parabolic_peak_z(neighbours)
+        peak_z = self._parabolic_peak_z(ordered)
         if peak_z is None:
             return PeakEstimate(
                 z_um=sampled_best.actual_z_um,
@@ -40,9 +39,6 @@ class PeakLocator:
                 sampled_best=sampled_best,
             )
 
-        lo = min(point.actual_z_um for point in neighbours)
-        hi = max(point.actual_z_um for point in neighbours)
-        peak_z = float(np.clip(peak_z, lo, hi))
         return PeakEstimate(
             z_um=peak_z,
             score=sampled_best.score,

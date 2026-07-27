@@ -12,12 +12,11 @@ import {
 
 // A Node-based stand-in for the Python daemon. It speaks the same
 // newline-delimited JSON protocol so the TypeScript daemon client can be tested
-// end-to-end without Python or real hardware. It also emits stderr chatter and
-// one stray stdout line to prove the client tolerates non-protocol output.
+// end-to-end without Python or real hardware. It emits stderr chatter while
+// reserving stdout exclusively for the newline-delimited JSON protocol.
 const FAKE_DAEMON_SOURCE = String.raw`
 const readline = require("node:readline");
 process.stderr.write("vendor sdk chatter to stderr\n");
-process.stdout.write("non-json startup banner that must be ignored\n");
 let active = 0;
 let maxActive = 0;
 const rl = readline.createInterface({ input: process.stdin });

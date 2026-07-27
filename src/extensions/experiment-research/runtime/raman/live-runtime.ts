@@ -104,7 +104,7 @@ interface StagePosition {
 
 const liveRuntimeRegistry = new Map<string, RamanLiveRuntime>();
 const DEFAULT_STAGE_MOVE_TIMEOUT_MS = 120_000;
-const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 150_000;
+const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 240_000;
 const DEFAULT_FRAME_CAPTURE_TIMEOUT_MS = 30_000;
 
 function toRuntimeError(actionResult: ActionResult, fallbackCode: string, scope: RuntimeError["scope"] = "unit"): RuntimeError {
@@ -982,6 +982,13 @@ export async function runLiveRamanUnit(
 					artifactRefs,
 				};
 			}
+			const boundedAutofocusParams = {
+				...autofocusParams,
+				stageTimeoutMs: Math.min(
+					autofocusParams.stageTimeoutMs ?? DEFAULT_STAGE_MOVE_TIMEOUT_MS,
+					DEFAULT_STAGE_MOVE_TIMEOUT_MS,
+				),
+			};
 			autofocusResult = normalizeAutofocusResult(
 				spec,
 				runtime,
@@ -990,7 +997,7 @@ export async function runLiveRamanUnit(
 					stageResourceId,
 					frameProviderResourceId,
 					roi: spec.domain.raman.autofocus.roi,
-					params: autofocusParams,
+					params: boundedAutofocusParams,
 					timeoutMs: DEFAULT_AUTOFOCUS_TIMEOUT_MS,
 				}),
 			);

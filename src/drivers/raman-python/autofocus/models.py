@@ -208,6 +208,8 @@ class FocusPoint:
     z_um: float
     score: float
     saturation_ratio: float
+    target_z_um: float | None = None
+    frames: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,7 @@ class ScoredZPoint:
     target_z_um: float
     actual_z_um: float
     score: float
+    frames: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
