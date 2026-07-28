@@ -1,498 +1,219 @@
-# LabAgents Data Model
+# LabAgents 核心对象模型
 
-本文按当前 `core-ideas.md` 的主线定义数据模型：
+本文定义 `ExperimentIntent -> ProcedureSpec -> ExecutionUnit[] -> RunState` 的字段职责和事实边界。
+精确可验证 schema 位于 `src/extensions/experiment-research/schemas/`；本文解释为什么这些对象存在，不复制实现源码。
 
-```text
-用户提出实验目标
--> agent 生成声明式实验方案
--> kernel 将方案展开并执行
--> 运行状态与产物回流
-```
-
-当前阶段不追求先定义完整实验系统对象体系，而是先把这条主链路的数据分层讲清楚。
-
-与本文配套的实现分工文档：
-
-- `kernel-execution-model.md`
-  - 说明 `ProcedureSpec -> ExecutionUnit[] -> RunState` 的执行模型
-- `raman-hardware-adapter-contract.md`
-  - 说明以 Raman 为样板的资源、driver、runtime action 和 tool 接入方式
-
-## Core Objects
-
-### 1. `ExperimentIntent`
-
-`ExperimentIntent` 回答的是：
-
-**用户想做什么实验？**
-
-它属于研究意图层，表达实验目标、假设、约束和这一轮实验想解决的问题。它可以被 agent 消费和整理，但不直接进入 kernel 执行。
-
-**生产者**
-
-- 用户
-- planner / analyst
-- replan / lineage
-
-**消费者**
-
-- planner
-- agent memory / lineage
-- `ProcedureSpec` builder
-
-**应包含**
-
-- `intentId`
-- `experimentId`
-- `objective`
-- `hypothesis?`
-- `question?`
-- `constraints?`
-- `successCriteria?`
-- `evidenceRefs?`
-- `notes?`
-
-**不应包含**
-
-- 具体实验步骤列表
-- 仪器驱动参数
-- 运行时状态
-- artifacts 结果
-
-### 2. `ProcedureSpec`
-
-`ProcedureSpec` 回答的是：
-
-**agent 准备怎么做这个实验？**
-
-它是 agent 产出的**声明式实验方案**，由受控的实验语义结构组成。它不是脚本，不是通用控制流语言，也不是底层驱动命令集合。
-
-当前阶段建议：
-
-- `ProcedureSpec` 承载实验方案和具体步骤组织
-- 步骤类型必须来自受控的 `procedure/step` 库
-- 可以有受控的重复结构，例如 `grid_scan`、`point_list`、`repeat_n`
-- Raman 单点当前位置采集使用显式 `current_position` plan，不用 `{xUm: 0, yUm: 0, zUm: 200}` 这类占位绝对坐标表达当前位置
-- 不允许任意 `for / while / if` 之类通用脚本控制流
-- 用户确认整次 bounded run 后，`ProcedureSpec` 会被冻结为本次 run 的唯一执行输入
-
-**生产者**
-
-- agent
-- 受限的 spec builder / compiler
-
-**消费者**
-
-- kernel
-- preflight / validation
-- UI preview / review
-- operator approval UI
-
-**应包含**
-
-- `procedureSpecId`
-- `experimentId`
-- `intentId`
-- `procedureId`
-- `procedureVersion`
-- `resources`
-- `limits`
-- `plan`
-- `stoppingRules`
-- `retryPolicy?`
-- `outputPlan?`
-
-**不应包含**
-
-- 用户自由文本推理过程
-- 运行中的 progress / heartbeat
-- 实际执行产物
-- 底层 driver 命令
-
-### 3. `RunState`
-
-`RunState` 回答的是：
-
-**kernel 现在把实验执行到哪里了？**
-
-它属于运行时真相，表达当前 run 的状态、进度、异常、中断和产物索引。它由 kernel / runtime 产生，不由 planner 预写。
-
-**生产者**
-
-- kernel
-- runtime
-- watcher / resume logic
-
-**消费者**
-
-- operator UI
-- analyst
-- resume / recovery
-- audit / replay
-
-**应包含**
-
-- `runId`
-- `experimentId`
-- `procedureSpecId`
-- `status`
-- `progress`
-- `currentUnit?`
-- `heartbeatAt?`
-- `pauseReason?`
-- `abortReason?`
-- `errorState?`
-- `pointAttempts?`
-- `artifactRefs`
-- `startedAt`
-- `updatedAt`
-- `endedAt?`
-
-**不应包含**
-
-- 用户意图本体
-- 未归档的 LLM 推理
-- 新的实验规划建议
-
-## Planner-Side Parameter Templates
-
-`ExperimentProcedureTemplate` 是 planner 侧的参数先验，不属于 kernel 的核心执行输入，也不属于运行时真相。它回答的是：
-
-**对某类样品、某类实验和某个 procedure，agent 起草 `ProcedureSpec` 时可以参考哪些默认参数？**
-
-当前 MVP 只为 Raman 规划使用该对象，但命名不绑定 Raman。模板来自 workspace-local 配置：
-
-```text
-lab-config/templates/*.json
-```
-
-匹配优先级固定为：
-
-1. `sampleId` 精确匹配
-2. `sampleClass` 匹配
-3. intent keyword / tag 匹配
-4. `procedureId` 默认模板
-
-模板只保存可继承参数，例如：
-
-- `resources`
-- `limits`
-- `planPerPoint`
-- `stoppingRules`
-- `retryPolicy`
-- `domain`
-
-模板不保存、也不应复制：
-
-- `procedureSpecId`
-- `experimentId`
-- `intentId`
-- 历史实验的具体点位坐标
-- 审批状态、冻结状态或运行状态
-
-模板默认值是建议，不是强约束。planner 可以按用户要求覆盖模板参数，但 proposal preview/details 必须说明：
-
-- 使用的 `templateId`
-- 使用的 `templateVersion`
-- 继承了哪些字段
-- 覆盖了哪些字段
-
-如果没有模板匹配，planner 回到自主规划，并在提出 run 前向用户确认关键假设。`ProcedureSpec` schema 不因为模板而增加 provenance 字段；模板应用信息只出现在 planner / proposal details 中，避免污染 kernel 执行输入。
-
-## Focus-Plane Calibration Evidence
-
-倾斜薄膜的大范围 Raman mapping 不在 mapping 热路径中重新拟合焦平面，而是使用两份分别审批、
-冻结和执行的 `ProcedureSpec`：
-
-```text
-raman_focus_plane_calibration
-  -> completed calibration Run
-  -> immutable raman-focus-plane Artifact
-  -> raman_grid_mapping references that Artifact
-```
-
-calibration plan 冻结：
-
-- proposal-time `startPosition`
-- `seedZUm`
-- 用户指定的 `corner_1..4`，或以当前位置为中心的默认 1000 µm 正方形
-- 四角算术平均得到的 `center`
-- `maxXySpanUm`
-- 固定的 `move_to_point -> autofocus -> capture_frame` action 顺序
-
-自定义四角必须互异并形成四顶点凸四边形。compiler 从 `startPosition` 开始生成有限 progressive
-XY waypoint；每段不超过 `maxXySpanUm`。waypoint autofocus 只提供导航与恢复证据，平面拟合只使用
-`center + corner_1..4` 五个 accepted autofocus 结果。
-
-后续 calibration unit 的移动 Z 从该 run 最近的 accepted `raman-autofocus` Artifact 恢复，
-autofocus 再围绕它执行 ±100 µm coarse-to-fine 搜索。最终 anchor unit 完成后拟合：
-
-```text
-Z = aX + bY + c
-```
-
-并发布 `raman-focus-plane` Artifact。当前分支的 Artifact 是 run 目录中的不可覆盖 JSON 文件，
-包含 `calibrationRunId`、`procedureSpecId`、五个 anchors、模型系数、RMSE、最大绝对残差、
-anchor 数量和有效四角区域；`ArtifactRef.metadata` 保存 SHA-256。
-
-mapping plan 使用显式 `surfaceCorrection`：
-
-- 默认路径是引用 `{ calibrationRunId, artifactId, checksum }`
-- 同时冻结 `coefficients`、四角 `validRegion` 和 `localAutofocusHalfRangeUm: 40`
-- compiler 拒绝 calibrated convex region 外的点，并把 Predicted Focus Z 写入每个 point unit
-- runtime 每个 unit 重读原 Artifact，核对 profile、run ID、checksum、系数和 region
-- runtime 严格执行 `move_to_point -> autofocus -> acquire_spectrum`
-
-只有用户明确拒绝校正时才允许 `{ kind: "disabled", reason: "user_declined" }`，且 grid 必须给出固定
-`origin.zUm`。默认选择校正只决定规划路径，不能替代 calibration 和 mapping 各自的 bounded approval。
-
-## Derived Runtime Object
-
-### Compiled Units
-
-当前阶段不必把 `ExecutionPlan` 抬成重对象。更合适的理解是：kernel 从 `ProcedureSpec` 编译出一组内部执行单元（compiled units / `ExecutionUnit[]`）。
-
-它回答的是：
-
-**这份声明式实验方案，展开后具体要按什么执行单元运行？**
-
-建议职责：
-
-- 将声明式 `ProcedureSpec` 展开成有限、明确、可恢复的执行单元
-- 给每个执行单元分配稳定的 `unitId / index`
-- 为 pause / resume / progress / artifact naming 提供稳定锚点
-
-建议边界：
-
-- compiled units 可以展开到语义 action
-- 不应直接展开成底层 driver 命令流
-
-例如：
-
-- 允许：`move_to_point`、`autofocus`、`acquire_spectrum`
-- 不允许：`serial_write`、`set_register`、`write_request_file`
-
-建议编译链路：
+## 1. 对象关系
 
 ```text
 ExperimentIntent
--> ProcedureSpec
--> preflight / admission
--> user approves bounded run
--> compileUnits()
--> ExecutionUnit[]
--> kernel execute
--> RunState
+  -> agent drafts ProcedureSpec
+  -> proposal + approval freeze ProcedureSpec
+  -> kernel compiles ExecutionUnit[]
+  -> kernel/runtime produce RunState, events and artifacts
 ```
 
-关于这些 compiled units 如何被 kernel 托管执行，见 `kernel-execution-model.md`。
+只有 `ExperimentIntent`、`ProcedureSpec` 和 `RunState` 是主链路交互对象。`ExecutionUnit[]` 是 kernel 派生对象；template、proposal、approval 和 artifact record 是辅助契约。
 
-## Boundary Rules
+## 2. `ExperimentIntent`
 
-当前建议保持以下边界习惯：
+`ExperimentIntent` 回答“用户想解决什么研究问题”，由用户输入和 agent 整理产生，供后续规划与 lineage 使用，不进入 kernel。
 
-1. `ExperimentIntent` 可以影响 `ProcedureSpec`，但不能直接执行。
-2. `ProcedureSpec` 是 agent 交给 kernel 的声明式实验方案，而不是运行中的状态记录。
-3. 用户确认 run 后，kernel 只能执行该冻结 `ProcedureSpec` 编译出的 units；运行中不热改 spec。
-4. compiled units 只能由 kernel 从 `ProcedureSpec` 派生，不由用户或 planner 直接编写。
-5. `RunState` 只能由 runtime 产生，不能由 planner 预写。
-6. kernel 直接消费 `ProcedureSpec` 以及内部编译结果，不直接消费 `ExperimentIntent`。
+当前字段：
 
-## Non-Core Context
+- identity：`intentId`、`experimentId`
+- research framing：`objective`、`hypothesis?`、`question?`
+- boundaries：`constraints?`、`successCriteria?`
+- context：`evidenceRefs?`、`notes?`
 
-以下信息会影响规划和执行，但当前不作为这条主链路里的核心交互对象：
+它不包含 procedure steps、仪器驱动参数、运行状态或实验产物。
 
-- 硬件能力信息
-- 当前实验环境状态
-- 运行准入 / bounded-run approval / lease 契约（例如 `RunPolicy`）
+## 3. `ProcedureSpec`
 
-它们更适合作为：
+`ProcedureSpec` 回答“这一次 bounded run 准备怎样执行”，是 agent 交给 kernel 的唯一声明式方案输入。
 
-- runtime 提供的上下文输入
-- preflight / validation 的检查输入
-- Safety 目标态中的辅助约束对象
+### 3.1 顶层职责
 
-而不是当前这版最核心的数据分层。
+| 字段组 | 当前内容 |
+| --- | --- |
+| identity | `procedureSpecId`、`experimentId`、`intentId` |
+| procedure | `procedureId`、`procedureVersion` |
+| resources | 只引用 `{ resourceId, role }`，不内嵌 driver config |
+| safety bounds | `limits`：laser ceiling、objective clearance、XYZ ranges |
+| execution shape | `plan` |
+| termination | `stoppingRules?`、`retryPolicy?` |
+| domain parameters | typed `domain.raman` |
 
-其中，具体某一类真实硬件如何把这些上下文落到资源注册、driver 和 runtime action，可参考 `raman-hardware-adapter-contract.md`。
+当前 `procedureId`：
 
-## Interaction Flow
+- `raman_single_point_probe`
+- `raman_parameter_search`
+- `raman_grid_mapping`
+- `raman_focus_plane_calibration`
+
+### 3.2 当前 plan
+
+| plan kind | 用途 | 关键边界 |
+| --- | --- | --- |
+| `current_position` | 未指定绝对点的单点运行 | 不用伪造绝对坐标表达当前位置 |
+| `point_list` | 显式点列或直线生成器 | `points` 与 `generator` 二选一 |
+| `grid_scan` | 规则网格 | 支持 row-major / snake 和点间等待 |
+| `focus_plane_calibration` | 硬件采集焦平面 anchors | 冻结起点、seed、四角、中心与最大 XY span |
+
+当前 semantic steps 只有：
+
+- `move_to_point`
+- `autofocus`
+- `capture_frame`，可选 `laserOff`
+- `acquire_spectrum`
+
+`ProcedureSpec` 不支持任意 `if / for / while`，也不存在 `step_sequence`、`repeat_n` 或温控 step。
+
+### 3.3 停止与重试
+
+`stoppingRules` 当前可表达：
+
+- `maxRuntimeMinutes`
+- `maxUnits`
+- `stopOnError`
+- `maxConsecutiveFailures`
+
+mapping 的可配置 `retryPolicy` 固定为 `immediate_then_final`：
+
+- 点失败后可立即重试有限次数。
+- 主扫描完成后，可按失败顺序进入 final retry queue。
+- 当前可重试原因只有 execution timeout 与 low focus confidence。
+- 每次 attempt 都进入 `RunState.pointAttempts`，失败历史不会被成功覆盖。
+
+### 3.4 Raman domain
+
+`domain.raman` 当前包含：
+
+- autofocus enablement、ROI 与 strategy params
+- acquisition 参数
+- parameter-search envelope
+
+硬件资源配置不属于 domain；planner template provenance 也不进入 spec。
+
+### 3.5 Surface correction
+
+`grid_scan` 与 `point_list` 可使用同一个 `surfaceCorrection`：
+
+1. `focus_plane` + calibration artifact reference
+   冻结 calibration run、artifact identity、checksum、模型、有效区域和 local autofocus range。
+
+2. `focus_plane` + `manual_xyz_points`
+   三个非共线 XYZ 点直接产生模型和三角形有效区域；这是一次性纯计算，不创建 run 或 artifact。
+
+3. `disabled / user_declined`
+   用户明确拒绝校正；每个 mapping 点必须有固定 Z。
+
+由 operator 注册并持久化的三点模型走第一种 artifact-reference 路径，但 artifact 必须标记 `operator_supplied_xyz`，不能伪装成 runtime autofocus evidence。
+
+## 4. `ExecutionUnit[]`
+
+kernel 从冻结 `ProcedureSpec` 确定性编译 units。每个 unit 当前包含：
+
+- stable identity：`unitId`、`index`、`resumeKey`
+- shape：`unitKind`、`positionRef?`、`point?`
+- work：ordered semantic `actions`
+- enforcement：copied `limits`
+- scheduling：`interUnitDelayMs?`
+- evidence anchor：`artifactScope`
+- calibration metadata：`focusCalibration?`
+
+units 提供 progress、pause/resume、attempt 和 artifact naming 的稳定边界。planner 不直接编写 units；units 也不展开为 driver command。
+
+当前编译规则：
+
+- `current_position -> 1 point unit`
+- `point_list -> N point units`
+- `grid_scan -> rows × cols point units`
+- `focus_plane_calibration -> progressive waypoint + 5 anchor units`
+
+point-list line generator 在服务端展开，避免模型手写大量坐标与浮点漂移。
+
+## 5. `RunState`
+
+`RunState` 是 kernel 对“运行现在如何”的当前快照，由 kernel/runtime 写入，planner 不得预写。
+
+字段职责：
+
+- identity：`runId`、`experimentId`、`procedureSpecId`
+- lifecycle：`executionMode?`、`status`
+- progress：`progress`、`currentUnit?`、`heartbeatAt?`
+- intervention：`pauseReason?`、`abortReason?`、`resumedFromUnitIndexes?`
+- failure and quality：`errorState?`、`qualityState?`
+- attempt history：`pointAttempts?`
+- evidence index：`artifactRefs`
+- timestamps：`startedAt`、`updatedAt`、`endedAt?`
+
+状态集合固定为：
 
 ```text
-User
-  -> ExperimentIntent
-  -> agent refine / organize
-  -> ProcedureSpec
-  -> preflight / admission
-  -> user approves bounded run
-  -> kernel compileUnits
-  -> ExecutionUnit[]
-  -> kernel execute in background
-  -> RunState
-  -> summary / artifacts
-  -> agent analyze / replan
+queued | running | paused | aborted | failed | completed
 ```
 
-## Persistence Guidance
+`RunState` 只表达当前真相；append-only 历史属于 events，artifact payload 属于独立文件。
 
-当前阶段建议按职责持久化，而不是追求一次性设计完整记录体系。
+## 6. 辅助契约
 
-- `ExperimentIntent`
-  - 用于实验目标、lineage、replan 记录
-- `ProcedureSpec`
-  - 作为 run 的输入快照持久化
-  - 用户批准后，该快照在本次 run 内保持冻结
-- compiled units / `ExecutionUnit[]`
-  - 当前先作为 kernel 内部编译结果
-  - 只有在 debug / audit / resume 明确需要时，再考虑持久化
-- `RunPolicy`
-  - 当前作为辅助运行契约持久化最小摘要，例如 admission 结果、bounded-run approval、lease 信息
-- `RunState`
-  - 持久化当前状态和 append-only 事件历史
+### 6.1 `ExperimentProcedureTemplate`
 
-最小原则：
+template 是 workspace-local planner 参数先验，位于 `lab-config/templates/*.json`。
 
-- 用户目标、agent 方案、kernel 状态三类事实不要混写
-- append-only 的历史与当前快照分开
-- artifacts 只保存真实实验产物，不代替 records
+- 按 sample ID、sample class、intent keyword/tag 和 procedure default 匹配。
+- 只提供 resources、limits、per-point actions、stopping/retry rules 和 domain defaults。
+- 用户可以覆盖；proposal details 记录继承与覆盖字段。
+- 不保存 experiment/run identity、历史坐标、approval 或 runtime state。
 
-## Minimal Type Skeleton
+### 6.2 Proposal 与 approval
 
-```ts
-type ExperimentIntent = {
-  intentId: string
-  experimentId: string
-  objective: string
-  hypothesis?: string
-  question?: string
-  constraints?: Record<string, unknown>
-  successCriteria?: string[]
-  evidenceRefs?: string[]
-  notes?: string
-}
+proposal store 持有完整 spec 和 SHA-256 `specHash`，状态为：
 
-type ProcedureSpec = {
-  procedureSpecId: string
-  experimentId: string
-  intentId: string
-  procedureId: string
-  procedureVersion: string
-  resources: Array<{ resourceId: string; role: string }>
-  limits: Record<string, unknown>
-  plan:
-    | {
-        kind: "grid_scan"
-        grid: {
-          origin: { xUm: number; yUm: number; zUm?: number }
-          rows: number
-          cols: number
-          pitchXUm: number
-          pitchYUm: number
-          order?: "row_major" | "snake"
-        }
-        surfaceCorrection?:
-          | {
-              kind: "focus_plane"
-              calibrationRunId: string
-              artifactId: string
-              checksum: string
-              coefficients: { a: number; b: number; c: number }
-              validRegion: Array<{ anchorId: string; xUm: number; yUm: number }>
-              localAutofocusHalfRangeUm: 40
-            }
-          | {
-              kind: "disabled"
-              reason: "user_declined"
-            }
-        perPoint: SemanticStep[]
-      }
-    | {
-        kind: "focus_plane_calibration"
-        seedZUm: number
-        startPosition: { xUm: number; yUm: number }
-        anchors: {
-          corners: Array<{ anchorId: string; xUm: number; yUm: number }>
-          center: { anchorId: "center"; xUm: number; yUm: number }
-        }
-        maxXySpanUm: number
-        perPoint: SemanticStep[]
-      }
-    | {
-        kind: "point_list"
-        points: Array<{ xUm: number; yUm: number; zUm?: number }>
-        perPoint: SemanticStep[]
-      }
-    | {
-        kind: "step_sequence"
-        steps: SemanticStep[]
-      }
-  stoppingRules?: {
-    maxRuntimeMinutes?: number
-    maxUnits?: number
-    stopOnError?: boolean
-  }
-  retryPolicy?: {
-    mode: "immediate_then_final"
-    maxImmediateRetriesPerPoint: number
-    maxFinalRetriesPerPoint: number
-    finalRetryOrder: "failure_order"
-    retryableFailureReasons: {
-      execution: ["timeout"]
-      quality: ["low_focus_confidence"]
-    }
-  }
-}
-
-type SemanticStep =
-  | { kind: "move_to_point" }
-  | { kind: "autofocus"; strategy?: string }
-  | {
-      kind: "acquire_spectrum"
-      laserPowerPercent: number
-      integrationTimeMs: number
-    }
-  | { kind: "capture_frame" }
-  | { kind: "wait_for_temperature"; targetC: number; toleranceC?: number }
-
-type ExecutionUnit = {
-  unitId: string
-  index: number
-  unitKind: "point" | "step" | "batch"
-  point?: { row?: number; col?: number; xUm: number; yUm: number; zUm?: number }
-  actions: SemanticStep[]
-}
-
-type RunPolicy = {
-  executionMode: "live-supervised"
-  requiresSupervisorPresence: true
-  preflightReady: boolean
-  controlAvailable: boolean
-  approvalScope: "bounded_run"
-  approvedProcedureSpecId?: string
-  procedureSpecFrozen: boolean
-  resourceLeaseRequirements?: Array<{ resourceId: string; mode: "exclusive-control" }>
-}
-
-type RunState = {
-  runId: string
-  experimentId: string
-  procedureSpecId: string
-  status: "queued" | "running" | "paused" | "aborted" | "failed" | "completed"
-  progress?: { completedUnits: number; totalUnits?: number; unitKind?: string }
-  currentUnit?: { unitId: string; index: number }
-  pointAttempts?: Array<{
-    pointUnitId: string
-    attemptId: string
-    attemptIndex: number
-    phase: "initial" | "immediate_retry" | "final_retry"
-    status: "succeeded" | "failed"
-    failureType?: "execution" | "quality"
-    failureReason?: "timeout" | "low_focus_confidence"
-    finalForPoint?: boolean
-    artifactIds?: string[]
-    timestamp: string
-  }>
-  heartbeatAt?: string
-  artifactRefs: string[]
-}
+```text
+proposed -> approved
+         -> superseded
 ```
+
+`approve_and_start_run` 只接收 `proposalId + specHash`；live run 还要求独立的 operator acknowledgement。`revise_proposal` 创建新 proposal，旧批准不继承。
+
+### 6.3 Artifact
+
+`ArtifactRef` 只索引 `artifactId / kind / path` 和可选 metadata；payload 保存在 run 目录。
+
+跨 run 引用必须显式验证 identity、checksum 和领域关键字段。artifact index 不能代替 payload，message 也不能代替 artifact ref。
+
+## 7. 持久化边界
+
+```text
+lab-records/
+  experiments/{experimentId}/
+    intents/*.json
+    procedure-specs/*.json
+    proposals/*.json
+  runs/{runId}/
+    run-state.json
+    events.jsonl
+    artifacts.jsonl
+    artifact payloads...
+```
+
+最小不变量：
+
+- 用户目标、agent 方案和运行事实分开保存。
+- approved spec 是不可变运行输入。
+- 当前快照与 append-only 历史分开。
+- artifacts 记录实验产物，不充当任意业务状态数据库。
+- resume 读取冻结 spec 与现有 `RunState`，不接受调用方重建运行真相。
+
+## 8. Source 对照
+
+- `schemas/experiment-intent.ts`
+- `schemas/procedure-spec.ts`
+- `schemas/execution-unit.ts`
+- `schemas/run-state.ts`
+- `schemas/experiment-procedure-template.ts`
+- `schemas/tool-result.ts`
+- `store/proposal-store.ts`
+- `store/layout.ts`

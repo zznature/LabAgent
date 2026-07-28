@@ -1,47 +1,40 @@
-# Design Ideas Map
+# Design Ideas
 
-`docs/design-ideas/` 是 LabAgents MVP rebuild 的设计来源。实现应优先服从这里的文档；
-如果代码与设计冲突，先回到本文档目录澄清，而不是让实现暗中替代设计。
+`docs/design-ideas/` 是 LabAgents MVP 的规范性设计来源。这里记录当前成立的产品与技术契约，不保存已经完成的开发流水账，也不复制可由代码直接读取的完整 schema。
 
-## Recommended Reading Order
+如果实现与设计冲突，应先澄清设计，再修改代码或文档；不能让实现静默替代设计。
 
-1. `core-ideas.md`
-   - 总纲：产品能力、主链路、核心数据边界、context、仪器接入和最小安全观。
-2. `core-object-model.md`
-   - 数据模型：`ExperimentIntent`、`ProcedureSpec`、`RunState`，以及 planner 侧 `ExperimentProcedureTemplate`。
-3. `kernel-execution-model.md`
-   - 执行模型：`ProcedureSpec -> ExecutionUnit[] -> RunState`，包括 retry、pause / abort / resume、runtime contract、artifact 和错误回流。
-4. `raman-hardware-adapter-contract.md`
-   - Raman 接入样板：真实硬件资源、Python driver、daemon 传输、runtime action、planner / operator tool surface。
-5. `product_usage_example.md`
-   - 产品流程样例：用户如何从状态检查、单点采谱、参数搜索推进到 bounded mapping。
-6. `implementation-plan.md`
-   - MVP rebuild 路线：phase 切分、完成条件、当前已落地项和仍未冻结的 open issues。
-7. `labagents-ui.md`
-   - UI 规划：operator-facing instrument status panel、`InstrumentSnapshot` 和只读刷新边界。
+## 阅读顺序与职责
 
-## Document Roles
+| 文档 | 唯一职责 |
+| --- | --- |
+| `core-ideas.md` | 产品命题、核心原则、主链路和当前安全边界 |
+| `core-object-model.md` | 核心对象、辅助契约、派生对象与持久化边界 |
+| `kernel-execution-model.md` | 编译、准入、执行策略、生命周期、恢复和错误回流 |
+| `raman-hardware-adapter-contract.md` | Raman 资源、driver、daemon、runtime action 和 tool surface |
+| `run-observation-artifact-contract.md` | 当前 run records、artifact 索引和焦平面 provenance |
+| `product_usage_example.md` | 用户视角下如何用多次 bounded run 推进 Raman 任务 |
+| `implementation-plan.md` | 当前实现状态、待办与验收条件 |
+| `labagents-ui.md` | 尚未实现的 operator-facing 状态 UI 边界 |
 
-- `core-ideas.md` 定方向和边界。
-- `core-object-model.md` 定主链路对象和 planner 侧模板。
-- `kernel-execution-model.md` 定 kernel 如何托管执行。
-- `raman-hardware-adapter-contract.md` 定真实 Raman 硬件如何接入。
-- `product_usage_example.md` 定产品体验和 bounded run 交互节奏。
-- `implementation-plan.md` 定可执行 rebuild 路线和验收状态。
-- `labagents-ui.md` 定实验现场 UI 的只读观察面。
+## 当前实现基线
 
-## Current Design State
+- 唯一 MVP 扩展位于 `src/extensions/experiment-research`。
+- 主链路是 `ExperimentIntent -> ProcedureSpec -> ExecutionUnit[] -> RunState`。
+- simulation 与 `live-supervised` 共用 schema、kernel 状态机和 runtime contract。
+- 当前 procedure 包括 Raman 单点采集、有界参数搜索、焦平面校准和 mapping。
+- 真实 run 使用 proposal/hash 审批、冻结 spec、终态通知和受控 resume。
+- planner-facing experiment tools 与 operator-facing maintenance tools 已分开。
+- Raman live runtime 使用 workspace 配置、持久 Python daemon 和结构化 artifacts。
+- UI 状态面板、同因硬件故障熔断、连接类自动重试和完整 lease 仲裁尚未实现。
 
-- MVP 主线已收敛为：
-  `ExperimentIntent -> ProcedureSpec -> ExecutionUnit[] -> RunState`。
-- `ExecutionUnit` 是 kernel 从 `ProcedureSpec` 派生的运行时对象，不是第四个核心交互对象。
-- `ProcedureSpec` 是声明式实验方案，不是脚本，也不是底层 driver 命令集合。
-- 用户批准后，bounded run 执行冻结后的 `ProcedureSpec`；run 内不热改 spec。
-- surface-following mapping 固定为两次 bounded approval：先批准 `raman_focus_plane_calibration`，再批准引用其不可变 artifact 的 `raman_grid_mapping`。
-- 校准默认使用当前位置为中心的 1000 µm 正方形四角和算术中心；用户可覆盖四角，planner 会冻结绝对坐标并校验凸四边形。
-- 校准通过有限 progressive XY waypoint 导航并在 ±100 µm 内粗到细 autofocus；mapping 先移动到 predicted Z，再做 ±40 µm local correction。
-- Raman MVP 已明确区分 planner-facing experiment tools 与 operator-facing maintenance tools。
-- Raman live runtime 从 `lab-config/drivers/raman-python` 接入，`docs/Raman` 只作为 legacy/reference。
-- 实验室默认硬件配置放在 `lab-config/raman-runtime.lab.json`，本机覆盖放在 git-ignored 的 `lab-config/raman-runtime.local.json`。
-- planner 侧参数模板放在 `lab-config/templates/*.json`，模板 provenance 只进入 proposal / validation details，不污染可执行 `ProcedureSpec`。
-- XY correction、完整 lease、多角色审批和监督人在场仍属于目标态或 future/reference；focus-plane Z correction 已进入当前 MVP 主链路。
+精确字段与工具注册以当前 source schema 和 `index.ts` 为核对依据；设计含义仍由本目录定义。
+
+## 维护规则
+
+- 总纲不记录 Raman 数值参数；参数只在 Raman 专题或配置中出现。
+- 对象文档描述字段职责，不手抄整份 TypeScript union。
+- kernel 文档不描述 driver、串口或文件桥实现。
+- Raman 文档不重新定义 kernel 状态机。
+- 已完成事项从历史 phase 中移除，只在实现状态摘要中保留。
+- 未实现设计必须显式标注，不得用将来时混入当前保证。

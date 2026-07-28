@@ -1,262 +1,130 @@
-# LabAgent product usage example
+# LabAgents 产品使用示例
 
-本文不是协议定义，而是产品视角下的使用案例，用来说明：
+本文从用户视角说明 Raman 任务如何由观察、维护动作和多次 bounded run 推进。协议字段以其他设计文档为准。
 
-- 用户会如何和 LabAgent 对话
-- agent 会在什么地方提议 bounded run
-- 哪些动作需要用户确认
-- Raman mapping 任务会怎样被拆成多次受监督运行
+## 1. 使用前提
 
-## Product assumptions for this example
+- agent 可以提出 bounded run，也可以执行用户已经批准的 proposal。
+- agent 不能代替用户批准真实 motion/laser action。
+- run 内不热改 spec，不无界搜索，不自动扩张 mapping。
+- `notice / confirm_required / forbidden` 参与 proposal review。
+- “是否足够好”由显式指标规则判断，不由 LLM 自由判断。
 
-本例默认以下前提：
+## 2. 观察与维护
 
-1. agent 可以提议下一次 bounded run，也可以执行已经批准的 bounded run。
-2. agent 不能在运行中热改 `ProcedureSpec`，也不能无界扩展搜索空间。
-3. 风险提示先分成三类：
-   - `notice`：提示用户注意，但不阻断
-   - `confirm_required`：必须经用户确认才能执行
-   - `forbidden`：当前不允许执行
-4. “合适条件”先按显式规则判断，不先交给 LLM 自由发挥。
-5. 一个完整 Raman 任务通常不是一次 run 完成，而是由多次 bounded run 串成：
-   - 定位 / 观察
-   - 单点采谱
-   - 参数搜索
-   - mapping
+用户：
 
-## Raman mapping task example
+> 告诉我当前仪器状态，并把载物台移动到候选位置。
 
-### Phase 0: inspect lab state
+agent：
 
-1. user: 告诉我现在仪器状态。
-2. agent:
-   - Stage：`available`
-   - Current position: `{x, y, z}`
-   - Safety summary: `{z ceiling, current objective clearance, motion limits}`
-   - Raman resources:
-     - spectrometer: `ready`
-     - frame provider: `ready`
-     - laser: `{current power setting if readable}`
-   - active lease: `none`
-   - next suggestion: 可以先做只读观察，或者提议一次单点采谱 run。
+1. 用 `raman_get_hardware_status` / `raman_get_stage_position` 读取现场状态。
+2. 展示 absolute target、delta、limits 和 tolerance。
+3. 用户确认后，用一次 `raman_stage_move_absolute` 完成闭环定位并报告实测 residual。
 
-### Phase 1: move to a candidate region and prepare a single-point acquisition
+读状态不构造 `ProcedureSpec`；stage-only maintenance 也不伪装成 Raman 采谱 run。relative tool 只用于用户真正要求的单轴 nudge。
 
-3. user: 向右移动 50 um，在新位置采一条谱。
-4. agent:
-   - 你的目标可以拆成两部分：
-     1. `move_to_point`
-     2. `single_point_acquire`
-   - 检测到这是 effectful hardware action，需要先提议 bounded run。
-   - 建议 run:
-     - target point: `{x+50, y, z?}`
-     - procedure: `raman_single_point_probe`
-     - plan:
-       - move_to_point
-       - autofocus
-       - capture_frame
-       - acquire_spectrum
-   - 默认采集参数:
-     - laser power: `{param}`
-     - integration time: `{param}`
-     - accumulations: `{param}`
-   - 风险提示:
-     - `notice`: stage 将发生真实运动
-     - `confirm_required`: 将触发激光与真实谱采集
-   - 数据将保存到 `{planned output path}`
-   - 请确认是否按这次 bounded run 执行。
+## 3. 单点采集
 
-5. user: 积分时间改成 300 s，开始采集。
-6. agent:
-   - 已更新提议，但这是新的 run 草案，不是对运行中 spec 的热修改。
-   - 新参数:
-     - integration time: `300 s`
-     - expected runtime: `{estimated duration}`
-   - 风险重新评估:
-     - `notice`: 总实验时长增加
-     - `confirm_required`: 长积分可能带来样品受热和资源长时间占用
-     - `forbidden`: 如果 `300 s` 超过当前 limits.maxIntegrationTime，则拒绝并要求缩短
-   - 如果参数仍在已批准范围内，请确认执行：
-     - procedureSpecId: `{param}`
-     - run type: `single_point_acquire`
-     - save path: `{param}`
+用户：
 
-7. user: 确认执行。
-8. agent:
-   - 已启动 bounded run `{runId}`
-   - occupied resources: `{stage, spectrometer, frame provider}`
-   - current status: `running`
-   - expected completion: `{eta}`
-   - save path: `{param}`
-   - 运行中不会自动扩大功率、积分时间、搜索区域或切换成 mapping。
+> 在当前位置对焦并采一条谱。
 
-9. agent:
-   - run `{runId}` completed
-   - resources released
-   - artifacts:
-     - frame: `{artifact}`
-     - spectrum raw: `{artifact}`
-     - plot: `{artifact}`
-   - analysis summary:
-     - autofocus confidence: `{param}`
-     - saturation: `{true/false}`
-     - snr: `{param}`
-     - target peak score: `{param}`
-   - next suggestion:
-     - 如果规则满足，可以以该点为中心提议 mapping
-     - 如果规则不满足，可以在已批准参数包络内提议 parameter search
+agent 的正式流程：
 
-### Phase 2A: parameter search when current conditions are not yet good enough
+```text
+record ExperimentIntent
+-> find parameter template
+-> draft current_position ProcedureSpec
+-> validate
+-> preflight
+-> propose_run
+```
 
-10. user: 如果这条谱还不够好，你会怎么继续？
-11. agent:
-   - 我不能无界搜索，但可以提议一次受限 parameter search。
-   - 可调参数仅限：
-     - `laserPowerPercent`
-     - `integrationTimeMs`
-     - `accumulations`
-   - 不会改变：
-     - approved ROI
-     - autofocus Z window
-     - mapping geometry
-   - 建议 run:
-     - procedure: `raman_parameter_search`
-     - max attempts: `{param}`
-     - search envelope:
-       - laser power: `{min ~ max}`
-       - integration time: `{min ~ max}`
-       - accumulations: `{choices}`
-   - “合适条件”判断规则示例：
-     - autofocus confidence >= `{threshold}`
-     - not saturated
-     - snr >= `{threshold}`
-     - target peak / baseline >= `{threshold}`
-     - 在最近 `N` 次中至少 `M` 次满足
-   - 这个 run 需要新的用户确认，因为它引入了多次真实采集。
+proposal 展示：
 
-### Phase 2B: start mapping when the single-point conditions are acceptable
+- procedure 与 actions
+- acquisition/autofocus 参数
+- resources 与 limits
+- risks、estimated runtime 和 save path
+- exact `proposalId + specHash`
 
-12. user: 谱线信号不错，以这个点为中心，开始采集 10 x 10 mapping，x 间距 10 um，y 间距 15 um。
-13. agent:
-   - mapping 默认先校正样品倾斜焦平面；如果你要使用固定 Z，需要明确拒绝校正并给出固定 Z。
-   - 你可以指定四个 calibration corner；如果不指定，我会读取当前位置，以当前 XY 为中心生成边长
-     `1000 µm` 的正方形，center 为四角算术平均值。
-   - 建议先执行 calibration run:
-     - procedure: `raman_focus_plane_calibration`
-     - fit anchors: `corner_1..4 + center`
-     - start position: `{current x, current y}`
-     - seed Z: `{current z}`
-     - progressive waypoint max span: `{approved maxXySpanUm}`
-     - autofocus: 围绕上一 accepted focus Z 的 `±100 µm` coarse-to-fine 搜索
-   - calibration 和 mapping 是两次独立 bounded approval；默认校正不授权任何真实运动。
-   - 请先确认 calibration run。
+用户确认 exact ID/hash 后，agent 调用 `approve_and_start_run`。run 在后台执行；终态主动回流 frame、autofocus 和 spectrum artifacts 以及质量摘要。
 
-14. user: 确认执行焦平面校准。
-15. agent:
-   - 已启动 calibration run `{calibrationRunId}`
-   - progress 同时显示 navigation waypoints 和 5 个 fit anchors
-   - operator 可在 unit 安全边界 pause / abort
-   - run 不会临时增加 waypoint、扩大 Z 搜索窗口或直接开始 mapping
+如果用户在批准前改积分时间，agent 使用 `revise_proposal`。revision 产生新 proposal/hash，旧批准不继承。
 
-16. agent:
-   - calibration run `{calibrationRunId}` completed
-   - accepted fit anchors: `5 / 5`
-   - focus-plane model:
-     - equation: `Z = aX + bY + c`
-     - RMSE / max absolute residual: `{diagnostics}`
-     - valid convex region: `{four corners}`
-     - artifact ref: `{calibrationRunId, artifactId, sha256}`
-   - 如果五点证据不完整、四角退化、拟合失败或 Artifact 发布失败，run 不产生可供 mapping 使用的模型。
+## 4. 有界参数搜索
 
-17. agent:
-   - 我将 mapping 整理成第二份冻结的 `ProcedureSpec`，不会修改 calibration run。
-   - 建议 mapping spec:
-     - procedure: `raman_grid_mapping`
-     - center: `{current approved point}`
-     - grid: `10 x 10`
-     - pitchXUm: `10`
-     - pitchYUm: `15`
-     - surface correction:
-       - kind: `focus_plane`
-       - calibration ref: `{calibrationRunId, artifactId, checksum}`
-       - coefficients: `{a, b, c}`
-       - valid region: `{corner_1..4}`
-       - local autofocus half range: `40 µm`
-     - per-point actions:
-       - move_to_point（compiler 已把 Predicted Focus Z 冻结进 point unit）
-       - autofocus（只在 predicted Z 周围 `±40 µm`）
-       - capture_frame
-       - acquire_spectrum
-   - 继承的采集参数:
-     - laser power: `{param}`
-     - integration time: `{param}`
-     - accumulations: `{param}`
-   - 风险提示:
-     - `notice`: 总时长显著增加
-     - `confirm_required`: stage 将在网格范围内连续真实运动
-     - `confirm_required`: 将进行多点激光采集
-     - `forbidden`: calibration Artifact 缺失，或 checksum、系数、valid region 不匹配
-     - `forbidden`: 任一点在 calibrated convex region 外
-     - `forbidden`: 任一点 Predicted Focus Z、`±40 µm` 窗口、motion 或 power 越过 limits
-   - 预估:
-     - total points: `100`
-     - expected duration: `{eta}`
-     - save root: `{param}`
-   - 请确认是否启动该 mapping run。
+当单点结果不满足显式质量规则时，agent 可以提出新的 `raman_parameter_search`：
 
-18. user: 确认执行 mapping。
-19. agent:
-   - 已启动 mapping run `{runId}`
-   - current status: `running`
-   - progress: `0 / 100`
-   - occupied resources: `{stage, spectrometer, frame provider}`
-   - run policy:
-     - supervised mode only
-     - operator may pause / abort at safe boundaries
-     - no automatic expansion beyond approved grid
-     - no runtime refit or mutation of frozen Predicted Focus Z
+- 只搜索已批准的 laser power、integration time 和 accumulation envelope。
+- attempts 不超过 `maxAttempts` / `maxUnits`。
+- 每次结果产生 observation metrics。
+- `acceptable` 提前完成。
+- `continue_search_within_envelope` 继续下一次。
+- `stop_and_request_user_decision` 暂停并等待用户。
 
-20. agent:
-   - progress update: `35 / 100`
-   - last completed point: `{row, col, x, y, predictedZ}`
-   - recent health:
-     - autofocus low-confidence count: `{param}`
-     - spectrum failures: `{param}`
-   - if needed: 可以由用户选择 pause / abort，但系统不会擅自扩大或改写 grid。
+单点采集成功不自动授权参数搜索；参数搜索也不能自动开始 mapping。
 
-21. agent:
-   - mapping run `{runId}` completed
-   - resources released
-   - outputs:
-     - spectra directory: `{artifact}`
-     - mapping summary: `{artifact}`
-     - run summary: `{artifact}`
-   - final summary:
-     - completed points: `{param}`
-     - failed points: `{param}`
-     - usable points: `{param}`
-   - next suggestion:
-     - review mapping quality
-     - if needed, propose a new bounded follow-up run focused on a smaller region
+## 5. Focus-plane correction 的选择
 
-## What this example implies for product design
+mapping 前有三种路径。
 
-这个案例隐含了几个重要产品约束：
+### 5.1 用户已有三个 focused XYZ
 
-1. 用户看到的是“任务推进”，但系统内部必须拆成多次 bounded run。
-2. agent 可以主动提议下一步，但每次新的 effectful hardware run 都必须经过确认。
-3. 单点采谱成功，不等于系统可以自动开始 mapping；mapping 仍然是一次新的批准。
-4. 默认焦平面校正只选择规划路径；calibration 和 mapping 仍分别需要用户批准。
-5. calibration Artifact 是跨 run immutable evidence，mapping 只能引用，不能在热路径重拟合。
-6. 用户明确拒绝校正时，mapping 必须冻结 fixed Z，不能以缺失 Z 的 plan 继续。
-7. parameter search 必须有明确 envelope，不能变成无界自动调参。
-8. 风险提示不只是报错文案，而要参与 run 是否允许启动的判定。
+- 一次性使用：`calculate_focus_plane_from_xyz_points`，纯计算，不创建 artifact。
+- 跨 run 复用：显式确认后用 `register_operator_focus_plane_calibration`，产生标记为 operator-supplied 的 immutable artifact。
 
-## Open questions still worth freezing later
+两种路径都以三点三角形为有效区域；系统不声称这些点经过 runtime autofocus 验证。
 
-这个例子已经足够支持第一版 build，但后续仍值得继续冻结：
+### 5.2 系统需要采集 anchors
 
-1. “合适条件”的默认阈值由谁配置：用户、实验模板还是设备配置？
-2. mapping 中如果出现连续低置信度 autofocus，默认是继续、暂停还是转人工？
-3. parameter search 的默认最大尝试次数是多少？
-4. mapping 允许跳过失败点，还是一旦连续失败就停止整次 run？
+agent 提出独立 `raman_focus_plane_calibration`：
+
+- 冻结当前位置、seed、四角、中心和 waypoint span。
+- compiler 插入 progressive waypoints。
+- 五个 fit anchors 完成后发布 focus-plane artifact。
+
+用户批准 calibration 只授权该 run，不授权后续 mapping。
+
+### 5.3 用户拒绝 correction
+
+agent 明确记录 `surfaceCorrection = disabled / user_declined`，并为所有 mapping points 冻结 fixed Z。
+
+## 6. Mapping
+
+agent 根据用户给出的 geometry 提出第二个 `raman_grid_mapping` proposal：
+
+- grid 或 point-list/line generator
+- acquisition parameters
+- artifact/manual surface correction
+- valid region
+- per-point `move -> autofocus -> acquire`
+- stopping/retry rules
+- expected points、duration 和 output root
+
+compiler 把 predicted Z 写入每个 point unit，并在批准前拒绝：
+
+- correction 缺失且用户未明确拒绝
+- artifact identity/checksum/coefficients/region 不一致
+- 点位超出 calibrated region
+- motion、autofocus window 或 power 超出 limits
+
+用户确认新的 proposal ID/hash 后才启动 mapping。运行中 kernel 维护 progress、attempts、artifacts 和失败点，不修改 grid 或参数。
+
+## 7. Pause、resume 与失败
+
+- operator 可请求 pause/abort；pause 不丢弃已完成点。
+- paused run 优先使用 `resume_run`。
+- live resume 先展示恢复 unit/坐标，再要求用户确认。
+- resume 重读 frozen spec 并校验 unit identity，不接受新 spec 或任意跳点。
+- run 终态主动通知；用户仍可用 `summarize_run` 查询完整进度、失败和 artifacts。
+
+## 8. 产品不变量
+
+1. 用户看到连续任务，系统内部可以是多次独立 bounded run。
+2. 新的 effectful experiment run 必须获得新的 proposal approval。
+3. 默认规划路径不等于 motion/laser 授权。
+4. 参数搜索、calibration 和 mapping 都不能突破批准 envelope。
+5. 跨 run evidence 必须显式引用，不依赖“最近一次”推断。
+6. 人负责实验判断与批准，不负责轮询状态、复制整份 spec 或从日志中解析错误。

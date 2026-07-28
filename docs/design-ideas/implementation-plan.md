@@ -1,816 +1,171 @@
-﻿# LabAgents MVP Rebuild Implementation Plan
+# Experiment Research 实现状态与下一步
 
-本文把当前已经冻结的 MVP rebuild 路线，整理成适合 Codex goal 模型执行的实施计划。
+本文只记录当前实现基线、尚未完成的工作与验收条件。已经完成的历史 phase 不再逐项保留；精确行为由专题设计和代码定义。
 
-目标不是一次性铺开全部功能，而是按一系列可验证的纵向增量推进，逐步完成：
+## 1. 实现基线
+
+唯一 MVP extension：
 
 ```text
-docs freeze
--> extension skeleton
--> core objects
--> persistence boundaries
--> unit compilation
--> simulation vertical slice
--> approval + freeze gate
--> planner proposal flow
--> explicit evaluation rules
--> Raman runtime contract
--> real supervised single-point Raman
--> bounded parameter search
--> bounded Raman mapping
+src/extensions/experiment-research/
 ```
 
-## Planning Principles
+默认验证入口：
 
-整个 rebuild 过程遵循以下原则：
+```bash
+./test.sh
+npm run check
+```
 
-1. 每个 goal 都必须形成一个可验证增量，不做只铺结构不形成闭环的空转开发。
-2. 优先做纵向切片，不做大面积横向重构。
-3. `.pi/extensions/experiment-research` 是唯一 MVP implementation baseline；旧 reference implementation 已删除。
-4. 新实现必须以 `docs/design-ideas/` 为权威设计来源。
-5. 所有真实硬件执行都必须服从 supervised bounded run 边界。
+`./test.sh` 使用 fake runtime/daemon，不连接真实 Raman 硬件或外部 provider。真实硬件验证必须使用显式 hardware-validation command，并只在目标实验机运行。
 
-## Definition Of Done
+## 2. 已实现能力
 
-满足以下条件时，可以认为 MVP rebuild 基本完成：
+### 2.1 Planner 与对象
 
-- `experiment-research` extension 存在并可加载。
-- 新架构不再以旧 extension 的 `ExperimentSpec` 体系为中心。
-- 核心对象固定为三层：
-  - `ExperimentIntent`
-  - `ProcedureSpec`
-  - `RunState`
-- `ExecutionUnit` 作为 kernel 从 `ProcedureSpec` 派生的运行时对象，不列为第四个核心对象。
-- bounded run lifecycle 可运行。
-- simulation vertical slice 可运行。
-- approval + freeze gate 可运行：未批准的 spec 不能执行，批准后 spec 冻结。
-- supervised Raman single-point run 可运行。
-- 两类明确危险（样品撞镜头、激光功率过高）在 runtime 层有硬限制。
-- "good enough conditions" 使用显式规则。
-- parameter search 是 bounded 的。
-- mapping 是 bounded 的。
-- 所有新的 effectful hardware run 都要求确认。
-- run 内不允许热改 spec。
-- 不允许无界自动搜索。
+- `ExperimentIntent`、`ProcedureSpec`、`ExecutionUnit`、`RunState` typed schemas
+- intent/spec/proposal/run/event/artifact 分离持久化
+- workspace-local `ExperimentProcedureTemplate` 匹配与 provenance
+- canonical spec template、validation、preflight 与 proposal preview
+- `notice / confirm_required / forbidden` 风险分类
+- 显式 Raman “good enough” evaluation rules
 
-## Standard Per-Goal Workflow
+### 2.2 Kernel
 
-每个 Codex goal 都建议按同一模板执行：
+- `current_position`、`point_list`、line generator、`grid_scan`、`focus_plane_calibration` 编译
+- simulation 与 `live-supervised` 共用 approval/freeze gate
+- proposal ID/hash approval 与 `revise_proposal`
+- linear、parameter-search、mapping execution strategies
+- point attempt、immediate/final retry、连续失败限制
+- async poll/summarize、pause、abort、resume
+- inter-point delay、heartbeat、events 与 artifacts
+- paused/failed/completed/aborted terminal notification
 
-1. 先读与该 goal 直接相关的设计文档。
-2. 明确本 goal 的 scope 与非 scope。
-3. 只改与本 goal 直接相关的文件。
-4. 添加最小必要测试。
-5. 运行相关测试。
-6. 在有代码改动后运行 `npm run check`。
-7. 如实现与设计文档出现偏差，更新 `docs/design-ideas/`。
-8. 记录遗留问题，但不顺手扩 scope。
+### 2.3 Raman live runtime
 
-## Phase 0: Freeze The Build Contract
+- stage、frame provider、spectrometer typed resources
+- persistent serialized Python daemon
+- stage position/absolute motion、frame capture、autofocus、spectrum actions
+- workspace lab config + local override
+- runtime motion/objective/power hard limits
+- fixed、calibration coarse-to-fine、mapping local autofocus strategies
 
-### Objective
+### 2.4 Bounded Raman procedures
 
-冻结 MVP rebuild 的产品与架构边界，避免实现过程中发生目标漂移。
-
-### Scope
-
-- 文档冻结
-- 产品边界冻结
-- 非目标清单冻结
-
-### Checklist
-
-- [x] 明确：
-  - [x] agent can propose bounded runs
-  - [x] agent can execute approved bounded runs
-  - [x] agent cannot expand search unboundedly
-  - [x] "good enough conditions" use explicit rules
-- [x] `product_usage_example.md` 反映 phase-based supervised workflow
-- [x] `AGENTS.md` 明确当前 extension 是唯一 MVP implementation baseline
-- [x] 明确 MVP 暂不做：
-  - [x] full watchdog policy
-  - [x] generalized multi-device platform
-  - [x] full Raman calibration lifecycle
-  - [x] autonomous multi-run execution without approval
-
-### Exit Criteria
-
-- 文档已经足够约束开发。
-- 后续 goal 不再需要反复澄清 MVP 边界。
-
-### Suggested Codex Goal
-
-`Freeze the MVP rebuild contract in docs for the supervised Raman multi-run workflow.`
-
-## Phase 1: Create The Extension Skeleton
-
-### Objective
-
-创建 `.pi/extensions/experiment-research` 的最小扩展骨架，并保证能被加载。旧实现曾短期保留为 reference，现已删除。
-
-### Scope
-
-- 删除旧 reference implementation
-- 新 extension 目录创建
-- 最小入口文件
-- 最小 tool registration wiring
-
-### Checklist
-
-- [x] 删除旧 reference implementation
-- [x] 新建 `.pi/extensions/experiment-research/`
-- [x] 添加最小文件：
-  - [x] `package.json`
-  - [x] `index.ts`
-  - [x] `prompt.ts`
-  - [x] `README.md`
-- [x] 添加目录骨架：
-  - [x] `schemas/`
-  - [x] `planner/`
-  - [x] `kernel/`
-  - [x] `runtime/`
-  - [x] `tools/`
-  - [x] `store/`
-  - [x] `test/`
-- [x] `index.ts` 能注册最小 tool surface
-- [x] prompt 分层固定为 `core lab agent prompt -> Raman extension prompt -> lab-local user prompts`
-- [x] `src/prompts/APPEND_SYSTEM.md` 承载 core lab agent prompt
-- [x] `src/extensions/experiment-research/prompt.ts` 承载 Raman extension prompt
-- [x] 工作区 `lab-config/user-prompts.md` 承载 lab-local prompt，并在 extension prompt 后追加
-- [x] 不复制旧 extension 的 dispatch / schema / kernel 结构
-
-### Exit Criteria
-
-- 新 extension 可加载。
-- 目录结构稳定，可作为后续实现基线。
-
-### Suggested Codex Goal
-
-`Scaffold the experiment-research extension with minimal loading and tool registration.`
-
-## Phase 2: Define The Core Objects
-
-### Objective
-
-实现 MVP 所需的核心对象模型：`ExperimentIntent`、`ProcedureSpec`、`ExecutionUnit`、`RunState`。
-
-### Scope
-
-- schema/type 定义
-- 最小字段冻结
-- 最小 plan kinds 和 semantic steps 冻结
-- typed `domain` block 冻结
-
-### Checklist
-
-- [x] 在 `schemas/` 中定义：
-  - [x] `experiment-intent.ts`
-  - [x] `procedure-spec.ts`
-  - [x] `execution-unit.ts`
-  - [x] `run-state.ts`
-  - [x] `tool-result.ts`
-- [x] `ExperimentIntent` 最小字段可用
-- [x] `ProcedureSpec` 最小字段可用
-- [x] `ExecutionUnit` 最小字段可用
-- [x] `RunState` 最小字段可用
-- [x] 支持的 plan kinds：
-  - [x] `grid_scan`
-  - [x] `point_list`
-  - [x] `focus_plane_calibration`
-- [x] 支持的 semantic steps：
-  - [x] `move_to_point`
-  - [x] `autofocus`
-  - [x] `capture_frame`
-  - [x] `acquire_spectrum`
-- [x] `domain.raman` typed block 承载 Raman 专有参数：
-  - [x] `acquisition`（integrationTimeMs / laserPowerPercent / accumulations 等）
-  - [x] `autofocus`（ROI / strategy params）
-- [x] `limits` 与 `stoppingRules` 有最小结构
-
-> 注：`apply_xy_correction` step 与 `domain.raman.xyCorrection` 在 MVP 中不实现（见 Open issues），因此不进入这一版的 step 集与 domain block。
-
-### Exit Criteria
-
-- 新核心对象不依赖旧 `ExperimentSpec`。
-- `ProcedureSpec` 含 typed `domain` block，可承载 Raman 参数。
-- 类型足以支撑 planner / kernel / runtime。
-
-### Suggested Codex Goal
-
-`Implement the MVP core schemas for ExperimentIntent, ProcedureSpec, ExecutionUnit, and RunState.`
-
-## Phase 3: Build Persistence Boundaries
-
-### Objective
-
-把用户意图、冻结 spec、运行快照、事件、产物引用分开持久化，避免事实混写。
-
-### Scope
-
-- store 层
-- 路径布局
-- append-only event boundary
-
-### Checklist
-
-- [x] 实现：
-  - [x] `intent-store.ts`
-  - [x] `procedure-spec-store.ts`
-  - [x] `run-store.ts`
-  - [x] `event-store.ts`
-  - [x] `artifact-store.ts`
-- [x] 分开保存：
-  - [x] intents
-  - [x] frozen specs
-  - [x] run snapshot
-  - [x] append-only events
-  - [x] artifact refs
-- [x] 明确 records 目录布局
-- [x] 不混写 planner facts 与 runtime facts
-
-### Exit Criteria
-
-- 一次 run 的输入、状态、产物都可独立追踪。
-- persistence boundary 清晰。
-
-### Suggested Codex Goal
-
-`Implement clean persistence stores for intents, frozen specs, run state, events, and artifacts.`
-
-## Phase 4: Implement Unit Compilation
-
-### Objective
-
-将 `ProcedureSpec` 编译为稳定的 `ExecutionUnit[]`，形成 progress、pause、resume 的边界锚点。
-
-### Scope
-
-- compile pipeline
-- `grid_scan` / `point_list` 展开
-- unit metadata 注入
-
-### Checklist
-
-- [x] 实现 `kernel/compile-units.ts`
-- [x] 支持：
-  - [x] `point_list -> point units`
-  - [x] `grid_scan -> point units`
-  - [x] `focus_plane_calibration -> progressive waypoint + five anchor point units`
-- [x] 每个 unit 生成：
-  - [x] `unitId`
-  - [x] `index`
-  - [x] `unitKind`
-  - [x] point metadata
-  - [x] action list
-  - [x] artifact scope
-- [x] limits 检查具备编译入口（compile 阶段把 `limits` 带入 unit 元数据，作为 runtime 层 hard clamp 的上游；最终硬防线在 Phase 8/9 的 runtime/driver 层落地）
-- [x] 编译结果保持在 semantic action 层，不落到底层 driver 命令
-
-### Exit Criteria
-
-- `ExecutionUnit[]` 稳定、可计数、可恢复。
-- kernel 后续可直接消费编译结果。
-
-### Suggested Codex Goal
-
-`Compile ProcedureSpec into stable ExecutionUnit arrays for point_list and grid_scan plans.`
-
-## Phase 5: Ship The Simulation Vertical Slice
-
-### Objective
-
-先在 simulation mode 跑通完整 bounded run 生命周期，验证架构主链路成立。
-
-### Scope
-
-- simulation runtime
-- run lifecycle
-- fake artifacts / fake failures
-
-### Checklist
-
-- [x] 实现 `runtime/simulation-runtime.ts`
-- [x] 实现 `kernel/run-controller.ts`
-- [x] 支持最小 lifecycle：
-  - [x] start
-  - [x] poll
-  - [x] pause
-  - [x] abort
-- [x] 输出：
-  - [x] run snapshot
-  - [x] progress events
-  - [x] fake artifacts
-- [x] 模拟失败场景：
-  - [x] autofocus low confidence
-  - [x] spectrum timeout
-  - [x] operator pause
-- [x] 提供最小 tool：
-  - [x] `run_procedure`（Phase 5.5 会把它收敛到 approval gate 之后）
-  - [x] `poll_run`
-  - [x] `summarize_run`
-  - [x] `pause_run`
-  - [x] `abort_run`
-- [x] `poll_run` 的文本摘要直接包含 completed / total / failed / current unit / artifacts，避免 agent 只看到 `running`
-- [x] `summarize_run` 基于现有 `RunState` 汇总 progress、artifact counts、pause/abort/error，不引入新的核心对象
-
-### Exit Criteria
-
-- simulation 能跑通一次 bounded run。
-- pause / abort / poll 有真实状态变化。
-
-### Suggested Codex Goal
-
-`Implement the simulation runtime and bounded run lifecycle with start, poll, pause, and abort.`
-
-## Phase 5.5: Build The Approval And Freeze Gate
-
-### Objective
-
-把「proposal -> approve -> freeze -> execute」这道闸建在 kernel 与 tool 之间，并在 simulation 阶段就验证。这是 supervised 模型的承重墙：未批准的 spec 不能执行，批准后 spec 冻结为唯一执行输入。
-
-### Scope
-
-- approval state machine
-- frozen spec boundary
-- propose / approve tool split
-
-### Checklist
-
-- [x] 把 `run_procedure` 拆为：
-  - [x] `propose_run`（产出可冻结的 `ProcedureSpec` + `requiresConfirmation`）
-  - [x] `approve_and_start_run`（校验批准、冻结 spec、再交给 kernel）
-- [x] 实现最小 approval 状态迁移：
-  - [x] `proposed -> approved(frozen) -> running`
-- [x] run-controller 启动前强制校验：
-  - [x] 该 spec 已被批准
-  - [x] 该 spec 已冻结且未被改写
-- [x] simulation 也走这道闸（不绕过）
-- [x] 拒绝路径可验证：
-  - [x] 未批准的 spec 直接 run 被拒
-  - [x] approved 后修改 spec 被拒
-
-### Exit Criteria
-
-- simulation 下「未批准不能跑、批准后不可改」两条不变量可测。
-- proposal 与 execution 之间有显式 gate，而非隐式直连。
-
-### Suggested Codex Goal
-
-`Implement the approval and freeze gate so proposed specs must be approved and frozen before the simulation runtime executes them.`
-
-## Phase 6: Build Planner-Side Proposal Flow
-
-### Objective
-
-实现从用户目标到 bounded `ProcedureSpec` proposal 的 planner 侧流程。
-
-### Scope
-
-- intent builder
-- procedure spec builder
-- proposal vs execution boundary
-
-### Checklist
-
-- [x] 实现 `planner/intent-builder.ts`
-- [x] 实现 `planner/procedure-spec-builder.ts`
-- [x] 实现最小工具：
-  - [x] `get_lab_capabilities`
-  - [x] `get_lab_state`
-  - [x] `record_experiment_intent`
-  - [x] `get_procedure_spec_template`
-  - [x] `validate_procedure_spec`
-  - [x] `run_preflight`
-- [x] `record_experiment_intent` 将结构化研究意图写入既有 intent store，供后续 `ProcedureSpec.intentId` 引用
-- [x] `get_procedure_spec_template` 暴露当前 canonical `ProcedureSpec` 形状，减少 agent 临场猜 schema
-- [x] 支持的 procedure：
-  - [x] `raman_single_point_probe`
-  - [x] `raman_parameter_search`
-  - [x] `raman_grid_mapping`
-  - [x] `raman_focus_plane_calibration`
-- [x] proposal 输出包含：
-  - [x] risks
-  - [x] limits
-  - [x] estimated runtime
-  - [x] save path
-  - [x] requires confirmation
-- [x] proposal 由 `propose_run` 产出，执行须经 Phase 5.5 的 `approve_and_start_run`
-
-### Exit Criteria
-
-- agent 能提出 bounded run 草案。
-- proposal 与 execution 明确分离（execution 走 approval + freeze gate）。
-
-### Suggested Codex Goal
-
-`Implement planner-side bounded run proposal flow for Raman single-point, parameter-search, and mapping procedures.`
-
-## Phase 6.5: Add Planner-Side Experiment Procedure Templates
-
-### Objective
-
-为 Raman planner 增加 workspace-local 实验方案模板，让 agent 起草 `ProcedureSpec` 时可以参考同类样品、同类实验和同类 procedure 的推荐默认参数。
-
-### Scope
-
-- template schema
-- workspace template store
-- template matching planner tool
-- proposal preview provenance
-
-### Checklist
-
-- [x] 定义 `ExperimentProcedureTemplate`
-- [x] 模板位置固定为 `lab-config/templates/*.json`
-- [x] 模板只保存可继承参数，不保存 `procedureSpecId` / `experimentId` / `intentId` / 历史点位坐标
-- [x] 匹配优先级：
-  - [x] `sampleId` 精确匹配
-  - [x] `sampleClass` 匹配
-  - [x] intent keyword / tag 匹配
-  - [x] `procedureId` 默认模板
-- [x] 模板默认值只作为推荐，不作为强制约束
-- [x] template provenance 只进入 validate / preflight / propose details，不进入 `ProcedureSpec`
-- [x] 匹配失败时要求 planner 回到自主规划并向用户确认关键假设
-
-### Exit Criteria
-
-- agent 能在规划前查找 workspace 模板。
-- 匹配模板时，proposal details 能说明 `templateId`、`templateVersion`、继承字段和覆盖字段。
-- 未匹配模板时，planner 有明确 fallback 提示。
-
-### Suggested Codex Goal
-
-`Add planner-side experiment procedure templates for Raman defaults without changing the executable ProcedureSpec schema.`
-
-## Phase 7: Encode Explicit "Good Enough" Rules
-
-### Objective
-
-用显式规则判断采集条件是否足够好，避免把这一判断交给 LLM 自由发挥。
-
-### Scope
-
-- metrics schema
-- rule engine
-- decision output
-
-### Checklist
-
-- [x] 定义结构化 metrics 输入
-- [x] 实现规则判断：
-  - [x] autofocus confidence threshold
-  - [x] not saturated
-  - [x] SNR threshold
-  - [x] target peak / baseline threshold
-  - [x] repeat consistency rule
-- [x] 输出 rule-based decision：
-  - [x] acceptable
-  - [x] continue_search_within_envelope
-  - [x] stop_and_request_user_decision
-- [x] 明确 search envelope：
-  - [x] allowed parameters
-  - [x] max attempts
-  - [x] forbidden expansions
-- [x] 阈值与默认值来自 config schema，而非硬编码：
-  - [x] confidence / SNR / peak-baseline 阈值有 config 默认值；当前 autofocus confidence 默认阈值为 0.15
-  - [x] 默认值可被实验模板覆盖（research-style：pin config、可复现）
-  - [x] 默认阈值「由谁配置」按 Open issues 处理
-
-### Exit Criteria
-
-- 「是否适合进入 mapping」不依赖 LLM 自由判断。
-- parameter search 有清晰边界。
-
-### Suggested Codex Goal
-
-`Implement explicit rule-based evaluation for good-enough Raman acquisition conditions.`
-
-## Phase 8: Add The Raman Runtime Contract
-
-### Objective
-
-先定义 Raman runtime contract 和资源模型，再决定具体真实硬件接入细节。
-
-### Scope
-
-- resource model
-- runtime actions
-- action result schema
-
-### Checklist
-
-- [x] 实现 `runtime/raman/resources.ts`
-- [x] 实现 `runtime/raman/actions.ts`
-- [x] 定义资源：
-  - [x] stage
-  - [x] frame provider
-  - [x] spectrometer
-- [x] 定义 runtime actions：
-  - [x] `stage.get_position`
-  - [x] `stage.move_absolute_and_wait`
-  - [x] `autofocus.run_single`
-  - [x] `frame.capture_latest`
-  - [x] `spectrometer.acquire_spectrum`
-- [x] 统一 action result schema：
-  - [x] status
-  - [x] artifacts
-  - [x] errorCode
-  - [x] retrySafe
-  - [x] needsOperator
-  - [x] safeToResume
-
-### Exit Criteria
-
-- kernel 与 Raman 通过 contract 对接。
-- 真实硬件尚未 fully wired 也不阻碍边界稳定。
-
-### Suggested Codex Goal
-
-`Define the Raman runtime resource and action contract for stage, frame, autofocus, and spectrum acquisition.`
-
-## Phase 9: Deliver Real Supervised Raman Single-Point Execution
-
-### Objective
-
-用新架构跑通真实受监督 Raman 单点采谱 bounded run。
-
-### Scope
-
-- real Raman single-point wiring
-- preflight minimum checks
-- minimal admission
-- hazard hard-limit at runtime
-- risk gating
-
-### Checklist
-
-- [x] Connect single-point runs to the real Raman action path
-- [x] Implement minimum real preflight checks
-- [x] Minimum admission (only two booleans; no in-person supervision / lease arbitration in MVP):
-  - [x] preflight ready
-  - [x] control available
-- [x] Enforce both hard hazards in runtime/driver with hard clamp + reject:
-  - [x] motion / objective collision via `minObjectiveClearanceUm` and motion bounds
-  - [x] laser power ceiling via `limits.maxLaserPowerPercent`
-- [x] Risk classification is effective:
-  - [x] `notice`
-  - [x] `confirm_required`
-  - [x] `forbidden`
-- [x] Support the single-point flow:
-  - [x] move
-  - [x] autofocus
-  - [x] capture frame
-  - [x] acquire spectrum
-- [x] Complete artifacts flow-back
-- [x] Complete rule-based analysis
-
-### Exit Criteria
-
-- supervised single-point real Raman run 闭环可用。
-- 两类硬危险在 runtime 层有硬限制（不因用户已批准 run 而放弃底层防线）。
-- 不需要先完成 mapping 才能验证架构。
-
-### Suggested Codex Goal
-
-`Wire supervised real Raman single-point execution with minimal admission and runtime hazard hard-limits.`
-
-## Phase 10: Deliver Bounded Parameter Search And Mapping
-
-### Objective
-
-将 parameter search 和 Raman mapping 都实现为独立的 supervised bounded runs。
-
-### Scope
-
+- single-point acquisition
 - bounded parameter search
-- bounded mapping
-- progress and failure handling
+- grid/point-list mapping
+- hardware focus-plane calibration
+- manual three-point pure calculation
+- operator-supplied three-point artifact registration
+- corrected mapping artifact provenance and valid-region enforcement
 
-### Checklist
+### 2.5 Operator surface
 
-- [x] 实现 `raman_parameter_search`
-- [x] search envelope enforced
-- [x] max attempts enforced（默认值来自 config schema，可被实验模板覆盖）
-- [x] `grid_scan` mapping compile 可用
-- [x] mapping progress updates 可用
-- [x] 连续失败处理策略明确（跳过失败点 vs 连续失败即停，默认值来自 config schema）
-- [x] mapping 不会自动扩大 grid 或自动改参数
+- hardware status and stage position
+- frame capture with normal/no-laser variants
+- confirmed autofocus and low-power smoke spectrum
+- confirmed closed-loop absolute move
+- confirmed single-axis relative nudge
 
-> 注：mapping `perPoint` 在 MVP 中不含 `apply_xy_correction`（见 Open issues）。
+operator tools 不替代正式 experiment run，也不绕过 runtime limits。
 
-### Focus-plane Z correction increment
+## 3. 当前最高优先级：真实故障快速收敛
 
-- [x] calibration 与 mapping 是两个独立 proposal、approval 和 frozen ProcedureSpec
-- [x] 新 mapping proposal 默认要求校准 artifact；无校正 mapping 必须记录用户明确拒绝
-- [x] `point_list` mapping 与 `grid_scan` mapping 使用同一套 `surfaceCorrection` 准入规则
-- [x] live-supervised approval 必须包含用户确认过的 proposalId 和 specHash
-- [x] 用户可指定四角；缺省为提案时当前位置中心的 1000 µm 正方形
-- [x] 四角必须互异并组成四顶点凸四边形，center 为算术中心
-- [x] compiler 从冻结的当前 XY 开始，按 `maxXySpanUm` 生成有限 progressive XY waypoints
-- [x] calibration 禁止 `stoppingRules.maxUnits` 截断最终 anchor / model artifact
-- [x] 只使用四角加中心的五个 accepted autofocus 结果拟合 `z = a*x + b*y + c`
-- [x] calibration 使用以已恢复 Z 为中心的 ±100 µm coarse-to-fine autofocus
-- [x] calibration simulation 与 live runtime 都发布 `raman-focus-plane` artifact
-- [x] artifact 包含五点 evidence、模型、有效区域、run/spec provenance 和 SHA-256
-- [x] operator 已有三个不共线的聚焦 XYZ 点时，可通过 `register_operator_focus_plane_calibration` 显式注册跨-run artifact；artifact 标记 `operator_supplied_xyz`，不接受或声称未经验证的 evidenceRefs；runtime 从三点派生三角形有效区域，样品重新放置后由 operator 停止复用，不引入 placement ID
-- [x] mapping spec 冻结 calibration run ID、artifact ID、checksum、系数和有效区域
-- [x] mapping 引用的 calibration run 必须 completed，且 artifact 同时存在于 artifact index 和 completed RunState
-- [x] mapping compiler 拒绝有效凸区域外点，并为每点计算 Predicted Focus Z
-- [x] mapping runtime 每个 unit 验证跨 run artifact 完整性
-- [x] mapping 先移动到 Predicted Focus Z，再执行固定 ±40 µm local correction
-- [x] corrected mapping compiler 强制 `move_to_point -> autofocus -> acquire_spectrum` 的唯一动作顺序
-- [x] compiler/preflight 在审批前检查初始 calibration 窗口和全部 mapping 窗口；runtime 对按已接受焦点动态恢复的每个 calibration 窗口在 motion 前执行 hard-limit 检查
+现场运行仍会把部分持续硬件故障当作普通点失败反复执行，也会把可恢复的瞬时连接问题交给用户重发。
 
-### Exit Criteria
+### 3.1 同因故障熔断
 
-- parameter search 与 mapping 都是独立 bounded run。
-- 产品主案例可完整演示。
+待实现：
 
-### Suggested Codex Goal
+- 从 runtime error 形成稳定 cause key，首选 `errorCode + payload.axis`。
+- 连续同 key 默认两次后 pause，reason 为 `repeated_same_cause_failure`。
+- pause summary 带 cause、次数和关键实测值。
+- operator 修复硬件后由现有 `resume_run` 继续。
+- `maxConsecutiveFailures >= maxUnits` 时 validation 给出规则不可能触发的 notice。
 
-`Implement bounded Raman parameter search and bounded Raman mapping runs.`
+验收：
 
-## Phase 10.5: Add Operator Hardware Surface For Lab Use
+- 同一机械故障不再逐点消耗完整 timeout。
+- 已完成 mapping points 不因故障处置而丢失。
 
-### Objective
+### 3.2 瞬时连接重试
 
-补齐实验现场必须使用、但不属于完整 Raman `ProcedureSpec` run 的维护入口，避免 agent 为了读状态或移动 stage 而退回 legacy bridge，或把简单操作伪装成采谱 run。
+待实现：
 
-### Scope
+- 只对明确 `retrySafe` 的连接/daemon startup 类错误做有限退避重试。
+- 每次重试前 reset daemon。
+- retry count 与最终错误进入 agent 可见 summary。
+- stage settle timeout 不自动重试，由同因故障策略处理。
 
-- read-only hardware status
-- read-only stage position
-- active frame capture
-- confirmed operator autofocus
-- confirmed low-power smoke spectrum
-- confirmed stage-only relative motion
-- runtime config example
+验收：
 
-### Checklist
+- 可恢复连接抖动不要求用户重发同一句话。
+- 真实机械 timeout 不被自动重复燃烧时间。
 
-- [x] 新 runtime contract 支持 `stage.get_position`
-- [x] Python runtime adapter 支持只读 stage position
-- [x] 新增 operator-facing tools：
-  - [x] `raman_get_hardware_status`
-  - [x] `raman_get_stage_position`
-  - [x] `raman_capture_frame`
-  - [x] `raman_run_autofocus`
-  - [x] `raman_acquire_smoke_spectrum`
-  - [x] `raman_stage_move_relative`
-- [x] active frame capture 不要求构造 Raman `ProcedureSpec`
-- [x] operator autofocus 需要显式确认并受 Z range / minObjectiveClearanceUm 约束
-- [x] smoke spectrum 需要显式确认并受低功率 debug 上限约束
-- [x] stage-only relative move 不要求 frame provider / spectrometer 资源
-- [x] stage-only relative move 通过 runtime stage resource limits 做边界拒绝
-- [x] stage-only relative move 在未显式确认时只返回 proposal，不执行 motion
-- [x] 大距离 stage-only move 由 agent 编排多次 bounded relative move、出错后重读位置并询问是否继续；不新增 `MotionPlan` 对象，也不把维护移动伪装成 `ProcedureSpec`
-- [x] 提供可提交的实验室默认配置 `lab-config/raman-runtime.lab.json`
-- [x] 支持 git-ignored 本地覆盖 `lab-config/raman-runtime.local.json`
-- [x] runtime 配置加载优先级固定为 `local > lab > none`
-- [x] `get_lab_state` 暴露 runtime config source 和配置资源摘要
-- [x] live runtime Python import root 固化到工作区 `lab-config/drivers/raman-python`
-- [x] `docs/Raman` 降级为 reference/prototype，不再进入 live runtime import path
-- [x] vendor wheel 固化到 `lab-config/drivers/raman-python/vendor`，live driver 不再从 `assets/manuals` 查找 SDK
+### 3.3 参数不得静默失效
 
-### Exit Criteria
+待实现：
 
-- 用户询问连接状态或当前位置时，agent 直接走 read-only operator tool。
-- 用户要求小幅 stage nudge 时，agent 不再构造 `raman_single_point_probe`。
-- legacy extension 已删除，不再是 MVP 现场操作路径。
-- LabAgent 初始化时可把稳定实验室设备资源加载进上下文，本地临时改动不会污染 lab default。
+- 每个 autofocus strategy 声明实际消费的 params。
+- spec 出现 strategy 不消费的字段时，validation 返回 forbidden risk。
+- hardware calibration coarse range 从硬编码提升为 plan/domain 可表达参数，默认行为保持兼容。
 
-### Suggested Codex Goal
+验收：
 
-`Add operator-facing Raman hardware status, position read, and confirmed stage relative move tools to the MVP rebuild.`
+- spec 参数要么被执行，要么在批准前被拒绝。
 
-## Phase 10.6: Cut Supervised-Session Overhead
+### 3.4 Calibration anchor gate
 
-依据 `docs/proposals/agent-session-friction-analysis.md` 对 2026-07-24 现场会话的实测：
-四小时会话里近一半人类输入是协议仪式，agent 的失败重试基本是盲目的。
-本阶段只做两件根因修复，不改审批模型本身。
+当前 `allowedDriftUm` 固定为 5，且 preflight 可能检查 run 首 unit 即将覆盖的 XY 状态。
 
-### Scope
+候选设计：
 
-- 工具文本自带诊断：模型只看得到 `content`，因此凡是 `details` 里已算出的失败原因都必须进文本
-- 绝对定位一次到位：底层已有 `stage.move_absolute_and_wait`，工具面不应只暴露单轴相对移动
+- 首 unit 明确移动到 frozen start point 时跳过 XY anchor drift check。
+- Z envelope 与 objective-clearance 检查继续保留。
+- 其他场景从 stage settle/noise 配置推导 drift allowance。
 
-### Checklist
+该项改变 fail-closed admission 语义，实施前仍需用户单独确认最终规则。
 
-- [x] `run_preflight` 在文本里带出 `stageAnchorDetails` / `focusPlaneValidation` 的 `errorCode` 与 `message`
-- [x] `run_preflight` 资源缺失时列出 spec 已声明的 role，forbidden risk 时列出 risk code 与 message
-- [x] `run_preflight` 等待 runtime 时给出 `preflightReady` / `controlAvailable` 实际取值
-- [x] `summarize_run` / `poll_run` 文本带出 `errorState`；无 `errorState` 时带出最近一次失败的 point attempt
-- [x] `PointAttemptRecord` 增加可选 `message`，失败原因不再只存在于 events.jsonl
-- [x] `propose_run` 文本返回 `specHash`，operator 不需要去别处查
-- [x] `pause_run` / `abort_run` 的 `run_not_active` 带出当前实际 status 和失败原因
-- [x] 新增 `raman_stage_move_absolute`：未指定的轴保持当前值、三轴 limits 校验、确认后闭环到 settle tolerance、读回实测 residual
-- [x] settle tolerance 默认 5 um（硬件 settle tolerance），未收敛时返回 warning 与实测 residual 而不是谎称到位
-- [x] prompt 规定绝对目标只走一次 `raman_stage_move_absolute`，不再拆成多次单轴 relative move，也不再追 residual
+### 3.5 重复绝对目标的确认语义
 
-### Exit Criteria
+待实现：
 
-- preflight 失败时 agent 能直接说出是哪一项越界、差多少，不需要靠改参数试探。
-- run 失败或点位失败时 agent 不需要 grep `lab-records/**/events.jsonl` 才能回答「失败原因」。
-- 一次绝对定位是 1 次确认 + 1 次工具调用，而不是 3 轴 × (读位置 + 相对移动 + 复核)。
+- 同一 absolute target 因 settle timeout 未到达时，重发该目标不要求新的风险确认。
+- target 改变时必须重新确认。
+- 不引入跨调用的会话级运动白名单。
 
-### Suggested Codex Goal
+## 4. UI 工作
 
-`Surface tool diagnostics in result text and add a closed-loop absolute stage move tool.`
+`labagents-ui.md` 仍是 planning：
 
-## Phase 10.7: Stop Discarding Run State (P1) — 已实现
+- 尚无 `InstrumentSnapshot`
+- 尚无 instrument status widget
+- 尚无定时只读刷新
 
-依据 `docs/proposals/agent-session-friction-analysis.md` §5.3。
-本阶段的共同判断：服务端已经持有的状态，不应要求人或模型再提供一遍。
-审批模型的三段式不变。
+UI 实现不阻塞 kernel/Raman 主链路，但会改善 operator 态势感知。它不得引入 effectful 快捷操作或并发硬件读取。
 
-### Scope
+## 5. 明确非目标
 
-- paused run 可续跑，暂停不再等于作废
-- 审批只对 hash，不重传 spec
-- run 终态主动推送，取代人工轮询
+当前不排入 MVP：
 
-### Checklist
+- XY image correction
+- 通用多仪器 orchestration platform
+- full watchdog/policy engine
+- 多 agent lease arbitration
+- 多角色审批与监督者物理在场证明
+- autonomous multi-run execution
+- canonical artifact representation lifecycle
 
-- [x] `ActiveRun.startIndex`；`startRun` 接受初始 RunState，resume 路径不覆盖已有快照，只把 status 置回 `running` 并清 `pauseReason`
-- [x] `executeLinearRun` / `executeMappingRun` / `executeParameterSearchRun` 从 `startIndex` 开始遍历
-- [x] `planRunResume` / `resumeRun`：读 paused RunState、取冻结 spec（不接受调用方传 spec）、重新 compile、校验 `units[currentUnit.index].unitId` 一致，否则 `resume_unit_mismatch` fail closed
-- [x] `resume_run(runId, confirmed?)` 工具：未确认时只报将从哪个 unit / 坐标继续；不支持 resume 到任意 unit
-- [x] prompt 规定 paused run 一律先 `resume_run`，禁止用 abort + 重新 propose 代替
-- [x] `ApproveAndFreezeInput.spec` → `specHash`；`ProposalIdParamsSchema` 去掉 `spec`、新增必填 `specHash`
-- [x] `operatorApproval.acknowledgedSpecHash` 保持独立，人与模型的复述都必须等于 `proposal.specHash`
-- [x] `revise_proposal(proposalId, patch)`：JSON merge patch → validate → 重算 hash → 旧 proposal 标 `superseded` → 返回新 proposalId + specHash；不继承批准
-- [x] `point_list` 支持 `generator: { kind: "line", from, to, count, insetUm? }`，点表由 compiler 展开
-- [x] `run-controller.ts` 的 `setRunTerminalObserver`；paused / failed / completed / aborted 四个终态回调，回调抛错不影响状态写入
-- [x] extension 在 `session_start` 注册 observer，用 `pi.sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 推送 `runSummaryText`（含 P0 诊断）；不推送进度心跳
+新需求出现时应先更新专题设计，不在现有 schema 中预埋未使用字段。
 
-### Exit Criteria
+## 6. 实施纪律
 
-- 1/10 点处暂停后继续实验是 1 次确认 + 1 次工具调用，已完成的点不重跑。
-- `approve_and_start_run` 的请求体不含 ProcedureSpec，改一个参数走 `revise_proposal` 而非重发整份 spec。
-- run 失败或暂停后 agent 无需人类 `查看状态` 即可报告原因。
+每个增量必须：
 
-### Design Note
-
-按 hash 审批与 `revise_proposal` 已实现。行为等价性依据：`approveAndFreezeProcedureSpec`
-冻结的一直是 `proposal.spec`，原先传入的 spec 只被用来算一次哈希。
-`kernel-execution-model.md` 的 admission 段落需要用户确认后同步这一措辞。
-
-### Suggested Codex Goal
-
-`Add resume_run, hash-only approval with revise_proposal, and run-terminal push notifications.`
-
-## Phase 10.8: Fail Fast On Real Faults (P2)
-
-依据 `docs/proposals/agent-session-friction-analysis.md` §5.4。
-现场四小时里有大段时间是在等一个已经确定失败的硬件重复失败。
-
-### Scope
-
-- 同因故障熔断，瞬时故障重试，二者分开
-- 未实现的参数不得静默丢弃
-- preflight 不再检查一个即将被覆盖的状态
-
-### Checklist
-
-- [ ] `executeMappingRun` 增加因果键计数器（`errorCode` + `payload.axis`），连续 N 次（默认 2）同键失败即 pause（`repeated_same_cause_failure`）并带出该键与实测数值；选 pause 是为了让 Phase 10.7 的 `resume_run` 接手
-- [ ] `validate_procedure_spec` 在 `maxConsecutiveFailures >= maxUnits` 时报 `notice`：该规则不可能生效
-- [ ] `python-runtime.ts` 对连接类 `retrySafe` 错误（`stage_connection_error` / `python_runtime_spawn_failed`）退避重试至多 2 次（500ms / 1500ms），重试前重置 daemon；重试次数与最终错误进返回文本
-- [ ] `stage_timeout` 明确不重试，交给熔断
-- [ ] autofocus strategy 声明各自消费的 `domain.raman.autofocus.params` 字段；出现不被消费的字段即 `forbidden` 级风险
-- [ ] `focus_plane_calibration` 的 coarse 窗口提升为 plan 字段 `coarseHalfRangeUm`（默认 100），未给出时行为不变
-- [ ] compile 出的 `units[0]` 是指向冻结起点的 `move_to_point` 时跳过 XY anchor drift 检查；Z 范围检查保留
-- [ ] 其余情形 `allowedDriftUm` 从 stage resource config 读取（新增可选 `settleToleranceUm`，默认 5），下界取 `max(settleTolerance, 2 × 读数抖动)`
-- [ ] prompt 明确：同一绝对目标因 settle 超时未达成时重发不需要新确认，只有目标坐标改变才需要；不引入会话级移动白名单（属 `RunPolicy` 目标态）
-
-### Exit Criteria
-
-- 同一 `errorCode + axis` 连续失败两次即暂停，不再逐点烧 120s。
-- COM 连接瞬时失败由系统重试，不再要求用户重发同一句话。
-- spec 里写下的参数要么生效，要么在 validate 期被拒；不存在被静默忽略的第三种结果。
-- 提交 calibration 前不需要先手动把台子挪到第 1 个点。
-
-### Design Confirmation Required
-
-anchor 容差与跳过条件触及 preflight 的 fail-closed 语义，须用户确认后才回写设计文档。
-
-### Suggested Codex Goal
-
-`Add same-cause circuit breaking, transient-connection retry, param applicability validation, and anchor-gate fixes.`
-
-## Open Issues
-
-以下问题在本计划中已显式记录，留待后续冻结，但不阻塞已排期的 Phase：
-
-1. **三级风险模型已锚定**：`notice` / `confirm_required` / `forbidden` 已在 `core-ideas.md` Safety 节追认为 MVP（简单三级分类）。更复杂的风险分级、多角色审批、跨 run 白名单仍属目标态。本计划与 `raman-hardware-adapter-contract.md`、`core-ideas.md` 口径一致。
-2. **XY correction 在 MVP 中不实现**：`apply_xy_correction` step、`domain.raman.xyCorrection`、calibration 工具链均不进第一版；`raman-hardware-adapter-contract.md` 已同步降级为 reference-only。后续若 mapping 累积误差需要补偿，再作为独立增量接入。
-3. **`product_usage_example.md` 末尾四个默认值**：合适条件阈值由谁配置、连续低置信 autofocus 行为、parameter search 默认 max attempts、mapping 失败点跳过 vs 即停，均转为 Phase 7/10 的 config schema 默认值，写在代码、可被实验模板覆盖，不在 `core-ideas.md` 冻结。
-4. **`RunPolicy` / lease / 监督人在场 / 多角色审批**：按 `core-ideas.md` 归为目标态，MVP 不实现；admission 仅保留「preflight ready + 控制权可用」两项布尔（Phase 9）。
-
-## Notes On Execution Style
-
-为避免 rebuild 重新滑回旧系统的复杂性，执行时建议保持以下习惯：
-
-1. 先验证 simulation vertical slice，再接真实硬件。
-2. 先验证 single-point，再做 parameter search 和 mapping。
-3. 任何“顺手抽象”都要问一句：它是否直接服务当前阶段的主链路？
-4. 如果实现与设计冲突，优先回到 `docs/design-ideas/` 澄清，而不是让代码暗中替代设计。
+1. 先确认它解决真实主链路问题，而不是增加备用抽象。
+2. 从现有函数与 schema 组合，只有必要时才新增概念。
+3. 同步更新对应专题文档，避免实施计划复制契约。
+4. 新增/修改测试时先运行具体 extension test，再运行 `./test.sh`。
+5. 代码改动后运行 `npm run check` 并清除全部 error/warning/info。
+6. hardware validation 与默认测试严格分离。

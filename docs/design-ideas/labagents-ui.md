@@ -1,262 +1,155 @@
-# LabAgents UI 设计 （status: planning）
+# LabAgents Operator UI（Planning）
 
-本文回答一个问题：
+当前代码尚未实现 instrument status widget。本文只定义第一版只读 UI 的边界与验收条件，不描述已经存在的产品能力。
 
-> LabAgents 在 pi-agent UI 中应该怎样展示实验室与仪器的实时状态？
+## 1. 目标
 
-它重点讨论 operator-facing UI，不讨论 planner 如何生成实验方案，也不讨论 kernel 如何执行 `ProcedureSpec`。
+operator 在聊天之外持续看到：
 
-## 1. 第一性原理
+1. live runtime 是否注册、preflight 是否 ready、control 是否 available
+2. stage 当前状态和 XYZ
+3. frame provider / spectrometer 是否可用
+4. 当前 active run 的独立摘要（若存在）
 
-LabAgents 的 UI 首先服务于实验操作，而不是服务于聊天展示。
+UI 服务现场态势感知，不替代 planner、operator tools 或 `RunState`。
 
-实验操作中，人真正需要持续看到的是三类事实：
+## 2. 数据边界
 
-1. 当前实验环境是否可用
-2. 关键仪器是否 ready / busy / error
-3. 当前运行如果存在，kernel 执行到了哪里
+三类事实必须分开：
 
-这三类事实不能混成一个对象：
+| 事实 | 来源 | 回答的问题 |
+| --- | --- | --- |
+| instrument snapshot | runtime read-only queries | 设备现在怎样 |
+| `RunState` | run store | 当前实验执行到哪 |
+| `ProcedureSpec` | frozen spec store | 已批准要做什么 |
 
-- 实验环境与仪器状态回答“现场现在是什么状态”
-- `RunState` 回答“当前 run 执行到了哪里”
-- `ProcedureSpec` 回答“agent 准备怎么做实验”
+UI 不得：
 
-因此 UI 必须坚持一个边界：
+- 从 `ProcedureSpec` 推断实时设备状态
+- 把 runtime snapshot 写入 `RunState`
+- 直接调用 driver
+- 为了刷新而 capture frame、autofocus 或 acquire spectrum
+- 把 unknown 值伪装成 ready/off/zero
 
-> 仪器实时状态是 runtime 产生的只读观察快照，不是 planner 写入的实验方案，也不是 kernel 的 run state。
+## 3. 最小 `InstrumentSnapshot`
 
-## 2. 当前 MVP UI 目标
+建议第一版只表达当前确实可读的数据：
 
-MVP 阶段不追求完整实验室控制台，而是先把操作过程中最影响判断的状态显示出来。
-
-推荐新增一个常驻 instrument status panel，刷新周期为秒量级，例如 1s 或 2s。
-
-最小显示内容：
-
-| 仪器 | 字段 |
-| --- | --- |
-| stage | `status`, `position` |
-| laser | `status`, `power` |
-| camera / frame provider | `status` |
-| runtime | `registered`, `preflightReady`, `controlAvailable`, `updatedAt` |
-
-示例 UI：
-
-```text
-Raman: ready | control available | 12:03:41
-Stage: ready  X=120.0um Y=35.0um Z=410.0um
-Laser: off    Power=0%
-Camera: ready frame-provider:labspec_frame_main
-```
-
-如果某个状态暂时没有真实读数，应显示 `unknown`，不要用猜测值填充。
-
-## 3. UI 层级建议
-
-pi-agent 当前 extension UI 已支持 `setWidget()`、`setStatus()` 和 `setFooter()`。
-
-仪器状态 panel 推荐使用：
-
-```text
-ctx.ui.setWidget("instrument-status", lines, { placement: "aboveEditor" })
-```
-
-原因：
-
-- footer 适合短状态，不适合多仪器、多字段信息
-- above editor panel 在用户输入前可见，适合作为 operator 观察面板
-- panel 可以用多行表达 stage / laser / camera，不挤压聊天正文
-
-不建议：
-
-- 用 LLM tool 每秒刷新仪器状态
-- 把状态写进聊天消息流
-- 把仪器状态混入 `RunState`
-- 把实时状态写进 `ProcedureSpec`
-
-## 4. 数据模型
-
-建议新增一个只读快照对象，例如 `InstrumentSnapshot`。
-
-```typescript
-type InstrumentStatus = "ready" | "busy" | "error" | "unknown";
-
-type StageStatus = {
-	status: InstrumentStatus;
-	position?: {
-		xUm: number;
-		yUm: number;
-		zUm: number;
-	};
-	summary?: string;
-};
-
-type LaserStatus = {
-	status: InstrumentStatus | "armed" | "off";
-	powerMw?: number;
-	summary?: string;
-};
-
-type CameraStatus = {
-	status: InstrumentStatus;
-	frameProviderResourceId?: string;
-	summary?: string;
-};
-
+```ts
 type InstrumentSnapshot = {
-	updatedAt: string;
-	runtimeRegistered: boolean;
-	preflightReady: boolean;
-	controlAvailable: boolean;
-	instruments: {
-		stage?: StageStatus;
-		laser?: LaserStatus;
-		camera?: CameraStatus;
-	};
-};
+  updatedAt: string
+  runtimeRegistered: boolean
+  preflightReady: boolean
+  controlAvailable: boolean
+  stage?: {
+    status: "ready" | "busy" | "error" | "unknown"
+    position?: { xUm: number; yUm: number; zUm: number }
+    summary?: string
+  }
+  frameProvider?: {
+    status: "ready" | "error" | "unknown"
+    resourceId?: string
+  }
+  spectrometer?: {
+    status: "ready" | "error" | "unknown"
+    resourceId?: string
+  }
+}
 ```
 
-该对象只表达“现在读到什么”，不表达“接下来要做什么”。
+当前 runtime 不能可靠读取 laser on/off 或实际功率，因此第一版不把猜测的 laser 状态放进 schema。
 
-## 5. Runtime 契约
+## 4. Runtime seam
 
-仪器状态应该从 runtime 读取，而不是从 UI 直接访问 driver。
-
-MVP 可以先为 Raman 新增一个 helper：
+UI 只调用一个 read-only helper，例如：
 
 ```text
-.pi/extensions/experiment-research/runtime/raman/status-snapshot.ts
+readInstrumentSnapshot(cwd)
 ```
 
-职责：
+helper 负责：
 
-1. 读取 `getRamanLiveRuntime(cwd)`
-2. 调用 `runtime.preflight()`
-3. 调用 read-only action，例如 `stage.getPosition`
-4. 将 runtime / action failure 折叠成 `InstrumentSnapshot`
-5. 保证 UI 调用该 helper 不会抛出未处理异常
+- 获取 registered Raman runtime
+- 调用 preflight
+- 读取 stage position
+- 将失败折叠为 snapshot status/summary
+- 捕获异常，不让 UI timer 破坏 session
 
-长期更推荐在 runtime contract 中增加可选接口：
+如果后续第二种仪器也需要同一 UI，再把它提升为 optional generic runtime method；第一版不提前抽象通用平台。
 
-```typescript
-readInstrumentSnapshot?(): Promise<InstrumentSnapshot> | InstrumentSnapshot;
-```
+## 5. 刷新与并发
 
-这样 UI 不需要知道 Raman 的 stage、spectrometer、frame provider 如何组合。
-Raman 只是第一种实现，后续其他实验系统也可以复用同一个 panel。
-
-## 6. 刷新策略
-
-秒级刷新足够，不需要毫秒级。
-
-推荐默认：
-
-- `refreshIntervalMs = 1000` 或 `2000`
-- 每轮刷新必须串行，上一轮未结束时跳过下一轮
-- 单次状态读取应有短 timeout
-- UI 只显示最后一次完整快照
-- 读取失败时保留 panel，但标记 `error` 或 `unknown`
-
-原因：
-
-- 仪器 read-only query 也可能占用通信通道
-- 与 live run 共享 daemon / runtime 时，状态查询不能制造并发硬件访问
-- operator 需要的是态势感知，不是高频示波器
-
-推荐行为：
+建议默认 1–2 秒刷新：
 
 ```text
 timer tick
-  -> if refresh already in flight: skip
-  -> readInstrumentSnapshot(cwd)
-  -> format lines
-  -> ctx.ui.setWidget(...)
+-> previous refresh still running? skip
+-> read snapshot through serialized runtime channel
+-> publish last complete snapshot
 ```
 
-## 7. 与 RunState 的关系
+规则：
 
-instrument status panel 可以显示当前 active run 的摘要，但不能以 `RunState` 作为仪器状态来源。
+- 同一时刻最多一个 refresh in flight。
+- 读取使用短 timeout。
+- 与 live actions 共用 daemon queue，不并发触碰硬件。
+- failure 保留 panel 并显示 error/unknown。
+- session 结束时清理 timer。
 
-推荐分工：
+## 6. 展示
 
-- instrument panel：显示设备现场状态
-- run panel / run summary：显示 `RunState`
-- tool result：显示一次操作的结果
-- event log：记录历史事件
-
-如果 UI 后续需要显示 run 进度，可以在 instrument panel 旁边或下方增加 run summary：
+建议通过 pi-agent extension UI 的 above-editor widget 展示：
 
 ```text
-Run: live_20260702_001 running  12/100 point
+Raman: ready | control available | updated 12:03:41
+Stage: ready | X=120.0 Y=35.0 Z=410.0 um
+Frame provider: ready
+Spectrometer: ready
 ```
 
-但这仍然是两个来源：
+active run 摘要如果加入，应作为独立数据块读取 `RunState`：
 
-- run summary 来自 `pollRun()` / run store
-- instrument status 来自 runtime snapshot
+```text
+Run: live-run-... | running | 12/100
+```
 
-## 8. Raman MVP 状态来源
+instrument snapshot 与 run summary 可以同屏，但不能合并成一个事实对象。
 
-当前 Raman runtime 已有这些可用信息：
+## 7. 交互边界
 
-- `runtime.preflight()`
-- `runtime.stage.resource`
-- `runtime.stage.getPosition(...)`
-- `runtime.frame.resource`
-- `runtime.spectrometer.resource`
-
-因此 MVP 可以先实现：
-
-| UI 字段 | 来源 |
-| --- | --- |
-| `runtimeRegistered` | `getRamanLiveRuntime(cwd)` |
-| `preflightReady` | `runtime.preflight()` |
-| `controlAvailable` | `runtime.preflight()` |
-| `stage.status` | `stage.getPosition` action status |
-| `stage.position` | `stage.getPosition` payload |
-| `camera.status` | `preflight` + frame resource presence |
-| `laser.status` | spectrometer / preflight details，无法读取则 `unknown` |
-| `laser.powerMw` | 真实 runtime 暴露前为空 |
-
-不要为了 UI 显示而每秒 capture frame 或 acquire spectrum。
-这些是 effectful / expensive action，不能当作状态刷新。
-
-## 9. Operator 交互
-
-MVP panel 只做只读显示，不做按钮控制。
+第一版 panel 只读，不提供 motion、autofocus、laser 或 run-control buttons。
 
 原因：
 
-- LabAgents 当前安全目标是 supervised execution，不是直接手动控制台
-- effectful 操作仍应走 operator tool 或 approved run
-- UI panel 的职责是帮助人判断现场，不是绕过 tool / kernel 边界
+- effectful maintenance 已有确认过的 operator tools。
+- run control 已有 pause/resume/abort 契约。
+- UI 快捷按钮不能形成绕过 tool/kernel 的第二条执行路径。
 
-后续如果加入交互按钮，应遵守同样边界：
+未来若增加交互，也必须复用现有 tool confirmation 和 runtime hard limits。
 
-- read-only action 可以直接由 panel 触发
-- effectful action 必须走确认流程
-- 可能改变硬件状态的操作不能藏在 panel 刷新里
+## 8. 实施与验收
 
-## 10. 实施顺序
+建议增量：
 
-推荐按以下顺序落地：
+1. 定义 `InstrumentSnapshot` schema。
+2. 实现 Raman snapshot helper。
+3. 在 extension session lifecycle 注册/清理 widget timer。
+4. 添加 in-flight guard 和 timeout。
+5. 增加 runtime missing、position success、read failure、overlapping ticks 测试。
 
-1. 新增 `InstrumentSnapshot` schema / type
-2. 新增 Raman `readInstrumentSnapshot(cwd)` helper
-3. 在 `experiment-research/index.ts` 的 `session_start` 注册 UI widget
-4. 加入定时刷新与 in-flight guard
-5. 为 snapshot helper 写单元测试，覆盖 runtime missing、stage position success、stage read failure
-6. 后续再决定是否把 snapshot helper 上升为通用 runtime contract
+验收：
 
-这个顺序可以先验证真实操作体验，同时不提前抽象过度。
+- 无 live runtime 时显示 unavailable/unknown，不抛错。
+- 正常时显示真实 position 与 readiness。
+- refresh 不触发 effectful action。
+- slow refresh 不堆积并发请求。
+- live run 与 UI 共享 daemon 时保持串行。
+- session 结束后无残留 timer。
 
-## 11. Open Issues
+## 9. 暂不决定
 
-1. laser 是否应从 spectrometer resource 中独立拆成 `laser` resource？
-2. camera 与 frame provider 是否应统一命名，还是 UI 显示 camera、runtime 保持 frame provider？
-3. active run summary 是否需要并入同一个 panel，还是做独立 run status widget？
-4. 多 agent / 多 session 同时打开 UI 时，状态读取是否需要 lease-aware read channel？
-5. 状态刷新 interval 是否应写入 extension config？
+- 是否需要独立 laser resource 与真实状态读取
+- active run 使用同一 widget 还是独立 widget
+- refresh interval 是否进入 workspace config
 
-这些问题不阻塞 MVP。当前优先把只读状态显示跑通。
+这些问题不阻塞只读 snapshot vertical slice。

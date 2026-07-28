@@ -1,213 +1,125 @@
-# Run Observation And Artifact Contract
+# Run Observation 与 Artifact 契约
 
-本文记录 `raman-mapping-controls` 当前分支已经实现的最小 run observation / artifact 边界。
-它不复制 `main` 分支的 canonical Run Records、descriptor lifecycle 或 representation API。
+本文记录当前分支已经实现的 run records 与 Raman artifact provenance。它不声称提供完整审计系统或 canonical representation lifecycle。
 
-## 1. 当前持久化边界
-
-当前 run 使用：
+## 1. 持久化布局
 
 ```text
 lab-records/runs/{runId}/
   run-state.json
   events.jsonl
   artifacts.jsonl
-  ...
+  artifact payloads...
 ```
 
-- `RunState` 保存当前运行快照和 `artifactRefs`
-- `events.jsonl` 保存 append-only run events
-- `artifacts.jsonl` 保存 append-only `{ runId, recordedAt, artifact }`
-- `ArtifactRef` 最小字段为 `artifactId / kind / path`，可选 `label / metadata`
-- artifact payload 文件位于对应 run root 下
+| 存储 | 职责 |
+| --- | --- |
+| `run-state.json` | 当前 `RunState` 快照与 artifact refs |
+| `events.jsonl` | append-only lifecycle、unit、attempt 和等待事件 |
+| `artifacts.jsonl` | append-only `{ runId, recordedAt, artifact }` 索引 |
+| payload files | frame、spectrum、autofocus、focus-plane 等真实产物 |
 
-`artifacts.jsonl` 是索引，不代替 payload 文件；payload 文件也不能脱离 ArtifactRef 让上层按目录猜测。
+`ArtifactRef` 最小字段为 `artifactId / kind / path`，可带 label/metadata。索引不代替 payload；payload 也不能脱离索引让上层扫描目录猜测。
 
-## 2. Autofocus evidence
+## 2. Observation 规则
 
-live calibration 的每个 waypoint / anchor 都会保存一个 `raman-autofocus` JSON：
+- `RunState` 表达当前状态，events 表达历史。
+- heartbeat/progress 是结构化状态，不是 stdout 日志。
+- 每次 mapping attempt 都记录 phase、status、failure、message 和 artifact IDs。
+- run summary 直接带出 error state 或最近失败 attempt。
+- paused/failed/completed/aborted 通过 terminal observer 主动回流。
+- 大文件只通过 artifact ref 进入 agent 上下文。
 
-```ts
-type RamanAutofocusArtifact = {
-  unitId: string
-  status: "success" | "failed" | "paused"
-  summary: string
-  errorCode?: string
-  payload: {
-    zBestUm?: number
-    confidence?: number
-    [key: string]: unknown
-  }
-}
-```
+## 3. Autofocus evidence
 
-恢复下一 calibration unit 时，runtime 从当前 run 的 artifact records 逆序查找最近一个
-`status = success` 且具有有限 `payload.zBestUm` 的 `raman-autofocus`，不依赖 daemon 内存。
+live calibration 的每个 waypoint/anchor 产生 `raman-autofocus` artifact，至少记录：
 
-waypoint autofocus 是导航与恢复证据。只有 `focusCalibration.sampleRole = "anchor"` 且具有
-`anchorId = center | corner_1..4` 的五个 unit 进入平面拟合。
+- unit identity
+- `success / failed / paused`
+- summary 与 optional error code
+- `zBestUm`、confidence 等 payload
 
-## 3. `raman-focus-plane`
+下一 calibration unit 从当前 run 的 artifact records 逆序寻找最近 accepted `zBestUm`，不依赖 daemon 内存。
 
-最终 anchor unit 完成 autofocus 后，TypeScript live runtime 读取同一 run 的五个 accepted anchor
-artifacts，拟合 `Z = aX + bY + c`，并创建：
+waypoint evidence 只用于导航和恢复。只有 `focusCalibration.sampleRole = anchor` 且带命名 anchor ID 的中心与四角进入硬件校准平面拟合。
+
+## 4. `raman-focus-plane`
+
+### 4.1 Hardware calibration
+
+最后一个 hardware anchor 完成后，TypeScript runtime 聚合同一 run 的五个 accepted anchors，拟合：
 
 ```text
-lab-records/runs/{calibrationRunId}/focus-plane.json
+Z = aX + bY + c
 ```
 
-正式 hardware calibration payload 形状：
+payload 包含：
 
-```ts
-type RamanFocusPlaneArtifact = {
-  profile: "raman-focus-plane"
-  calibrationRunId: string
-  procedureSpecId: string
-  anchors: Array<{
-    anchorId: "center" | "corner_1" | "corner_2" | "corner_3" | "corner_4"
-    xUm: number
-    yUm: number
-    zUm: number
-    confidence?: unknown
-  }>
-  model: {
-    a: number
-    b: number
-    c: number
-    rmsErrorUm: number
-    maxAbsErrorUm: number
-    anchorCount: 5
-  }
-  validRegion: Array<{
-    anchorId: "corner_1" | "corner_2" | "corner_3" | "corner_4"
-    xUm: number
-    yUm: number
-  }>
-}
+- `profile = raman-focus-plane`
+- calibration run/spec identity
+- 五个 anchors
+- coefficients、RMS 与最大残差、anchor count
+- 四角 valid region
+
+### 4.2 Operator-supplied calibration
+
+operator 三点注册复用同一 profile，但必须包含：
+
+- `source.kind = operator_supplied_xyz`
+- exact operator confirmation
+- 三个 anchors
+- 三角形 valid region
+- `anchorCount = 3`
+
+它不包含伪造的 runtime evidence refs。
+
+### 4.3 Publication
+
+`focus-plane.json` 使用 exclusive create；已存在时不能覆盖模型。对应 `ArtifactRef.metadata` 保存 SHA-256、anchor count、fit diagnostics 和 optional source。
+
+simulation 发布相同核心结构，并标记 simulated。
+
+## 5. 跨 run 引用
+
+artifact-backed mapping 冻结：
+
+```text
+calibrationRunId
+artifactId
+checksum
+coefficients
+validRegion
+localAutofocusHalfRangeUm
 ```
 
-operator-supplied payload 复用相同的 profile 和 model 字段，但由 `source` 明确区分：
+preflight、simulation 和 live runtime 重新验证：
 
-```ts
-type OperatorSuppliedRamanFocusPlaneArtifact = {
-  profile: "raman-focus-plane"
-  calibrationRunId: string
-  procedureSpecId: string
-  source: {
-    kind: "operator_supplied_xyz"
-    operatorConfirmation: {
-      approvedBy: "user"
-      approvedAt: string
-      acknowledgedCalibrationRunId: string
-      acknowledgedOperatorSuppliedXyz: true
-      acknowledgedNoHardwareMotion: true
-    }
-  }
-  anchors: Array<{
-    anchorId: string
-    xUm: number
-    yUm: number
-    zUm: number
-  }> // exactly 3
-  model: {
-    a: number
-    b: number
-    c: number
-    rmsErrorUm: number
-    maxAbsErrorUm: number
-    anchorCount: 3
-  }
-  validRegion: Array<{
-    anchorId: string
-    xUm: number
-    yUm: number
-  }> // the triangle derived from the same 3 anchors
-}
-```
+- calibration run 已 completed
+- artifact 同时存在于 artifacts index 和 completed `RunState`
+- kind/profile 与 identity 一致
+- payload checksum 与冻结 checksum 一致
+- coefficients 与 valid region 完全一致
 
-对应 `ArtifactRef`：
+任一失败返回 missing/mismatch error；不得选择“最近一次模型”或退回 fixed Z。
 
-```ts
-{
-  artifactId: `${calibrationRunId}-focus-plane`
-  kind: "raman-focus-plane"
-  path: "focus-plane.json"
-  metadata: {
-    checksum: `sha256:${digest}`
-    anchorCount: 3 | 5
-    rmsErrorUm: number
-    source?: "operator_supplied_xyz"
-  }
-}
-```
+operator artifact 可被多个 mapping runs 引用。当前没有 sample placement ID 或自动失效；样品移动后停止复用由 operator 负责。
 
-正式 hardware calibration 使用 `anchorCount: 5` 且不需要 `source`；operator 三点变体使用
-`anchorCount: 3` 和 `source: operator_supplied_xyz`。
+## 6. 当前保证与缺口
 
-live publication 使用 exclusive create；同一路径已存在时只读取并重新计算 checksum，不覆盖模型。
-simulation runtime 发布相同核心字段，并额外标记 `simulated: true`。
+已经保证：
 
-operator 已有三个不共线的聚焦 XYZ 点时，可以通过
-`register_operator_focus_plane_calibration` 创建上述三点变体。该路径不伪装成 runtime
-autofocus evidence：payload 使用 `source.kind = operator_supplied_xyz` 并记录显式
-operator confirmation，ArtifactRef metadata 同样使用 `source = operator_supplied_xyz`。
-调用方不提供 `evidenceRefs` 或 `validRegion`；Raman runtime registration module 从三个 XY
-确定性派生三角形区域并产生 RunState。系统只保证坐标的数学自洽、区域约束、
-确定性拟合和后续 mapping 引用校验，不声明坐标已经被 runtime 独立验证。
-该 artifact 不因单个 mapping run 结束而失效，可由后续 run 继续按
-`calibrationRunId + artifactId + checksum` 引用。当前不记录 sample placement ID，也不自动判断
-样品是否移动；样品重新放置后停止复用旧 artifact 是 operator 责任。
+- calibration 与 mapping 分属不同 run/approval
+- waypoint 与 fit-anchor evidence 分离
+- focus-plane payload 不可覆盖
+- mapping 对 artifact identity 与完整性 fail closed
+- mapping 点受冻结 valid region 约束
 
-当前分支没有把 `raman-focus-plane` 注册为 `main` 中的 canonical profile，也没有 source /
-representation descriptor。这里的 `profile` 是 payload 自描述字段，`kind` 是当前 ArtifactRef 类型。
+尚未保证：
 
-## 4. 跨 run 引用
-
-校正 mapping 的冻结 spec 保存：
-
-```ts
-{
-  kind: "focus_plane"
-  calibrationRunId: string
-  artifactId: string
-  checksum: string
-  coefficients: { a: number; b: number; c: number }
-  validRegion: Array<{ anchorId: string; xUm: number; yUm: number }>
-  localAutofocusHalfRangeUm: 40
-}
-```
-
-preflight、simulation runtime 和 live runtime 都按 `calibrationRunId + artifactId` 定位原 Artifact，
-并重新验证：
-
-- ArtifactRef `kind = raman-focus-plane`
-- payload `profile = raman-focus-plane`
-- payload `calibrationRunId` 与引用一致
-- 文件 SHA-256 与冻结 checksum 一致
-- payload model coefficients 与冻结 coefficients 完全一致
-- payload validRegion 与冻结 validRegion 完全一致
-
-任一检查失败时返回 `focus_plane_artifact_missing` 或 `focus_plane_artifact_mismatch`，不得静默退回固定 Z。
-runtime 不按时间戳或目录扫描推断“最近一次模型”。
-
-## 5. 当前保证与后续边界
-
-当前实现保证：
-
-- calibration 和 mapping 分属不同 run 和 approval
-- 五点证据与 waypoint evidence 分离
-- live calibration 模型 payload 不可覆盖
-- mapping 对原模型做 identity / checksum / coefficients / region 校验
-- mapping 点必须位于 calibrated convex region
-
-当前实现尚未声明：
-
-- sample identity
-- stage coordinate-frame identity
-- algorithm version
-- canonical representation lifecycle
+- sample / coordinate-frame identity
+- algorithm versioned provenance
 - source artifact 与 normalized representation 分层
-- 独立的 condition metric 或 residual acceptance threshold
+- canonical profile registry
+- 独立 residual acceptance policy
 
-这些字段如果未来随 `main` 的 Run Records 架构迁入，应作为新的明确增量实现并同步 validator；
-不能只把目标字段写进本文档而让当前 artifact 假装已经提供。
+这些能力需要新的 schema、validator 和迁移设计，不能只在 payload 中添加未经执行层保证的字段。

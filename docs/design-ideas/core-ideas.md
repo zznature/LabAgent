@@ -1,159 +1,141 @@
-# LabAgents MVP design
+# LabAgents MVP 核心设计
 
-## Product Capabilities
+本文只冻结 LabAgents MVP 的产品方向和架构边界。具体 schema、Raman 参数、运行算法与实施状态由专题文档定义，不在总纲中重复；文档索引与职责见 `README.md`。
 
-用户以自然语言提出研究目标，agent 把它收敛为一份可执行的实验规划——一组有序、具体的实验步骤（procedure）——并由类似 pymeasure 的确定性 kernel 执行。agent 同时协助完成参数整理、运行组织与结果回流。
-LabAgents 当前阶段不把安全、审批、审计一次性做完整，而是先把 agent 的实验规划与实验操作能力搭起来，让真实实验操作过程尽量顺畅可用。
+## 1. 产品命题
 
-当前版本优先具备以下特征：
+LabAgents 要把自然语言研究目标变成可审查、可执行、可恢复的实验运行：
 
-1. **目标可表达**  
-   用户可以用自然语言描述实验目的、假设与约束，系统能够将其整理为结构化研究意图。
+```text
+用户表达研究目标
+-> agent 收敛声明式实验方案
+-> 用户批准一次有界运行
+-> 确定性 kernel 托管执行
+-> 状态、错误与产物回流
+-> agent 协助分析和规划下一步
+```
 
-2. **规划可落地**  
-   用户目标能够被整理、补全并转成 agent 可以持续使用的实验规划与执行输入，而不是停留在聊天层。
+当前 MVP 以 Raman 为第一条真实纵向切片，已经覆盖 simulation 与 `live-supervised` 下的单点采集、有界参数搜索、焦平面校准和 mapping。Raman 用来验证通用边界，不是最终架构本身。
 
-3. **操作可顺畅**  
-   系统应优先支持实验操作本身顺畅进行，包括参数准备、运行发起、过程观察和必要的人工介入。
+产品目标不是让 LLM 自主控制实验室，而是让 agent 的实验规划真正落到硬件，同时把执行状态、安全边界和恢复责任留在确定性系统中。
 
-4. **能力可理解**  
-   系统对上暴露的是语义化实验能力，而不是零散底层驱动命令，便于 agent 规划、人类审查与安全验证。
+## 2. 六条核心原则
 
-5. **运行可托管**  
-   长周期实验仍应由 kernel 托管，具备基本的异步观测、暂停/中止、恢复与状态追踪能力。
+1. **从研究意图开始，而不是从脚本开始。**
+   用户描述目标、假设、约束和成功条件；系统不要求用户先写执行步骤或驱动命令。
 
-6. **安全与审计最小化设计**  
-   当前版本安全与审批仅做最小（整次 run 审批一次 + 冻结方案 + 两类明确危险硬限制），审计能力仍不完整，重点是先验证 agent 是否真正具备实验规划与操作能力；更严格的安全闭环留给后续版本。
+2. **agent 负责规划，kernel 负责执行。**
+   agent 补全参数并提出实验方案；kernel 将批准后的方案编译成有限执行单元，管理状态机并调用 runtime。LLM 不进入执行热路径。
 
-## Core Ideas
+3. **对上暴露实验语义，对下隔离设备细节。**
+   agent 面向采谱、对焦、移动和 mapping 等语义能力；串口、SDK、文件桥和 driver session 留在 runtime / driver 层。
 
-1. **用户先描述想做什么实验。**
-系统首先接收的是用户的实验目标、假设和约束，而不是已经写好的执行脚本。当前阶段最重要的是把这种自然语言输入转成 agent 可以继续处理的实验任务。
+4. **一次 bounded run 是执行与批准的基本单位。**
+   每次真实实验都有明确范围、资源、限制、停止条件和预计产物。新 run 需要新批准；已批准 run 内不热改方案，也不无界扩大搜索。
 
-2. **agent 负责产出实验规划和具体实验步骤。**
-agent 的核心职责是理解用户意图，整理实验思路，补全必要参数，并把目标收敛成一份可执行的实验方案。这里既包括较高层的实验规划，也包括更具体的步骤组织。
+5. **运行事实必须结构化、持久化并可恢复。**
+   进度、错误、attempt、heartbeat 和 artifact 不能只存在于对话或设备进程内存中。长时运行由 kernel 托管，支持观察、暂停、中止和受控恢复。
 
-3. **kernel 像 PyMeasure 一样执行 agent 给出的实验方案。**
-一旦实验方案确定，真正的执行应交给确定性的 kernel。kernel 更像实验执行器，而不是规划器：它负责将实验方案编译为内部执行单元、按步骤运行、调用仪器、管理运行状态，并尽量避免让 LLM 进入执行热路径。
+6. **人提供实验判断，不充当协议搬运工。**
+   人负责补充实验信息、审查方案、批准危险动作和处理真实异常。系统已经持有的 spec、hash、run state 和诊断信息不得要求人或 agent 重复提供；终态和可行动错误应主动回流。减少这类往返不等于放宽批准或硬限制。
 
-4. **agent 面向实验语义，kernel 面向执行。**
-agent 理解的是“采谱、对焦、移动到点位、做 mapping”这类实验动作与实验目的；kernel 负责把这些动作稳定落到真实执行。底层驱动细节不应直接成为 agent 的主要工作对象。
+## 3. 核心数据边界
 
-5. **当前阶段先把链路跑通，再逐步补强外围能力。**
-这一版优先验证“用户提出实验目标 -> agent 生成方案 -> kernel 执行方案”这条主链路是否顺畅可用。更复杂的安全、审批、审计和完整运行治理能力可以后续再补。
+主链路只有三个核心交互对象；`ExecutionUnit[]` 是 kernel 的派生运行时对象，不是第四个用户或 planner 对象。
 
-## Core Data Boundaries
+| 对象 | 回答的问题 | 边界 |
+| --- | --- | --- |
+| `ExperimentIntent` | 用户想解决什么研究问题？ | 表达目标、假设、约束和成功条件；影响规划，但不进入 kernel 执行 |
+| `ProcedureSpec` | agent 准备怎样做这次实验？ | 声明 procedure、资源引用、计划、领域参数、limits、停止与重试规则；是 kernel 的唯一方案输入 |
+| `ExecutionUnit[]` | kernel 下一步执行哪些有限单元？ | 只能由 kernel 从 `ProcedureSpec` 编译，用于进度、artifact 命名和 pause / resume 边界 |
+| `RunState` | 这次运行实际进行到哪里？ | 由 kernel / runtime 产生，记录状态、进度、错误、attempt 和 artifact refs；planner 不得预写 |
 
-为了让“用户提出实验目标 -> agent 生成实验方案 -> kernel 执行方案”这条主线保持清楚，当前阶段推荐只保留三层核心对象，并让每层分别回答不同问题：
+必须保持以下不变量：
 
-1. **`ExperimentIntent`**
-   回答“用户想做什么实验”。它用于表达研究目标、假设、约束和这一轮实验想解决的问题。它属于用户目标和研究意图层，不直接进入 kernel。
+- 用户批准后，kernel 只执行被冻结 `ProcedureSpec` 编译出的 units。
+- `ExecutionUnit[]` 不由用户或 planner 直接编写，也不展开为底层设备协议。
+- kernel 不直接消费 `ExperimentIntent`；agent 通过 `ProcedureSpec` 把意图转成执行输入。
+- 用户目标、agent 方案与 kernel 运行事实不得混写。
 
-2. **`ProcedureSpec`**
-   回答“agent 准备怎么做这个实验”。它承载 agent 产出的实验方案和具体步骤，包括执行哪个 procedure、参数是什么、资源是什么、停止条件是什么。它是 kernel 的直接执行输入。当前阶段两类明确危险（样品撞镜头、激光功率过高）以约束字段（`limits`）随 spec 携带，不单独建模为独立核心对象。
+`ExperimentProcedureTemplate` 是 planner 侧参数先验；硬件配置是 runtime 上下文；proposal、approval 和 artifact records 是辅助契约。它们都不应被提升为新的核心对象，也不应污染 `ProcedureSpec`。
 
-3. **`RunState`**
-   回答“kernel 现在把实验执行到哪里了”。它表达运行过程中的真实状态，例如进度、heartbeat、unit 状态、pause/abort 和 artifacts。它属于运行时真相，不属于实验方案本体。
+artifact 是 runtime 产生的实验事实。大文件通过结构化 `ArtifactRef` 回流；跨 run 引用必须显式绑定 identity 和完整性信息，不能靠目录扫描、文件名猜测或聊天记忆选择“最近结果”。
 
-当前建议保持以下边界习惯：
+## 4. 端到端运行契约
 
-- `ExperimentIntent` 可以影响 `ProcedureSpec`，但不能直接执行。
-- `ProcedureSpec` 是 agent 交给 kernel 的方案，而不是运行中的状态记录。
-- `RunState` 只能由 runtime 产生，不能由 planner 预写。
-- kernel 只消费 `ProcedureSpec`，不直接消费 `ExperimentIntent`。
+当前 MVP 的正式路径是：
 
-> 注：更完整的运行准入、监督、lease 和危险控制，不作为独立核心对象建模；这一版先把主链路的数据分层讲清楚。
->
-> 注：硬件能力与实验环境状态（见 Context management）由 runtime 作为上下文提供，
-> 不建模为这一层的交互对象；它们影响规划与准入校验，但不由 planner 写入。
+```text
+ExperimentIntent
+-> draft ProcedureSpec
+-> validate + preflight
+-> proposal { proposalId, specHash }
+-> operator approves the exact proposal
+-> freeze ProcedureSpec
+-> compile ExecutionUnit[]
+-> execute through runtime
+-> RunState + events + artifacts
+-> terminal summary
+```
 
-更具体的对象模型、字段归属与关系定义见 `core-object-model.md`。
+这条路径有四个关键约束：
 
-## Context management
+1. **修改就是新提案。**
+   pending proposal 的参数修改产生新的 `proposalId + specHash`，旧批准不继承。
 
-当前阶段，实验 Agent 的 context 不需要追求复杂体系化管理，重点是把实验规划和实验操作真正依赖的上下文保留下来。与普通 Agent 相比，至少有三类信息不能丢：
+2. **恢复不等于重启。**
+   paused run 从持久化的当前 unit 继续，重新读取冻结 spec 并校验 unit identity；调用方不能借 resume 重传 spec 或任意跳点。
 
-1. **硬件能力信息** — agent 至少要知道当前有哪些仪器、能做哪些实验动作、哪些动作是假的、哪些动作能连到真实设备。
+3. **错误必须可行动。**
+   agent 可见摘要直接包含 error code、可理解 message 和关键数值。结构化诊断不能只藏在内部 details 或 event log。
 
-2. **当前实验环境信息** — agent 需要知道实验室当前资源和设备状态，否则规划出来的步骤很容易不可执行。
+4. **终态主动回流。**
+   paused、failed、completed 和 aborted 主动通知会话；`poll` 仍可用于查询，但人不应靠反复轮询推动协议。
 
-3. **运行与结果信息** — 已经做过什么、当前 run 到哪里、产物放在哪，这些信息不能只靠对话记忆，至少要有结构化记录可回看。
+## 5. 上下文与仪器接入
 
+实验 agent 不能只依赖对话记忆。当前至少保留四类结构化上下文：
 
-## Instrument Integration
+- **实验室能力与稳定配置**：有哪些资源、语义动作和硬边界。
+- **当前环境状态**：设备是否 ready、当前位置和控制权是否可用，由 runtime 读取。
+- **规划先验**：workspace-local 实验模板提供可覆盖的默认参数，不进入可执行 spec。
+- **运行与结果**：冻结 spec、`RunState`、append-only events 和 artifacts 分开持久化。
 
-当前阶段，仪器接入的重点不是先把完整执行架构定义得很漂亮，而是让 agent 能基于稳定接口完成实验规划和实验操作。它不应只是“把协议包装成一组 tool”，但也不必一开始就展开成过重的体系。
+真实仪器按下面的单向依赖接入：
 
-当前文档分工建议固定为：
+```text
+resource config
+-> device driver
+-> bounded runtime action
+-> planner / operator tool surface
+```
 
-- `kernel-execution-model.md`
-  - 说明 kernel 如何把 `ProcedureSpec` 编译成 `ExecutionUnit[]`，以及 run lifecycle、runtime contract、pause / abort / resume 边界
-- `raman-hardware-adapter-contract.md`
-  - 说明以 Raman 为样板，真实硬件资源、driver、composite action 与 planner/operator tool surface 应如何接入
+- planner-facing surface 用于形成、验证和发起实验方案，不暴露驱动原语。
+- operator-facing surface 用于状态读取、维护和诊断；有副作用的维护动作仍需确认并受 runtime hard limits 约束，但不必伪装成完整实验 run。
+- 长周期、多点 workflow 属于 kernel，不能藏在 Python loop、tool callback 或 daemon 内。
+- simulation / fake runtime 必须遵守同一 schema、状态机和错误契约，使无硬件开发能验证真实执行边界。
 
-### 接入与调用要点
+## 6. 当前安全边界
 
-1. **优先暴露语义化实验动作**：GPIB/USB/VISA 等底层协议不直接暴露给 agent。当前更重要的是让 agent 面向“采谱、对焦、移动、mapping”这类实验动作，而不是直接拼底层命令。
+`live-supervised` 表示真实硬件运行必须经过人工审查与批准；它目前不证明监督者物理在场，也不是完整 safety system。
 
-2. **执行入口尽量统一**：真实运行最好还是通过结构化执行输入进入执行层，避免不同仪器各自暴露一套临时调用方式，后面难以维护。
+MVP 已冻结的最小边界是：
 
-3. **先把状态回传做实用**：比起复杂建模，当前更重要的是每次操作后能拿到足够有用的结果，例如是否成功、当前位置、耗时、生成了哪些产物。
+1. 启动前要求 preflight ready 且设备控制可用。
+2. operator 审查精确 proposal，并确认对应 `proposalId + specHash`。
+3. 启动后冻结 `ProcedureSpec`，run 内不热改、不自动扩大范围。
+4. 运动范围 / 物镜净空与激光功率由 runtime / driver 执行硬限制，批准不能绕过。
+5. 风险使用 `notice / confirm_required / forbidden` 三档参与准入判断。
+6. operator 可以在安全边界 pause / abort；live resume 仍需明确确认。
+7. 独立的 effectful maintenance action 逐次确认，并继续受相同硬件边界约束。
 
-4. **长时操作不要卡死在前台**：扫描、等待稳定、长时间采集这类操作需要有基本的异步观测能力，避免 planner turn 被长时间阻塞。
+当前明确不声称已经具备：
 
-5. **错误先做到可判断、可恢复**：当前不必先做完整错误体系，但至少要区分“能否重试”“是否需要人工介入”“是否应该停止当前 run”。
+- 监督者物理在场校验
+- 通用规则 watchdog
+- 多 agent 设备 lease 仲裁
+- 多角色审批
+- 自主连续发起多个真实 run
+- 完整的审计与 canonical artifact lifecycle
 
-6. **保留 fake / mock 路径**：没有硬件时仍然要能调试 agent 的规划和操作链路，否则开发成本会过高。
-
-**当前阶段的核心原则**：仪器接入首先服务于 agent 的实验规划与实验操作能力验证。只要能稳定暴露语义能力、统一执行入口、返回足够有用的状态，并保留无硬件调试路径，这一阶段就算达到目标。
-
-更具体的 kernel 执行模型见 `kernel-execution-model.md`；真实硬件接入样板见 `raman-hardware-adapter-contract.md`。
-
-## Safety
-
-本节描述的是 LabAgents 希望逐步收敛到的安全目标态，不代表当前版本已经把这些机制完整实现。当前阶段仍以验证 agent 的实验规划与实验操作能力为主，安全机制会先围绕最小危险场景逐步补齐。
-
-其中，整次 bounded run 的「审批一次 + 冻结方案」与两类明确危险的运行时硬限制，已纳入当前 MVP 主链路；规则看门狗、设备 lease、监督人在场与多角色审批仍属目标态。
-
-目标态上，LabAgents 将优先收敛到一种安全模型：**有人监督的 `live-supervised` 运行**。
-系统目标不是让 agent 自主控制实验，而是把 agent 约束为受监督的执行助手。后续版本的最小 safety 设计优先防三类最现实的错误：
-
-1. 在实验室或设备未 ready 时启动 run
-2. 运动越过安全边界，导致样品撞镜头
-3. 激光功率过高，导致样品受损
-
-其中第 1 类属于**准入问题**，由启动前检查（admission）拦截；第 2、3 类才是需要 hazard 约束硬限制的「两类明确危险」，与前文 Core Data Boundaries 所说的两类一致。
-
-### 目标态三层安全体系
-
-1. **确定性内核** — 所有硬件指令由 kernel 发出，LLM 不直连硬件。
-2. **规则看门狗** — 非 LLM 的规则引擎实时监控运行状态，仅具备暂停/中止权限。
-3. **监督操作者** — 人负责在启动前审查并批准整次 bounded run，并在需要时暂停/中止。
-
-目标态上，安全验证也分层放置：主要针对 semantic capability、`ProcedureSpec` 和 `RunPolicy` 做高层与准入校验；runtime / driver 负责最终硬防线。工具接口不是唯一安全边界，更不是全部安全语义的承载层。
-
-### Target Safety Rules
-
-当前版本不做复杂审批流，也不做 agent-autonomous mode。后续收敛时，`RunPolicy` 会优先承载以下最小约束（标注 `[MVP]` 的已纳入当前主链路，`[目标态]` 仍待后续版本）：
-
-1. **固定 mode gate** `[目标态]` — 仅允许 `live-supervised`。
-2. **最小 admission** `[MVP·缩减]` — MVP 启动前须满足：执行前检查已通过、当前设备控制权可用。「监督人在场」属目标态，MVP 暂不强制。
-3. **整次 bounded run 审批一次** `[MVP]` — 用户在启动前审查完整 `ProcedureSpec` 并确认；run 内不再对每个 effectful step 单独确认。
-4. **确认后冻结方案** `[MVP]` — 一旦启动，kernel 只允许执行已批准 `ProcedureSpec` 编译出的 units；运行中不做热路径重规划或偷偷改 spec。
-5. **两类明确危险仍由硬限制约束** `[MVP]` — 样品撞镜头和激光功率过高仍属于运行时硬边界，不因为用户已批准 run 就放弃底层防线。
-6. **设备控制 lease** `[目标态]` — live run 启动后获取独占控制权；lease 释放前不允许新的 live run 抢占。
-7. **人工可随时接管** `[MVP·部分]` — 监督人可以 pause / abort（MVP 已支持）；watchdog 异常中止仍属目标态。
-
-### `RunPolicy` 的目标最小语义
-
-在 supervised MVP 的目标态里，`RunPolicy` 不是通用 policy engine，而是一次 run 的最小安全契约。它至少需要表达：
-
-- 当前 run 是否绑定 `live-supervised`
-- 是否要求监督人在场
-- 启动前是否已经通过执行前检查并持有当前设备控制权
-- 当前 run 是否已经获得整次 bounded run 审批
-- 审批后的 `ProcedureSpec` 是否被冻结为唯一执行输入
-- 哪些明确危险需要硬限制
-- 需要持有哪些设备控制 lease
-
-风险提示的简单三级分类（`notice` / `confirm_required` / `forbidden`）属 **MVP**，用于在启动前判定动作是提示、需确认还是拒绝。更复杂的风险分级、多角色审批、跨 run 安全白名单仍属目标态，先不进入这一版。
+这些能力只有在真实需求出现并冻结新契约后才进入设计；不提前引入通用 policy engine 或新的核心对象。

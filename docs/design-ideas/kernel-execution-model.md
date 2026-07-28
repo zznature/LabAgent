@@ -1,460 +1,205 @@
-# Kernel 与仪器运行时集成设计
+# Kernel 执行模型
 
-本文只回答一个问题：
+本文定义 kernel 如何把已批准的 `ProcedureSpec` 托管为可观察、可中断、可恢复的实验运行。硬件资源、driver 与 Raman action 由 `raman-hardware-adapter-contract.md` 定义。
 
-> 当 Agent 已经产出 `ProcedureSpec` 之后，kernel 应该如何把它稳定执行成真实实验运行？
+## 1. 职责边界
 
-它强调的是 **kernel 设计**，不是某一类具体硬件如何接线、如何写 driver、如何暴露 tool。
+kernel 负责：
 
-文档分工如下：
+- 校验准入并冻结批准后的 spec
+- 将 `ProcedureSpec` 编译为稳定 `ExecutionUnit[]`
+- 选择确定性执行策略
+- 推进 run lifecycle
+- 持久化 `RunState`、events 与 artifact refs
+- 协调 pause、abort、resume、retry 与点间等待
+- 把 runtime 结果折叠成实验级状态
 
-- `kernel-execution-model.md`
-  - 重点：kernel、`ExecutionUnit`、run lifecycle、runtime contract
-- `raman-hardware-adapter-contract.md`
-  - 重点：Raman 这类真实硬件怎样注册、封装、映射为 runtime action / tool
+kernel 不理解研究假设，不生成实验方案，不持有 driver session，也不让 LLM 进入 unit 执行热路径。
 
-## 1. 第一性原理
-
-先把整个链路拆开：
-
-- User 负责表达研究目标
-- Agent 负责把目标收敛为 `ProcedureSpec`
-- Kernel 负责把 `ProcedureSpec` 托管执行
-- Runtime / Driver 负责控制真实硬件
-
-如果 kernel 不明确拥有执行边界，系统会退化成两种坏形态之一：
-
-1. Agent 直接调硬件脚本
-2. Python 硬件脚本偷偷持有整个实验 workflow state
-
-这两种都不符合当前设计目标。
-
-因此 kernel 必须坚持四个原则：
-
-1. **`ProcedureSpec` 是唯一执行输入**
-2. **kernel 拥有实验级 workflow state**
-3. **runtime 只负责设备级动作，不负责实验级编排**
-4. **pause / abort / resume 必须围绕 kernel 的执行边界定义**
-
-## 2. Kernel 真正负责什么
-
-kernel 更像实验执行器，而不是研究规划器。
-
-它负责：
-
-- 接收 `ProcedureSpec`
-- 验证其可编译性和执行边界
-- 将 plan 编译成 `ExecutionUnit[]`
-- 在 unit 边界推进执行
-- 持久化 `RunState`、events、artifacts
-- 响应 pause / abort / resume
-- 将 runtime 的设备结果折叠回实验级状态
-
-它不负责：
-
-- 理解研究假设
-- 生成实验方案
-- 持有底层设备连接
-- 直接暴露底层 driver 命令给 Agent
-
-一句话说，kernel 回答的是：
-
-> 这份实验方案应该按什么顺序、以什么恢复边界、通过什么状态机被执行？
-
-## 3. 对象流
-
-推荐把主链路收紧成下面这条：
+## 2. 编译契约
 
 ```text
-ExperimentIntent
-  -> ProcedureSpec
-  -> compileUnits()
-  -> ExecutionUnit[]
-  -> execute units via runtime
-  -> RunState / events / artifacts
+frozen ProcedureSpec
+-> normalize plan
+-> expand finite units
+-> attach actions, limits and metadata
+-> validate domain invariants
+-> ExecutionUnit[]
 ```
 
-边界要非常明确：
+当前 plan 编译：
 
-- `ExperimentIntent` 不进入 runtime
-- `ProcedureSpec` 不包含运行中状态
-- `ExecutionUnit[]` 只能由 kernel 派生
-- `RunState` 只能由 runtime + kernel 共同产生，不能由 planner 预写
+| plan | 编译结果 |
+| --- | --- |
+| `current_position` | 一个 positionRef=current 的 point unit |
+| `point_list` | 显式 points 或 line generator 展开的 point units |
+| `grid_scan` | row-major 或 snake point units |
+| `focus_plane_calibration` | progressive XY waypoints 与五个 fit anchors |
 
-## 4. `ProcedureSpec` 在 kernel 看来应该是什么
+编译必须保证：
 
-对 kernel 而言，`ProcedureSpec` 是一份**声明式实验方案**，不是脚本。
+- unit ID、index、resume key 和 artifact scope 稳定。
+- actions 停留在 `move_to_point / autofocus / capture_frame / acquire_spectrum` 语义层。
+- spec limits 被带入每个 unit；runtime/driver 仍承担最终硬防线。
+- focus-corrected mapping 点位于冻结有效区域内，并写入 predicted Z。
+- 未校正 mapping 的每个点有显式固定 Z。
+- autofocus 完整窗口位于 approved Z limits 内。
+- calibration 不能被 `maxUnits` 截断到无法发布模型。
+- 编译结果通过 `ExecutionUnit` schema 校验。
 
-它应该表达：
+## 3. Proposal、准入与冻结
 
-- procedure 类型
-- resources
-- limits
-- plan
-- stopping rules
-- retry policy
-- typed domain params
+proposal store 已保存完整 spec 与 `specHash`。批准调用只提交：
 
-它不应该表达：
-
-- Python method name
-- 串口命令
-- driver 命令序列
-- 任意 `for / while / if`
-
-kernel 关心的不是 `ProcedureSpec` 的文案，而是它能否被稳定展开成有限、明确的执行单元。
-
-### 4.1 实验失败重试策略
-
-实验失败重试属于 `ProcedureSpec` 的协议语义，由 kernel / execution scheduler 确定性执行。它不属于 agent 运行时推理，也不属于 runtime / driver 的局部脚本状态。
-
-MVP 仅支持 point-level Raman mapping 的失败重试，策略名固定为：
-
-```ts
-retryPolicy: {
-  mode: "immediate_then_final"
-  maxImmediateRetriesPerPoint: 1
-  maxFinalRetriesPerPoint: 1
-  finalRetryOrder: "failure_order"
-  retryableFailureReasons: {
-    execution: ["timeout"]
-    quality: ["low_focus_confidence"]
-  }
-}
+```text
+proposalId + specHash + execution mode
 ```
 
-语义规则：
+`live-supervised` 还要求：
 
-- `execution` failure 表示执行流程失败，例如采集超时。
-- `quality` failure 表示动作完成但数据质量不达标，例如聚焦置信度低。
-- scheduler 先执行主扫描；每个点遇到可重试失败时，最多立即重试 `maxImmediateRetriesPerPoint` 次。
-- 只有已经用完 immediate retry 后仍失败、且最后一次失败仍属于策略表的点，才进入 final retry queue。
-- final retry queue 在所有正常点位完成后按失败发生顺序执行，最多重试 `maxFinalRetriesPerPoint` 次。
-- 每次 attempt 都必须进入 run history；成功 attempt 决定该点最终成功，失败 attempt 不被覆盖。
+- `preflightReady = true`
+- `controlAvailable = true`
+- operator acknowledgement 精确复述 proposal ID 与 hash
 
-MVP 策略表只启用：
+通过后，kernel 保存或复用同 hash 的 frozen spec，再启动 run。proposal 不存在、已批准/被替代、hash 不匹配或 frozen spec 内容不一致都 fail closed。
 
-- `execution.timeout`
-- `quality.low_focus_confidence`
+`revise_proposal` 对 pending spec 应用 merge patch、重新校验并产生新 proposal；旧 proposal 进入 `superseded`，批准不继承。
 
-后续可以扩展更多质量失败原因，例如 low signal-to-noise、saturation、missing peak 或 cosmic ray artifact，但不能把 retry 判断写成散落在 agent prompt 或 driver callback 里的临时逻辑。
+## 4. Run lifecycle
 
-### 4.2 点间等待策略
+状态集合：
 
-重复采集、mapping 或时间序列实验有时需要在两个测试点之间保持固定等待时间。这个等待属于 `ProcedureSpec.plan` 的调度语义，而不是某个 driver action 的 timeout，也不是 acquisition 参数。
-
-MVP 支持在 `point_list` 和 `grid_scan` plan 上声明：
-
-```ts
-interPointDelayMs: number
+```text
+queued -> running -> completed
+                  -> paused -> running
+                  -> failed
+                  -> aborted
 ```
 
-语义规则：
+关键操作：
 
-- kernel 在当前 point unit 完成后、下一个 point unit 开始前等待。
-- 最后一个 unit 之后不等待。
-- 等待期间仍刷新 heartbeat，并响应 pause / abort 请求。
-- `current_position` 单点 plan 不使用该字段。
-- 该字段只表达 unit 边界上的确定性等待，不允许表达任意循环、条件分支或 driver 命令序列。
+- start：创建 base `RunState`，异步执行 units。
+- poll / summarize：读取持久化快照，不依赖内存 active run。
+- pause：在 unit/action checkpoint 或点间等待边界生效。
+- abort：终止剩余 units，不用于“暂停后继续”。
+- resume：从 paused unit 继续，不重置已有 progress、attempts 或 artifacts。
 
-## 5. `ExecutionUnit` 为什么是 kernel 核心对象
+pause/abort 请求不能靠中断前台函数模拟；runtime action 必须返回明确状态，kernel 在认可边界更新 run truth。
 
-`ExecutionUnit` 是 kernel 的核心，不是附属实现细节。
+## 5. Resume 契约
 
-原因很简单：
+resume 只接受 `runId`：
 
-- 没有 unit，就没有稳定的 pause / resume 边界
-- 没有 unit，就没有可靠的 progress
-- 没有 unit，就没有明确的 artifact 命名锚点
-- 没有 unit，运行状态会再次退化成“某个脚本跑到哪了”
+1. 读取 paused `RunState`。
+2. 读取磁盘上的 frozen `ProcedureSpec`。
+3. 重新编译并应用原 `maxUnits` 边界。
+4. 校验 `units[currentUnit.index].unitId` 与快照一致。
+5. 从该 index 重建 active run，并保留原状态数据。
 
-建议 `ExecutionUnit` 回答的问题是：
+禁止：
 
-> 当前这份实验方案，下一次最小可托管执行块是什么？
+- 调用方重传或修改 spec
+- 指定任意 resume index
+- 用 abort + re-propose 冒充继续
 
-### 5.1 推荐字段
+`live-supervised` resume 会重新触发真实硬件动作，因此工具先展示恢复 unit/坐标，再要求 `confirmed=true`。
 
-最小建议：
+## 6. 执行策略
 
-- `unitId`
-- `index`
-- `unitKind`
-- `point?`
-- `actions`
-- `resumeKey`
-- `artifactScope`
+### 6.1 Linear
 
-### 5.2 推荐粒度
+单点与 calibration 按 unit 顺序执行。任一未处理 failure 使 run failed；operator pause 或 runtime paused 使 run paused。
 
-MVP 阶段优先选择**point-level** 或 **step-sequence-level** unit。
+### 6.2 Parameter search
 
-例如 Raman mapping：
+- attempts 由批准 envelope 与 `maxAttempts` 有限生成。
+- 每次 acquisition 参数必须落在 envelope 内。
+- 每次结果必须带结构化 observation metrics。
+- 显式规则返回 `acceptable`、`continue_search_within_envelope` 或 `stop_and_request_user_decision`。
+- acceptable 提前完成；需要用户判断时 pause；不存在自由发挥或无界扩展。
 
-- 一整个 mapping 不是一个 unit
-- 一个 point 是一个 unit
-- 一个 point 内的多个设备动作由 kernel 顺序协调
+### 6.3 Mapping
 
-不建议：
+mapping 使用 point-level attempt history：
 
-- 把整张扫描表交给 runtime 一次跑完
-- 把每个硬件微步都提升成 kernel unit
+1. initial attempt
+2. policy 允许时的 immediate retry
+3. 主扫描结束后的 final retry queue
 
-前者恢复边界太粗，后者执行面会碎到难以维护。
+当前可重试分类只有 timeout 和 low focus confidence。最终失败可按 `stopOnError` 立即结束，或记录失败点继续；连续失败达到 `maxConsecutiveFailures` 时 run failed。
 
-### 5.3 Focus-plane calibration 与 mapping unit
+已完成点、失败点和每次 attempt 都写入状态/事件，成功 retry 不覆盖先前失败证据。
 
-`raman_focus_plane_calibration` 与 `raman_grid_mapping` 必须编译成两组不同 run 的 point units：
+## 7. 点间等待与控制请求
 
-- calibration spec 冻结提案时当前位置为 `startPosition` 和用户给出的四角；缺省时使用该位置为中心的 1000 µm 正方形。
-- center 是四角的算术中心，只有 `center + corner_1..4` 五个 accepted autofocus 进入平面拟合。
-- compiler 从冻结的 `startPosition` 开始，并在所有相邻目标间按 `maxXySpanUm` 插入有限 progressive waypoint；waypoint autofocus 提供导航和恢复证据，但不进入拟合。
-- calibration unit 的初始 Z 来自 seed；后续 unit 从该 run 已持久化的最近 accepted autofocus artifact 恢复 Z，而不是依赖 daemon 内存。
-- calibration 最后一个 anchor 完成后发布一个 `raman-focus-plane` artifact，包含五点证据、`z = a*x + b*y + c`、有效凸区域和 SHA-256。
-- mapping spec 必须冻结 `{ calibrationRunId, artifactId, checksum }`、模型系数、有效区域和 `localAutofocusHalfRangeUm = 40`。
-- compiler 只允许有效凸区域内的 mapping 点，并把 Predicted Focus Z 写入每个 point unit。
-- runtime 每个 mapping unit 都重新校验 artifact identity、checksum 和冻结系数，先移动到 Predicted Focus Z，再在 ±40 µm 内 autofocus。
+`grid_scan` 和 `point_list` 可声明 `interPointDelayMs`：
 
-两组 units 分别经过 `propose_run -> approve_and_start_run`；校准完成不构成 mapping motion approval。
-新的 mapping proposal 默认必须引用 focus-plane artifact；只有用户明确拒绝时才允许冻结 `{ kind: "disabled", reason: "user_declined" }`。
+- 当前 unit 完成后、下一 unit 开始前等待。
+- 最后一个 unit 后不等待。
+- 等待期间继续响应 pause/abort。
+- 它是调度语义，不是 driver timeout 或通用 sleep step。
 
-## 6. kernel 编译阶段应做什么
+## 8. Runtime contract
 
-`compileUnits()` 至少要做六件事：
+kernel 向 runtime 提交：
 
-1. **规范化 plan**
-   - 统一 `grid_scan`、`point_list`、`step_sequence`
+- current unit
+- frozen spec context
+- semantic action
+- timeout/cancel 约束
+- strategy-specific override（例如 parameter-search acquisition）
 
-2. **展开声明式结构**
-   - `grid_scan -> point units`
-   - `step_sequence -> step units`
+runtime 返回：
 
-3. **绑定语义动作模板**
-   - 为每个 unit 生成固定 action 列表
-
-4. **注入执行元数据**
-   - `unitId`
-   - `index`
-   - coordinates
-   - artifact scope
-   - resume cursor
-
-5. **落地限制约束**
-   - 激光上限
-   - 运动边界
-   - 域内 guard
-   - calibration ±100 µm 与 mapping ±40 µm 的完整 Z 搜索窗口必须位于运行和 stage hard limits 内
-
-6. **形成恢复边界**
-   - 明确哪些边界可以自动 resume
-   - 哪些边界只能 pause 后等待人工处理
-
-编译结果允许停留在**语义 action 层**，不应直接变成 driver 命令流。
-
-允许：
-
-- `move_to_point`
-- `autofocus`
-- `acquire_spectrum`
-
-不允许：
-
-- `serial_write`
-- `set_register`
-- `write_request_file`
-
-## 7. kernel 与 runtime 的正式契约
-
-kernel 和具体硬件之间必须隔着 runtime contract。
-
-kernel 不应该直接 import 某个具体 driver，也不应该知道某个设备是用 SDK、文件桥还是 VISA。
-
-### 7.1 kernel 向 runtime 提交什么
-
-建议 kernel 只提交：
-
-- `ExecutionUnit`
-- 当前 `RunContext`
-- unit 内要执行的语义 action
-- timeout / cancel / checkpoint 约束
-
-### 7.2 runtime 向 kernel 返回什么
-
-至少要返回：
-
-- `ok / failed / paused`
-- action / unit 级 summary
+- `completed / failed / paused`
 - artifacts
-- progress
-- typed error code
-- `retrySafe`
-- `needsOperator`
-- `safeToResume`
+- observation/evaluation data
+- structured error
 
-### 7.3 kernel 不应该看到什么
-
-kernel 不应该看到：
-
-- 具体 SDK object
-- 文件桥目录轮询细节
-- request filename
-- channel number
-- traceback 文本作为主要控制信号
-
-kernel 看到的应该始终是**结构化执行结果**。
-
-## 8. run lifecycle 必须由 kernel 拥有
-
-只要运行生命周期不在 kernel 手里，所谓托管执行就是假的。
-
-推荐收紧成下面这组状态：
-
-- `queued`
-- `running`
-- `paused`
-- `aborted`
-- `failed`
-- `completed`
-
-以及下面这组关键操作：
-
-- `start(runId, spec)`
-- `pause(runId)`
-- `abort(runId)`
-- `resume(runId)`
-- `poll(runId)` 或事件订阅
-
-### 8.1 pause / abort 语义
-
-pause / abort 必须在 kernel 认可的安全边界生效：
-
-- unit 边界
-- action checkpoint
-- runtime 明确宣称可中断的动作点
-
-不能依赖“中断当前前台函数调用”来代替 run cancellation。
-
-### 8.2 resume 语义
-
-resume 只能发生在显式受支持的边界：
-
-- 上一个 completed unit 之后
-- 某个 action 返回 `safeToResume = true` 的 checkpoint
-
-否则就应该进入 `paused/recovering`，而不是假装可以无损继续。
-
-## 9. `RunState` 应该怎样由 kernel 维护
-
-`RunState` 是 kernel 对运行真相的表达。
-
-建议至少包括：
-
-- `runId`
-- `procedureSpecId`
-- `status`
-- `currentUnit`
-- `completedUnits`
-- `totalUnits?`
-- `heartbeatAt`
-- `pauseReason?`
-- `abortReason?`
-- `errorState?`
-- `artifactRefs`
-
-关键习惯：
-
-- 当前快照和 append-only 事件分开
-- artifact index 和运行状态分开
-- `RunState` 只表达“现在如何”，不表达“接下来建议怎么做”
-
-## 10. 错误模型必须服务 kernel 决策
-
-kernel 不需要最完整的异常学术分类，但必须能根据错误做运行级决策。
-
-至少要能区分：
-
-1. **可重试**
-2. **需要人工介入**
-3. **必须停止当前 run**
-4. **允许安全 resume**
-
-所以 runtime 回来的错误不应该只是字符串 message，而应该至少包含：
+错误至少包含：
 
 - `errorCode`
+- `message`
 - `retrySafe`
 - `needsOperator`
 - `safeToResume`
-- `scope`（action / unit / run）
+- optional scope/payload
 
-这是 kernel 判断 pause / retry / abort 的基础。
+kernel 用这些字段决定 retry、pause、fail 或 resume。traceback、SDK object、bridge filename 和串口细节不能成为控制信号。
 
-## 11. 观测、进度与 artifact 应该怎样进入 kernel
+agent 可见 tool summary 必须带出 error code、message 与关键数值；内部 details 或 event log 不能成为唯一诊断来源。
 
-kernel 不只是“调一下 runtime 然后等结果”。
+## 9. 状态、事件与终态通知
 
-它必须能托管长动作，因此需要显式观测面：
+每个 run 分开维护：
 
-- progress event
-- heartbeat
-- checkpoint
-- artifact emission
+- `run-state.json`：当前快照
+- `events.jsonl`：append-only lifecycle/attempt 事件
+- `artifacts.jsonl`：append-only artifact index
+- payload files：真实产物
 
-推荐原则：
+heartbeat 与 progress 属于状态，不等于日志。大文件只通过 artifact ref 回流。
 
-1. **progress 不等于日志**
-   - 需要结构化字段，而不是 stdout 文本
+run 进入 paused、failed、completed 或 aborted 时，terminal observer 主动把诊断摘要送回会话；不推送每个 unit 的心跳，避免打断 agent。`poll_run` 仍保留为显式查询入口。
 
-2. **artifact 不等于 message**
-   - 大文件只通过 artifact ref 回流
+## 10. Simulation
 
-3. **heartbeat cadence 独立于动作时长**
-   - 长积分、扫描、等待稳定都要有心跳
+simulation 与 live runtime 共用：
 
-4. **kernel 消费摘要，不消费设备内部实现细节**
+- `ProcedureSpec` / `ExecutionUnit` / `RunState` schema
+- approval/freeze gate
+- lifecycle 与执行策略
+- event/artifact/error contract
 
-## 12. fake / mock 路径为什么属于 kernel 设计一部分
+simulation controls 只用于注入延迟、低置信、timeout、pause 和评估 observations，不能形成另一套产品语义。
 
-很多人把 fake 路径看成“驱动层附属物”，这是不对的。
+## 11. 当前缺口
 
-对 kernel 来说，fake path 的价值是：
+以下尚未实现，具体排期见 `implementation-plan.md`：
 
-- 验证 `ProcedureSpec -> ExecutionUnit[]` 是否正确
-- 验证 pause / abort / resume 状态机
-- 验证 artifact / event / error contract
-- 验证 runtime contract 是否足够稳定
+- 按 `errorCode + axis` 识别持续同因硬件故障并快速 pause
+- 连接类 `retrySafe` 错误的有限自动重试
+- autofocus 参数适用性校验
+- calibration anchor gate 与实际噪声/首 unit 语义的重新收敛
 
-因此 fake / mock 路径不是可有可无，它直接决定 kernel 是否可迭代。
-
-## 13. 与 safety 的关系
-
-本文不展开完整 safety 体系，但 kernel 必须至少承担两件事：
-
-1. 将 `ProcedureSpec.limits` 带入执行边界
-2. 不绕过 runtime / driver 的最终硬防线
-
-更复杂的：
-
-- lease
-- supervision
-- approval lifecycle
-- 风险分级
-
-可以继续在更高层设计，但 kernel 至少不能破坏这些边界。
-
-## 14. MVP 约束
-
-为了避免把 kernel 设计成一个过早的平台框架，当前阶段建议坚持：
-
-1. 不把 `ProcedureSpec` 设计成脚本语言
-2. 不把 runtime 退化成“随便执行一段驱动调用”
-3. 不把 unit 粒度做得过粗或过碎
-4. 不让 Agent 直接进入 execution hot path
-5. 所有抽象都直接服务于：
-   `Intent -> ProcedureSpec -> ExecutionUnit[] -> RunState`
-
-## 15. 当前结论
-
-`kernel-execution-model.md` 的结论应收敛到下面这句话：
-
-> kernel 的职责不是接设备，而是把 `ProcedureSpec` 编译为可恢复、可观测、可托管的 `ExecutionUnit[]`，再通过稳定的 runtime contract 推进执行，并把结果收敛成 `RunState`、events 和 artifacts。
-
-具体某一类硬件怎么注册、如何封装 driver、如何暴露 tool，不在本文展开，交给 `raman-hardware-adapter-contract.md`。
+这些缺口不应通过 prompt 里的临时重试或放宽 frozen spec 解决。
