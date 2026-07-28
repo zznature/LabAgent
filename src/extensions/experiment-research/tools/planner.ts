@@ -29,6 +29,14 @@ import {
 } from "./params.ts";
 
 const EmptyParamsSchema = Type.Object({}, { additionalProperties: false });
+const SUPPORTED_RAMAN_AUTOFOCUS_METRICS = new Set([
+	"tenengrad",
+	"laplacian_variance",
+	"brenner",
+	"normalized_variance",
+	"labspec_center_spot_focus",
+	"labspec_spot_compactness",
+]);
 
 const ProcedureSpecTemplateParamsSchema = Type.Object(
 	{
@@ -204,6 +212,15 @@ function validateProcedureSpec(spec: ProcedureSpec): { valid: boolean; issues: s
 			valid: false,
 			issues: [
 				"Mapping requires focus-plane correction by default; attach a calibration artifact or record surfaceCorrection.kind=disabled after the user explicitly declines.",
+			],
+		};
+	}
+	const metricName = spec.domain.raman.autofocus.params?.metricName;
+	if (metricName !== undefined && !SUPPORTED_RAMAN_AUTOFOCUS_METRICS.has(metricName)) {
+		return {
+			valid: false,
+			issues: [
+				`Unsupported Raman autofocus metricName '${metricName}'. Supported metrics: ${[...SUPPORTED_RAMAN_AUTOFOCUS_METRICS].join(", ")}.`,
 			],
 		};
 	}
