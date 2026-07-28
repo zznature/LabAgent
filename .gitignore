@@ -56,7 +56,8 @@ out.html
 .zed/
 .idea/
 .cursor/
-.agents/
+.agents/*
+!.agents/skills/
 .claude/
 .opencode/
 .codegraph/

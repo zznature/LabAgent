@@ -53,7 +53,6 @@ Every non-trivial response must contain two sections:
 - Treat npm dep and lockfile changes as reviewed code. Direct external deps stay pinned to exact versions.
 - Hydrate/update locally with `npm install --ignore-scripts`; clean/CI-style with `npm ci --ignore-scripts`. Don't run lifecycle scripts unless the user asks.
 - If dep metadata changes, refresh `package-lock.json` with `npm install --package-lock-only --ignore-scripts`.
-- Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`. Don't bypass unless the user wants the lockfile change committed.
 
 ## Git
 
@@ -61,7 +60,7 @@ Follow these rules for committing:
 
 - Stage explicit paths (`git add <path1> <path2>`); never `git add -A` / `git add .`.
 - Before committing, run `git status` and verify you are only staging your files.
-- Message format: `{feat,fix,docs}[(ai,tui,agent,coding-agent)]: <commit message> (optionally multiple lines)`. Message is informative and concise.
+- Message format: `{feat,fix,docs}[(agent,drivers)]: <commit message> (optionally multiple lines)`. Message is informative and concise.
 
 ## Agent skills
 
