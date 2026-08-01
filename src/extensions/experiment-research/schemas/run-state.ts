@@ -22,6 +22,9 @@ export const RunProgressSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const FOCUS_CENTER_POLICY = "previous_successful_then_current_point" as const;
+export const FocusCenterPolicySchema = Type.Literal(FOCUS_CENTER_POLICY);
+
 export const CurrentUnitRefSchema = Type.Object(
 	{
 		unitId: Type.String({ minLength: 1 }),
@@ -78,6 +81,8 @@ export const RunStateSchema = Type.Object(
 		abortReason: Type.Optional(Type.String({ minLength: 1 })),
 		errorState: Type.Optional(RuntimeErrorSchema),
 		qualityState: Type.Optional(Type.String({ minLength: 1 })),
+		lastAcceptedFocusZUm: Type.Optional(Type.Number()),
+		focusCenterPolicy: Type.Optional(FocusCenterPolicySchema),
 		pointAttempts: Type.Optional(Type.Array(PointAttemptRecordSchema)),
 		artifactRefs: Type.Array(ArtifactRefSchema),
 		resumedFromUnitIndexes: Type.Optional(Type.Array(Type.Integer({ minimum: 0 }))),
@@ -91,6 +96,7 @@ export const RunStateSchema = Type.Object(
 export type RunStatus = Static<typeof RunStatusSchema>;
 export type RunExecutionMode = Static<typeof RunExecutionModeSchema>;
 export type RunProgress = Static<typeof RunProgressSchema>;
+export type FocusCenterPolicy = Static<typeof FocusCenterPolicySchema>;
 export type CurrentUnitRef = Static<typeof CurrentUnitRefSchema>;
 export type PointAttemptPhase = Static<typeof PointAttemptPhaseSchema>;
 export type PointAttemptStatus = Static<typeof PointAttemptStatusSchema>;

@@ -108,9 +108,13 @@ driver/daemon 不拥有 experiment workflow state，也不决定是否提出下�
 | --- | --- | --- |
 | `fixed_absolute` | 单点与 operator autofocus | spec/tool 给出的绝对范围 |
 | `calibration_coarse_to_fine` | 硬件焦平面校准 | 当前 unit 恢复出的 accepted focus seed |
-| `mapping_local_correction` | surface-following mapping | compiler 写入的 predicted Z 周围固定 local range |
+| `mapping_local_correction` | surface-following mapping | runtime centers the local range on the most recent successful focus Z, falling back to the point Z on the first point |
 
 TypeScript runtime 解析 strategy 和窗口；Python daemon 只执行单次有界 autofocus，不保存 previous focus 或焦平面模型。
+
+For mapping, `plan.z` is only the point-placement target. The current autofocus center is runtime state, surfaced as `lastAcceptedFocusZUm` so planners do not confuse predicted point Z with the autofocus center.
+
+默认 `metricName = labspec_center_spot_focus` 使用亮斑紧凑度乘以 Tenengrad 平方根，并除以 ROI 平均亮度；它同时要求焦斑紧凑和边缘清晰，并抵消统一亮度缩放。旧的同心亮斑 / 环纹启发式保留为显式兼容名称 `labspec_center_spot_focus_old`，不再作为默认 metric。
 
 ## 6. Tool surface
 

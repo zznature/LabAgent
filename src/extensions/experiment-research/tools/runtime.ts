@@ -57,6 +57,8 @@ function serializeRunState(runState: RunState): Record<string, unknown> {
 		abortReason: runState.abortReason,
 		errorState: runState.errorState,
 		qualityState: runState.qualityState,
+		lastAcceptedFocusZUm: runState.lastAcceptedFocusZUm,
+		focusCenterPolicy: runState.focusCenterPolicy,
 		pointAttempts: runState.pointAttempts,
 		startedAt: runState.startedAt,
 		updatedAt: runState.updatedAt,

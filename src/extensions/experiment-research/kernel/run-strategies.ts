@@ -144,6 +144,14 @@ function getCompletedDecision(result: ManagedUnitResult): RamanEvaluationDecisio
 	return result.evaluationDecision;
 }
 
+function focusContextForResult(result: ManagedUnitResult): Record<string, unknown> | undefined {
+	if (result.status !== "completed") {
+		return undefined;
+	}
+	const completedResult = result as { focusContext?: Record<string, unknown> };
+	return completedResult.focusContext;
+}
+
 function interpolateNumber(minimum: number, maximum: number, index: number, total: number): number {
 	if (total <= 1 || minimum === maximum) {
 		return minimum;
@@ -301,7 +309,7 @@ export async function executeLinearRun(
 			return;
 		}
 
-		context.completeUnit(unit, resultArtifacts);
+		context.completeUnit(unit, resultArtifacts, focusContextForResult(result));
 		const waitResult = await context.waitAfterUnit(unit);
 		if (waitResult !== "continue") {
 			return;
@@ -363,6 +371,7 @@ export async function executeParameterSearchRun(context: RunExecutionContext): P
 			decision: decision.decision,
 			attemptIndex,
 			acquisition: attempt.acquisition,
+			...focusContextForResult(result),
 		});
 		searchObservations.unshift(metrics);
 
@@ -445,7 +454,7 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 			}
 			consecutiveMappingFailures = 0;
 			recordAttempt(context, unit, attempt, "succeeded", resultArtifacts, undefined, true);
-			context.completeUnit(unit, resultArtifacts, {}, attempt);
+			context.completeUnit(unit, resultArtifacts, focusContextForResult(result), attempt);
 			const waitResult = await context.waitAfterUnit(unit);
 			if (waitResult !== "continue") {
 				return waitResult;

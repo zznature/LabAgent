@@ -21,6 +21,7 @@ import {
 	listExperimentProcedureTemplates,
 	saveExperimentIntent,
 } from "../store/index.ts";
+import { FOCUS_CENTER_POLICY } from "../schemas/index.ts";
 import {
 	ProcedureSpecParamsSchema,
 	type ExecutionMode,
@@ -35,9 +36,9 @@ const SUPPORTED_RAMAN_AUTOFOCUS_METRICS = new Set([
 	"brenner",
 	"normalized_variance",
 	"labspec_center_spot_focus",
+	"labspec_center_spot_focus_old",
 	"labspec_spot_compactness",
 ]);
-
 const ProcedureSpecTemplateParamsSchema = Type.Object(
 	{
 		procedureId: Type.Union([
@@ -838,6 +839,7 @@ export const getLabStateTool = {
 			executionEntryPoint: "validate_procedure_spec -> run_preflight -> propose_run -> approve_and_start_run",
 			goodEnoughDecisionMode: "explicit_rules",
 			ramanRuntimeContractDefined: true,
+			focusCenterPolicy: FOCUS_CENTER_POLICY,
 			nextMilestone: "verification and operator-facing refinement",
 		});
 	},

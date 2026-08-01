@@ -192,6 +192,7 @@ describe("experiment research Python Raman runtime config", () => {
 				enabled: true,
 			}),
 		);
+		expect(stateAfter.focusCenterPolicy).toBe("previous_successful_then_current_point");
 	});
 
 	it("merges local config over lab config", async () => {

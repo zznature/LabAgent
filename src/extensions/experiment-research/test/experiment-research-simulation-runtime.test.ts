@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import experimentResearchExtension from "../index.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
+import { pollRun, startLiveRamanRun } from "../kernel/run-controller.ts";
 import { buildProcedureSpec } from "../planner/procedure-spec-builder.ts";
 import type { ProcedureSpec, RunState } from "../schemas/index.ts";
 import { readArtifactRecords, readRunEvents, writeRunStateSnapshot } from "../store/index.ts";
+import { registerRamanLiveRuntime, successActionResult, type RamanLiveRuntime } from "../runtime/raman/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 type CapturedHandler = (...args: unknown[]) => unknown;
@@ -216,6 +218,18 @@ async function pollUntilTerminal(
 	throw new Error(`run ${runId} did not reach ${expectedStatuses.join(", ")} within timeout`);
 }
 
+async function waitForRunStatus(cwd: string, runId: string, expectedStatuses: string[], timeoutMs = 3_000): Promise<RunState> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const runState = pollRun(cwd, runId);
+		if (runState && expectedStatuses.includes(runState.status)) {
+			return runState;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+	throw new Error(`run ${runId} did not reach ${expectedStatuses.join(", ")} within timeout`);
+}
+
 describe("experiment research simulation runtime", () => {
 	it("registers the simulation lifecycle tools and activates them on session start", async () => {
 		const extension = loadExperimentExtension();
@@ -367,6 +381,137 @@ describe("experiment research simulation runtime", () => {
 			expect.arrayContaining(["run_started", "unit_started", "unit_completed", "run_completed"]),
 		);
 		expect(readArtifactRecords(cwd, runId).length).toBeGreaterThan(0);
+	});
+
+	it("records the last accepted focus z in run state and exposes it through lab state and run summary", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		let position = { xUm: 100, yUm: 200, zUm: 1_666.336 };
+		const runtime = {
+			preflight: () => ({ preflightReady: true, controlAvailable: true }),
+			stage: {
+				resource: {
+					resourceId: "stage-main",
+					kind: "stage",
+					runtime: "raman_python",
+					driver: "memory",
+					config: { port: "memory", xChannel: 1, yChannel: 2, zChannel: 3, baudrate: 115_200 },
+					leasePolicy: "exclusive",
+					simulationAvailable: true,
+					limits: { xRangeUm: [0, 5_000], yRangeUm: [0, 5_000], zRangeUm: [0, 5_000] },
+				},
+				getPosition: () => successActionResult("position", { position }),
+				moveAbsoluteAndWait: (action: { target: { xUm: number; yUm: number; zUm?: number } }) => {
+					position = {
+						xUm: action.target.xUm,
+						yUm: action.target.yUm,
+						zUm: action.target.zUm ?? position.zUm,
+					};
+					return successActionResult("moved", { position });
+				},
+			},
+			autofocus: {
+				runSingle: () => {
+					const zBestUm = 1683.005;
+					position = { ...position, zUm: zBestUm };
+					return successActionResult("focused", {
+						zBestUm,
+						confidence: 0.9,
+						quality: "good",
+					});
+				},
+			},
+			frame: {
+				resource: {
+					resourceId: "frame-main",
+					kind: "frame_provider",
+					runtime: "raman_python",
+					driver: "memory",
+					config: { bridgeDir: "memory", imageFormat: "tif", minCaptureIntervalMs: 0 },
+					leasePolicy: "shared-read",
+					simulationAvailable: true,
+				},
+				captureLatest: () => successActionResult("frame"),
+			},
+			spectrometer: {
+				resource: {
+					resourceId: "spectrometer-main",
+					kind: "spectrometer",
+					runtime: "raman_python",
+					driver: "memory",
+					config: { bridgeDir: "memory", requestFilename: "request", resultFilename: "result" },
+					leasePolicy: "exclusive",
+					simulationAvailable: true,
+				},
+				acquireSpectrum: () =>
+					successActionResult("spectrum", {
+						saturated: false,
+						snr: 20,
+						targetPeakBaselineRatio: 5,
+					}),
+			},
+		} as unknown as RamanLiveRuntime;
+		registerRamanLiveRuntime(cwd, runtime);
+
+		const spec = buildProcedureSpec({
+			procedureId: "raman_single_point_probe",
+			intent: {
+				intentId: "intent-focus-context",
+				experimentId: "experiment-focus-context",
+				objective: "Confirm focus context propagation.",
+			},
+			resources: {
+				stageResourceId: "stage-main",
+				frameProviderResourceId: "frame-main",
+				spectrometerResourceId: "spectrometer-main",
+			},
+			limits: {
+				maxLaserPowerPercent: 1,
+				minObjectiveClearanceUm: 0,
+				xRangeUm: { minUm: 0, maxUm: 5_000 },
+				yRangeUm: { minUm: 0, maxUm: 5_000 },
+				zRangeUm: { minUm: 0, maxUm: 5_000 },
+			},
+			autofocus: {
+				enabled: true,
+				roi: { x: 100, y: 100, width: 64, height: 64 },
+				params: {
+					zStartUm: 1636.1075,
+					zEndUm: 1696.1075,
+					pointCount: 10,
+					framesPerZ: 1,
+					finalVerificationFramesPerZ: 1,
+				},
+			},
+			acquisition: {
+				integrationTimeMs: 1_000,
+				laserPowerPercent: 0.1,
+				accumulations: 1,
+			},
+			point: { xUm: 100, yUm: 200, zUm: 1_666.336 },
+		});
+
+		const runState = startLiveRamanRun(cwd, spec);
+		const completedState = await waitForRunStatus(cwd, runState.runId, ["completed"]);
+		expect(completedState.lastAcceptedFocusZUm).toBeCloseTo(1683.005);
+		expect(completedState.focusCenterPolicy).toBe("previous_successful_then_current_point");
+
+		const summaryResult = await extension.tools
+			.get("summarize_run")
+			?.execute("summarize-focus-context", { runId: runState.runId }, undefined, undefined, context);
+		const summaryDetails = summaryResult?.details as Record<string, unknown>;
+		const summaryState = summaryDetails.stateAfter as Record<string, unknown>;
+		expect(summaryState.lastAcceptedFocusZUm).toBeCloseTo(1683.005);
+		expect(summaryState.focusCenterPolicy).toBe("previous_successful_then_current_point");
+
+		const labState = await extension.tools
+			.get("get_lab_state")
+			?.execute("lab-state", {}, undefined, undefined, context);
+		const labDetails = labState?.details as Record<string, unknown>;
+		const labStateAfter = labDetails.stateAfter as Record<string, unknown>;
+		expect(labStateAfter.focusCenterPolicy).toBe("previous_successful_then_current_point");
 	});
 
 	it("publishes one immutable focus-plane artifact after a separate calibration run", async () => {

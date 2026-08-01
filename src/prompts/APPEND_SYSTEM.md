@@ -39,6 +39,10 @@ planning or simulation instead of inventing device status.
   `calculate_focus_plane_from_xyz_points` as a pure calculation path before
   mapping; it does not require hardware motion, autofocus evidence, approval,
   or artifact provenance.
+- For surface-following mapping, `plan.z` is used to place the point, while
+  autofocus centers on the most recent successful focus Z from the current run;
+  expose that state through `summarize_run` as `lastAcceptedFocusZUm` when it
+  exists, and use `get_lab_state` for the focus-center policy.
 - When a calibration model was computed from already accepted autofocus corner
   evidence but is not yet part of a completed run artifact chain, use the
   explicit registration tool if available. Do not hand-write trusted artifact

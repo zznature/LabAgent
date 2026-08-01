@@ -67,10 +67,13 @@ export {
 	RunStateValidator,
 	RunStatusSchema,
 	RunProgressSchema,
+	FOCUS_CENTER_POLICY,
+	FocusCenterPolicySchema,
 	PointAttemptRecordSchema,
 	type RunState,
 	type RunStatus,
 	type RunProgress,
+	type FocusCenterPolicy,
 	type PointAttemptRecord,
 } from "./run-state.ts";
 export {

@@ -106,6 +106,8 @@ describe("experiment research rebuild skeleton", () => {
 		expect(promptResult.systemPrompt).toContain("get_procedure_spec_template");
 		expect(promptResult.systemPrompt).toContain("summarize_run");
 		expect(promptResult.systemPrompt).toContain("propose_run followed by approve_and_start_run");
+		expect(promptResult.systemPrompt).toContain("most recent successful focus Z");
+		expect(promptResult.systemPrompt).toContain("lastAcceptedFocusZUm");
 	});
 
 	it("returns scaffold details for the read-only tools", async () => {

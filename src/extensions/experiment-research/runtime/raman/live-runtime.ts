@@ -70,6 +70,9 @@ export interface LiveRamanUnitSuccess {
 	artifactRefs: ArtifactRef[];
 	observationMetrics?: RamanObservationMetrics;
 	evaluationDecision?: RamanEvaluationDecision;
+	focusContext?: {
+		lastAcceptedFocusZUm: number;
+	};
 }
 
 export interface LiveRamanUnitPause {
@@ -116,6 +119,16 @@ function toRuntimeError(actionResult: ActionResult, fallbackCode: string, scope:
 		safeToResume: actionResult.safeToResume,
 		scope,
 		payload: actionResult.payload,
+	};
+}
+
+function focusContextFromAutofocusResult(autofocusResult: ActionResult | undefined): LiveRamanUnitSuccess["focusContext"] {
+	const zBestUm = autofocusResult?.payload?.zBestUm;
+	if (typeof zBestUm !== "number") {
+		return undefined;
+	}
+	return {
+		lastAcceptedFocusZUm: zBestUm,
 	};
 }
 
@@ -466,7 +479,7 @@ function mappingSurfaceCorrection(spec: ProcedureSpec): SurfaceCorrection | unde
 function resolveAutofocusActionParams(
 	spec: ProcedureSpec,
 	unit: ExecutionUnit,
-	position: StagePosition,
+	focusCenterZUm: number,
 ): NonNullable<AutofocusRunSingleAction["params"]> | ActionResult {
 	const params = spec.domain.raman.autofocus.params;
 	const surfaceCorrection = mappingSurfaceCorrection(spec);
@@ -474,8 +487,8 @@ function resolveAutofocusActionParams(
 		return {
 			...params,
 			strategy: "calibration_coarse_to_fine",
-			zStartUm: position.zUm - 100,
-			zEndUm: position.zUm + 100,
+			zStartUm: focusCenterZUm - 100,
+			zEndUm: focusCenterZUm + 100,
 			coarseStepUm: params?.coarseStepUm ?? 10,
 			fineHalfRangeUm: params?.fineHalfRangeUm ?? 15,
 			fineStepUm: params?.fineStepUm ?? 2,
@@ -485,8 +498,8 @@ function resolveAutofocusActionParams(
 		return {
 			...params,
 			strategy: "mapping_local_correction",
-			zStartUm: position.zUm - surfaceCorrection.localAutofocusHalfRangeUm,
-			zEndUm: position.zUm + surfaceCorrection.localAutofocusHalfRangeUm,
+			zStartUm: focusCenterZUm - surfaceCorrection.localAutofocusHalfRangeUm,
+			zEndUm: focusCenterZUm + surfaceCorrection.localAutofocusHalfRangeUm,
 		};
 	}
 	if (typeof params?.zStartUm !== "number" || typeof params.zEndUm !== "number") {
@@ -898,6 +911,7 @@ export async function runLiveRamanUnit(
 	const unitPosition = unit.focusCalibration
 		? { ...resolvedUnitPosition, zUm: previousAcceptedFocusZ(cwd, runId) ?? resolvedUnitPosition.zUm }
 		: resolvedUnitPosition;
+	const focusCenterZUm = previousAcceptedFocusZ(cwd, runId) ?? unitPosition.zUm;
 
 	const preMoveFailure = enforceMotionHardLimits(spec, unitPosition, runtime);
 	if (preMoveFailure) {
@@ -913,8 +927,8 @@ export async function runLiveRamanUnit(
 			? [unitPosition.zUm - 100, unitPosition.zUm + 100]
 			: surfaceCorrection?.kind === "focus_plane"
 				? [
-						unitPosition.zUm - surfaceCorrection.localAutofocusHalfRangeUm,
-						unitPosition.zUm + surfaceCorrection.localAutofocusHalfRangeUm,
+						focusCenterZUm - surfaceCorrection.localAutofocusHalfRangeUm,
+						focusCenterZUm + surfaceCorrection.localAutofocusHalfRangeUm,
 					]
 				: [];
 	if (autofocusWindow.length > 0) {
@@ -974,7 +988,7 @@ export async function runLiveRamanUnit(
 		}
 
 		if (action.kind === "autofocus") {
-			const autofocusParams = resolveAutofocusActionParams(spec, unit, unitPosition);
+			const autofocusParams = resolveAutofocusActionParams(spec, unit, focusCenterZUm);
 			if ("status" in autofocusParams) {
 				return {
 					status: "failed",
@@ -1128,7 +1142,7 @@ export async function runLiveRamanUnit(
 				};
 			}
 		}
-		return { status: "completed", artifactRefs };
+		return { status: "completed", artifactRefs, focusContext: focusContextFromAutofocusResult(autofocusResult) };
 	}
 
 	if (!autofocusResult || !spectrumResult) {
@@ -1160,6 +1174,7 @@ export async function runLiveRamanUnit(
 			status: "completed",
 			artifactRefs,
 			observationMetrics: metricsOrError,
+			focusContext: focusContextFromAutofocusResult(autofocusResult),
 		};
 	}
 
@@ -1195,5 +1210,6 @@ export async function runLiveRamanUnit(
 		artifactRefs,
 		observationMetrics: metricsOrError,
 		evaluationDecision: decision,
+		focusContext: focusContextFromAutofocusResult(autofocusResult),
 	};
 }

@@ -6,6 +6,7 @@ import type {
 	RunState,
 	RuntimeError,
 } from "../schemas/index.ts";
+import { FOCUS_CENTER_POLICY } from "../schemas/index.ts";
 import { appendRunEvent, type RunEvent } from "../store/event-store.ts";
 import { readProcedureSpec } from "../store/procedure-spec-store.ts";
 import { readRunStateSnapshot, writeRunStateSnapshot } from "../store/run-store.ts";
@@ -103,7 +104,6 @@ function notifyRunTerminal(cwd: string, runId: string): void {
 
 const DEFAULT_MAPPING_MAX_CONSECUTIVE_FAILURES = 3;
 const INTER_UNIT_DELAY_HEARTBEAT_MS = 1_000;
-
 function timestamp(): string {
 	return new Date().toISOString();
 }
@@ -162,6 +162,22 @@ function updateRunState(cwd: string, runId: string, updater: (current: RunState)
 		throw new Error(`run not found: ${runId}`);
 	}
 	return setRunState(cwd, updater(current));
+}
+
+function normalizeFocusContext(
+	current: RunState,
+	additionalPayload: Record<string, unknown>,
+): Pick<RunState, "lastAcceptedFocusZUm" | "focusCenterPolicy"> {
+	const lastAcceptedFocusZUm =
+		typeof additionalPayload.lastAcceptedFocusZUm === "number"
+			? additionalPayload.lastAcceptedFocusZUm
+			: current.lastAcceptedFocusZUm;
+	const focusCenterPolicy =
+		lastAcceptedFocusZUm !== undefined ? current.focusCenterPolicy ?? FOCUS_CENTER_POLICY : current.focusCenterPolicy;
+	return {
+		lastAcceptedFocusZUm,
+		focusCenterPolicy,
+	};
 }
 
 async function executeUnit(
@@ -365,6 +381,7 @@ function applyCompletedProgress(
 ): void {
 	updateRunState(activeRun.cwd, activeRun.runId, (current) => ({
 		...current,
+		...normalizeFocusContext(current, additionalPayload),
 		status: "running",
 		progress: {
 			...current.progress,
