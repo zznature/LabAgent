@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { decideToolCall, type GuardrailPolicy } from "../policy.ts";
@@ -92,7 +92,11 @@ describe("LabAgents guardrail policy", () => {
 	it("blocks symlinks that escape the workspace", () => {
 		const { workspace, labagents, policy } = createFixture();
 		const linkPath = join(workspace, "lab-config/source-link");
-		symlinkSync(join(labagents, "src/extensions/experiment-research/index.ts"), linkPath);
+		symlinkSync(
+			join(labagents, "src/extensions/experiment-research"),
+			linkPath,
+			platform() === "win32" ? "junction" : "dir",
+		);
 
 		expect(decideToolCall(policy, workspace, event("read", { path: linkPath })).block).toBe(true);
 	});
