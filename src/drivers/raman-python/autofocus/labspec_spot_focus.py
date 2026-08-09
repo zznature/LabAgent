@@ -14,6 +14,18 @@ import numpy as np
 from autofocus.models import ROI
 from autofocus.roi import prepare
 
+_CENTER_STREAK_BASE_SCORE_GATE = 0.8
+_CENTER_STREAK_AXIS_LEVEL_GATE = 0.94
+_CENTER_STREAK_VERTICAL_ANISOTROPY_GATE = 0.10
+_CENTER_STREAK_VERTICAL_ANISOTROPY_ROLLOFF = 0.15
+_CENTER_STREAK_OFFSET_GATE_PX = 12.0
+_CENTER_STREAK_OFFSET_ROLLOFF_PX = 10.0
+_CRISP_RING_NORMALIZED_GRADIENT_GATE = 0.75
+_CRISP_RING_AXIS_LEVEL_GATE = 0.82
+_CRISP_RING_CENTROID_OFFSET_MAX_PX = 16.0
+_CRISP_RING_RMS_RADIUS_MAX_PX = 30.0
+_CRISP_RING_AXIS_SUPPORT_FLOOR = 0.43
+
 
 def _robust_normalize(patch: np.ndarray) -> np.ndarray:
     """Normalize an ROI to 0..1 using percentile clipping."""
@@ -60,8 +72,109 @@ def labspec_spot_compactness(image: np.ndarray, roi: ROI) -> float:
     return float(max(score, 0.0))
 
 
-def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
-    """Score coherent LabSpec focus while rejecting random texture peaks.
+def labspec_optical_axis_support(image: np.ndarray, roi: ROI) -> float:
+    """Return continuous support for a filled spot at the ROI optical axis."""
+    patch = prepare(image, roi, blur=False)
+    normalized = _robust_normalize(patch)
+    rows, cols = np.indices(normalized.shape, dtype=np.float32)
+    center_x = (normalized.shape[1] - 1) / 2.0
+    center_y = (normalized.shape[0] - 1) / 2.0
+    radius_sq = (cols - center_x) ** 2 + (rows - center_y) ** 2
+    center_radius = max(6.0, min(normalized.shape) * 0.045)
+    center_mask = radius_sq <= center_radius**2
+    axis_level = max(float(np.mean(normalized[center_mask])), 0.0)
+    support = min(1.0, (axis_level / 0.94) ** 10)
+    if not np.isfinite(support):
+        return 0.0
+    return float(max(support, 0.0))
+
+
+def labspec_crisp_ring_axis_support(image: np.ndarray, roi: ROI, normalized_gradient: float) -> float:
+    """Return support for a compact crisp ring whose center has dark structure."""
+    if normalized_gradient < _CRISP_RING_NORMALIZED_GRADIENT_GATE:
+        return 0.0
+
+    patch = prepare(image, roi, blur=False)
+    normalized = _robust_normalize(patch)
+    rows, cols = np.indices(normalized.shape, dtype=np.float32)
+    roi_cx = (normalized.shape[1] - 1) / 2.0
+    roi_cy = (normalized.shape[0] - 1) / 2.0
+    roi_radius_sq = (cols - roi_cx) ** 2 + (rows - roi_cy) ** 2
+    center_radius = max(6.0, min(normalized.shape) * 0.045)
+    axis_level = max(float(np.mean(normalized[roi_radius_sq <= center_radius**2])), 0.0)
+    if axis_level < _CRISP_RING_AXIS_LEVEL_GATE:
+        return 0.0
+
+    background = float(np.percentile(normalized, 50.0))
+    signal = np.clip(normalized - background, 0.0, None)
+    weighted = signal**3
+    total = float(np.sum(weighted))
+    if total <= 1e-9:
+        return 0.0
+
+    cx = float(np.sum(weighted * cols) / total)
+    cy = float(np.sum(weighted * rows) / total)
+    centroid_offset_px = float(np.sqrt((cx - roi_cx) ** 2 + (cy - roi_cy) ** 2))
+    if centroid_offset_px > _CRISP_RING_CENTROID_OFFSET_MAX_PX:
+        return 0.0
+
+    centered_cols = cols - cx
+    centered_rows = rows - cy
+    rms_radius_px = float(np.sqrt(np.sum(weighted * (centered_cols**2 + centered_rows**2)) / total))
+    if rms_radius_px > _CRISP_RING_RMS_RADIUS_MAX_PX:
+        return 0.0
+
+    return _CRISP_RING_AXIS_SUPPORT_FLOOR
+
+
+def labspec_center_streak_guard_support(image: np.ndarray, roi: ROI, base_score: float) -> float:
+    """Penalize high-scoring filled-center frames with vertical drag artifacts."""
+    if base_score < _CENTER_STREAK_BASE_SCORE_GATE:
+        return 1.0
+
+    patch = prepare(image, roi, blur=False)
+    normalized = _robust_normalize(patch)
+    rows, cols = np.indices(normalized.shape, dtype=np.float32)
+    roi_cx = (normalized.shape[1] - 1) / 2.0
+    roi_cy = (normalized.shape[0] - 1) / 2.0
+    roi_radius_sq = (cols - roi_cx) ** 2 + (rows - roi_cy) ** 2
+    center_radius = max(6.0, min(normalized.shape) * 0.045)
+    center_mask = roi_radius_sq <= center_radius**2
+    axis_level = max(float(np.mean(normalized[center_mask])), 0.0)
+    if axis_level < _CENTER_STREAK_AXIS_LEVEL_GATE:
+        return 1.0
+
+    background = float(np.percentile(normalized, 50.0))
+    signal = np.clip(normalized - background, 0.0, None)
+    weighted = signal**3
+    total = float(np.sum(weighted))
+    if total <= 1e-9:
+        return 1.0
+
+    cx = float(np.sum(weighted * cols) / total)
+    cy = float(np.sum(weighted * rows) / total)
+    centered_cols = cols - cx
+    centered_rows = rows - cy
+    cov_xx = float(np.sum(weighted * centered_cols * centered_cols) / total)
+    cov_yy = float(np.sum(weighted * centered_rows * centered_rows) / total)
+    vertical_anisotropy = (cov_yy - cov_xx) / max(cov_yy + cov_xx, 1e-6)
+    if vertical_anisotropy <= _CENTER_STREAK_VERTICAL_ANISOTROPY_GATE:
+        return 1.0
+
+    centroid_offset_px = float(np.sqrt((cx - roi_cx) ** 2 + (cy - roi_cy) ** 2))
+    vertical_excess = (
+        (vertical_anisotropy - _CENTER_STREAK_VERTICAL_ANISOTROPY_GATE)
+        / _CENTER_STREAK_VERTICAL_ANISOTROPY_ROLLOFF
+    )
+    offset_excess = max(0.0, centroid_offset_px - _CENTER_STREAK_OFFSET_GATE_PX) / _CENTER_STREAK_OFFSET_ROLLOFF_PX
+    support = 1.0 / (1.0 + vertical_excess**2 + offset_excess**2)
+    if not np.isfinite(support):
+        return 0.0
+    return float(max(0.0, min(1.0, support)))
+
+
+def labspec_center_spot_focus_old(image: np.ndarray, roi: ROI) -> float:
+    """Legacy coherent LabSpec focus score retained for explicit comparison.
 
     Good LabSpec focus can appear as either a compact center spot or a crisp,
     coherent ring pattern. Defocused frames often contain strong vertical

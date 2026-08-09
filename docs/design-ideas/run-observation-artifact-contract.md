@@ -92,6 +92,8 @@ validRegion
 localAutofocusHalfRangeUm
 ```
 
+`localAutofocusHalfRangeUm` defaults to 40 um when omitted by planner helpers, but once present in a mapping ProcedureSpec it is the approved local autofocus half-range and must not be inferred from `domain.raman.autofocus.params.fineHalfRangeUm`.
+
 preflight、simulation 和 live runtime 重新验证：
 
 - calibration run 已 completed

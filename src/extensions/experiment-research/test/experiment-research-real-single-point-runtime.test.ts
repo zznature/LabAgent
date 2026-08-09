@@ -15,6 +15,7 @@ import type { ProcedureSpec } from "../schemas/index.ts";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 type CapturedHandler = (...args: unknown[]) => unknown;
+type CapturedAutofocusAction = Parameters<RamanLiveRuntime["autofocus"]["runSingle"]>[0];
 
 interface CapturedExtension {
 	tools: Map<string, ToolDefinition>;
@@ -169,6 +170,7 @@ function createLiveRuntime(
 	metrics?: { stageMoveCalls: number },
 	capturedFrameLaserOff?: boolean[],
 	capturedFrameTimeouts?: number[],
+	capturedAutofocusActions?: CapturedAutofocusAction[],
 ): RamanLiveRuntime {
 	let spectrumCall = 0;
 	return {
@@ -218,7 +220,8 @@ function createLiveRuntime(
 			},
 		},
 		autofocus: {
-			runSingle() {
+			runSingle(action) {
+				capturedAutofocusActions?.push(action);
 				return successActionResult(
 					"Autofocus completed.",
 					{
@@ -586,6 +589,52 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(terminalState.status).toBe("completed");
 		expect(capturedFrameLaserOff).toEqual([true, false]);
 		expect(capturedFrameTimeouts).toEqual([30_000, 30_000]);
+	});
+
+	it("clamps live autofocus timeouts to observed hardware-backed minima", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedAutofocusActions: CapturedAutofocusAction[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(true, true, undefined, undefined, undefined, undefined, capturedAutofocusActions),
+		);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ procedureId: "raman_grid_mapping" });
+		const raman = (spec.domain as Record<string, unknown>).raman as Record<string, unknown>;
+		const autofocus = raman.autofocus as Record<string, unknown>;
+		autofocus.params = {
+			...(autofocus.params as Record<string, unknown>),
+			stageTimeoutMs: 10_000,
+			frameTimeoutMs: 500,
+		};
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-autofocus-timeouts",
+			{
+				proposalId,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+				operatorApproval: operatorApproval(proposalId, spec),
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedAutofocusActions).toHaveLength(1);
+		expect(capturedAutofocusActions[0]?.params?.stageTimeoutMs).toBe(60_000);
+		expect(capturedAutofocusActions[0]?.params?.frameTimeoutMs).toBe(30_000);
+		expect(capturedAutofocusActions[0]?.timeoutMs).toBe(300_000);
 	});
 
 	it("executes live bounded parameter search and stops early once acceptable conditions are confirmed", async () => {

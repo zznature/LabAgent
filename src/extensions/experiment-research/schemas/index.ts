@@ -17,6 +17,7 @@ export {
 	StoppingRulesSchema,
 	RetryPolicySchema,
 	DEFAULT_RETRY_POLICY,
+	DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
 	ProcedureDomainSchema,
 	RamanDomainSchema,
 	RamanAcquisitionSchema,

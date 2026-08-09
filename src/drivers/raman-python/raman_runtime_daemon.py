@@ -90,6 +90,8 @@ def _fail(
 
 
 _STAGE_COMMAND_TAIL_LIMIT = 40
+_AUTOFOCUS_STAGE_TIMEOUT_DEFAULT_MS = 60000
+_AUTOFOCUS_STAGE_TIMEOUT_MIN_MS = 60000
 _AUTOFOCUS_FRAME_TIMEOUT_DEFAULT_MS = 30000
 _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS = 30000
 
@@ -468,6 +470,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
                 retry_safe=False,
                 safe_to_resume=True,
             )
+        requested_stage_timeout_ms = int(params.get("stageTimeoutMs", _AUTOFOCUS_STAGE_TIMEOUT_DEFAULT_MS))
         requested_frame_timeout_ms = int(params.get("frameTimeoutMs", _AUTOFOCUS_FRAME_TIMEOUT_DEFAULT_MS))
         strategy = params.get("strategy", "fixed_absolute")
         if strategy == "calibration_coarse_to_fine":
@@ -479,7 +482,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
                 "coarseStepUm": params.get("coarseStepUm", 10.0),
                 "fineHalfRangeUm": params.get("fineHalfRangeUm", 15.0),
                 "fineStepUm": params.get("fineStepUm", 2.0),
-                "stageTimeoutMs": params.get("stageTimeoutMs", 30000),
+                "stageTimeoutMs": max(requested_stage_timeout_ms, _AUTOFOCUS_STAGE_TIMEOUT_MIN_MS),
                 "frameTimeoutMs": max(requested_frame_timeout_ms, _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS),
                 "settleMs": params.get("settleMs", 100),
                 "framesPerZ": params.get("framesPerZ", 3),
@@ -512,7 +515,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
                 "zEndUm": params["zEndUm"],
                 "effectivePointCount": effective_point_count,
                 "effectiveSpacingUm": effective_spacing_um,
-                "stageTimeoutMs": params.get("stageTimeoutMs", 30000),
+                "stageTimeoutMs": max(requested_stage_timeout_ms, _AUTOFOCUS_STAGE_TIMEOUT_MIN_MS),
                 "frameTimeoutMs": max(requested_frame_timeout_ms, _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS),
                 "settleMs": params.get("settleMs", 100),
                 "warmupFramesPerZ": params.get("warmupFramesPerZ", 1),

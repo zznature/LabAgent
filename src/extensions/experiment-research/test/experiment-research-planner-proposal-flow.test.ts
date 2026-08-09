@@ -103,6 +103,26 @@ function writeTemplate(cwd: string, fileName: string, template: Record<string, u
 	writeFileSync(join(root, fileName), `${JSON.stringify(template, null, 2)}\n`, "utf8");
 }
 
+function manualFocusPlane(localAutofocusHalfRangeUm = 20) {
+	return {
+		source: "manual_xyz_points" as const,
+		anchors: [
+			{ anchorId: "p1", xUm: 0, yUm: 0, zUm: 1_500 },
+			{ anchorId: "p2", xUm: 50_000, yUm: 0, zUm: 1_500 },
+			{ anchorId: "p3", xUm: 0, yUm: 50_000, zUm: 1_500 },
+		],
+		a: 0,
+		b: 0,
+		c: 1_500,
+		validRegion: [
+			{ anchorId: "p1", xUm: 0, yUm: 0 },
+			{ anchorId: "p2", xUm: 50_000, yUm: 0 },
+			{ anchorId: "p3", xUm: 0, yUm: 50_000 },
+		],
+		localAutofocusHalfRangeUm,
+	};
+}
+
 describe("experiment research planner proposal flow", () => {
 	it("builds a valid ExperimentIntent and bounded ProcedureSpec proposals for all MVP planner procedures", () => {
 		const intent = buildIntent();
@@ -127,7 +147,7 @@ describe("experiment research planner proposal flow", () => {
 		const gridMapping = buildProcedureProposal({
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
-			focusPlaneDecision: "user_declined",
+			focusPlane: manualFocusPlane(),
 			grid: {
 				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
@@ -145,7 +165,12 @@ describe("experiment research planner proposal flow", () => {
 		expect(singlePoint.preview.requiresConfirmation).toBe(true);
 		expect(parameterSearch.preview.unitCount).toBe(3);
 		expect(gridMapping.preview.unitCount).toBe(6);
+		expect(gridMapping.preview.mappingAutofocus).toEqual({
+			localHalfRangeUm: 20,
+			localFullRangeUm: 40,
+		});
 		expect(gridMapping.preview.risks.some((risk) => risk.code === "multi_point_mapping")).toBe(true);
+		expect(gridMapping.preview.risks.some((risk) => risk.code === "mapping_local_autofocus_window")).toBe(true);
 	});
 
 	it("builds current-position single-point proposals without placeholder coordinates", () => {
@@ -172,8 +197,12 @@ describe("experiment research planner proposal flow", () => {
 		const context = {} as ExtensionContext;
 		const proposal = buildProcedureProposal({
 			...commonBuilderInput(),
+			autofocus: {
+				...commonBuilderInput().autofocus,
+				params: { metricName: "labspec_center_spot_focus_old" },
+			},
 			procedureId: "raman_grid_mapping",
-			focusPlaneDecision: "user_declined",
+			focusPlane: manualFocusPlane(20),
 			grid: {
 				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
@@ -190,8 +219,13 @@ describe("experiment research planner proposal flow", () => {
 		const validateDetails = asRecord(validateResult?.details);
 		const validateState = asRecord(validateDetails.stateAfter);
 		expect(validateDetails.status).toBe("success");
+		expect(proposal.spec.domain.raman.autofocus.params?.metricName).toBe("labspec_center_spot_focus_old");
 		expect(validateState.procedureId).toBe("raman_grid_mapping");
 		expect(validateState.unitCount).toBe(4);
+		expect(validateState.mappingAutofocus).toEqual({
+			localHalfRangeUm: 20,
+			localFullRangeUm: 40,
+		});
 		expect(validateState.savePath).toEqual(expect.stringContaining(proposal.spec.procedureSpecId));
 
 		const preflightResult = await extension.tools
@@ -202,6 +236,10 @@ describe("experiment research planner proposal flow", () => {
 		expect(preflightDetails.status).toBe("success");
 		expect(preflightState.readyForApproval).toBe(true);
 		expect(preflightState.requiresConfirmation).toBe(true);
+		expect(preflightState.mappingAutofocus).toEqual({
+			localHalfRangeUm: 20,
+			localFullRangeUm: 40,
+		});
 		expect(preflightState.canProposeRun).toBe(true);
 	});
 
@@ -348,7 +386,7 @@ describe("experiment research planner proposal flow", () => {
 		const proposal = buildProcedureProposal({
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
-			focusPlaneDecision: "user_declined",
+			focusPlane: manualFocusPlane(20),
 			grid: {
 				origin: { xUm: 1_000, yUm: 2_000, zUm: 1_500 },
 				rows: 2,
@@ -374,6 +412,10 @@ describe("experiment research planner proposal flow", () => {
 		const proposeState = asRecord(proposeDetails.stateAfter);
 		const proposeTemplateApplication = asRecord(proposeState.templateApplication);
 		expect(proposeDetails.status).toBe("success");
+		expect(proposeState.mappingAutofocus).toEqual({
+			localHalfRangeUm: 20,
+			localFullRangeUm: 40,
+		});
 		expect(proposeTemplateApplication.applied).toBe(true);
 		expect(proposeTemplateApplication.templateVersion).toBe("1.0.0");
 	});

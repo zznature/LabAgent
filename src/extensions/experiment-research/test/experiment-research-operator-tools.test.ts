@@ -454,7 +454,7 @@ describe("experiment research operator tools", () => {
 		expect(asRecord(proposalState.roi)).toEqual({ x: 492, y: 353, width: 225, height: 225 });
 		expect(asRecord(proposalState.params).zStartUm).toBe(260);
 		expect(asRecord(proposalState.params).zEndUm).toBe(340);
-		expect(proposalState.timeoutMs).toBe(240_000);
+		expect(proposalState.timeoutMs).toBe(300_000);
 
 		const autofocusResult = await extension.tools
 			.get("raman_run_autofocus")

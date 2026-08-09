@@ -2,7 +2,13 @@
 
 import numpy as np
 from typing import Callable
-from autofocus.labspec_spot_focus import labspec_center_spot_focus, labspec_spot_compactness
+from autofocus.labspec_spot_focus import (
+    labspec_center_streak_guard_support,
+    labspec_center_spot_focus_old,
+    labspec_crisp_ring_axis_support,
+    labspec_optical_axis_support,
+    labspec_spot_compactness,
+)
 from autofocus.models import ROI
 from autofocus.roi import prepare
 
@@ -48,12 +54,30 @@ def normalized_variance(image: np.ndarray, roi: ROI) -> float:
     return float(np.var(patch)) / max(float(np.mean(patch)), 1e-6)
 
 
+def labspec_center_spot_focus(image: np.ndarray, roi: ROI) -> float:
+    """Score a filled LabSpec center spot using intensity-normalized gradients."""
+    patch = prepare(image, roi, blur=False)
+    mean_intensity = max(float(np.mean(patch)), 1e-6)
+    gradient_energy = max(tenengrad(image, roi), 0.0)
+    normalized_gradient = float(np.sqrt(gradient_energy)) / mean_intensity
+    optical_axis_support = max(
+        labspec_optical_axis_support(image, roi),
+        labspec_crisp_ring_axis_support(image, roi, normalized_gradient),
+    )
+    base_score = 2.25 * normalized_gradient * optical_axis_support
+    score = base_score * labspec_center_streak_guard_support(image, roi, base_score)
+    if not np.isfinite(score):
+        return 0.0
+    return float(max(score, 0.0))
+
+
 METRICS: dict[str, Callable[[np.ndarray, ROI], float]] = {
     "tenengrad": tenengrad,
     "laplacian_variance": laplacian_variance,
     "brenner": brenner,
     "normalized_variance": normalized_variance,
     "labspec_center_spot_focus": labspec_center_spot_focus,
+    "labspec_center_spot_focus_old": labspec_center_spot_focus_old,
     "labspec_spot_compactness": labspec_spot_compactness,
 }
 

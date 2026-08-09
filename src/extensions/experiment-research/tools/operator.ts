@@ -94,9 +94,13 @@ const DEFAULT_SMOKE_SPECTRUM_LASER_POWER_PERCENT = 0.1;
 const DEFAULT_SMOKE_SPECTRUM_ACCUMULATIONS = 1;
 const DEFAULT_SMOKE_SPECTRUM_TIMEOUT_MS = 10_000;
 const MAX_SMOKE_SPECTRUM_LASER_POWER_PERCENT = 0.1;
-const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 240_000;
+const DEFAULT_AUTOFOCUS_TIMEOUT_MS = 300_000;
 const DEFAULT_AUTOFOCUS_MIN_OBJECTIVE_CLEARANCE_UM = 200;
 const DEFAULT_AUTOFOCUS_ROI = { x: 492, y: 353, width: 225, height: 225 };
+const DEFAULT_AUTOFOCUS_STAGE_TIMEOUT_MS = 120_000;
+const MIN_AUTOFOCUS_STAGE_TIMEOUT_MS = 60_000;
+const DEFAULT_AUTOFOCUS_FRAME_TIMEOUT_MS = 30_000;
+const MIN_AUTOFOCUS_FRAME_TIMEOUT_MS = DEFAULT_AUTOFOCUS_FRAME_TIMEOUT_MS;
 // The MC.Newton driver settles axes to a 5 um tolerance; closing tighter than that only chases readout noise.
 const DEFAULT_STAGE_MOVE_TOLERANCE_UM = 5;
 const DEFAULT_STAGE_MOVE_MAX_CORRECTIONS = 2;
@@ -296,6 +300,17 @@ function checkMoveLimits(
 		};
 	}
 	return { ok: true };
+}
+
+function clampAutofocusStageTimeout(timeoutMs: number | undefined): number {
+	return Math.min(
+		Math.max(timeoutMs ?? DEFAULT_AUTOFOCUS_STAGE_TIMEOUT_MS, MIN_AUTOFOCUS_STAGE_TIMEOUT_MS),
+		DEFAULT_AUTOFOCUS_STAGE_TIMEOUT_MS,
+	);
+}
+
+function clampAutofocusFrameTimeout(timeoutMs: number | undefined): number {
+	return Math.max(timeoutMs ?? DEFAULT_AUTOFOCUS_FRAME_TIMEOUT_MS, MIN_AUTOFOCUS_FRAME_TIMEOUT_MS);
 }
 
 export const ramanGetHardwareStatusTool = {
@@ -572,8 +587,8 @@ export const ramanRunAutofocusTool = {
 			zStartUm: params.zStartUm,
 			zEndUm: params.zEndUm,
 			pointCount: params.pointCount,
-			stageTimeoutMs: params.stageTimeoutMs,
-			frameTimeoutMs: params.frameTimeoutMs,
+			stageTimeoutMs: clampAutofocusStageTimeout(params.stageTimeoutMs),
+			frameTimeoutMs: clampAutofocusFrameTimeout(params.frameTimeoutMs),
 			settleMs: params.settleMs,
 			framesPerZ: params.framesPerZ,
 			warmupFramesPerZ: params.warmupFramesPerZ,

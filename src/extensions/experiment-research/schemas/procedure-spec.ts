@@ -1,6 +1,8 @@
 import { Type, type Static } from "typebox";
 import { compileSchema } from "./validation.ts";
 
+export const DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM = 40;
+
 export const ResourceRefSchema = Type.Object(
 	{
 		resourceId: Type.String({ minLength: 1 }),
@@ -233,7 +235,7 @@ export const SurfaceCorrectionSchema = Type.Union([
 				),
 				{ minItems: 3 },
 			),
-			localAutofocusHalfRangeUm: Type.Literal(40),
+			localAutofocusHalfRangeUm: Type.Number({ exclusiveMinimum: 0 }),
 		},
 		{ additionalProperties: false },
 	),
@@ -272,7 +274,7 @@ export const SurfaceCorrectionSchema = Type.Union([
 				),
 				{ minItems: 3 },
 			),
-			localAutofocusHalfRangeUm: Type.Literal(40),
+			localAutofocusHalfRangeUm: Type.Number({ exclusiveMinimum: 0 }),
 		},
 		{ additionalProperties: false },
 	),

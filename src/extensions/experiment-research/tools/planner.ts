@@ -21,7 +21,7 @@ import {
 	listExperimentProcedureTemplates,
 	saveExperimentIntent,
 } from "../store/index.ts";
-import { FOCUS_CENTER_POLICY } from "../schemas/index.ts";
+import { DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM, FOCUS_CENTER_POLICY } from "../schemas/index.ts";
 import {
 	ProcedureSpecParamsSchema,
 	type ExecutionMode,
@@ -105,6 +105,7 @@ const FocusPlaneRegistrationParamsSchema = Type.Object(
 		procedureSpecId: Type.String({ minLength: 1 }),
 		experimentId: Type.String({ minLength: 1 }),
 		points: Type.Array(ManualFocusPlanePointSchema, { minItems: 3, maxItems: 3 }),
+		localAutofocusHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 		operatorConfirmation: Type.Object(
 			{
 				approvedBy: Type.Literal("user"),
@@ -122,6 +123,7 @@ const FocusPlaneRegistrationParamsSchema = Type.Object(
 const ManualFocusPlaneParamsSchema = Type.Object(
 	{
 		points: Type.Array(ManualFocusPlanePointSchema, { minItems: 3, maxItems: 3 }),
+		localAutofocusHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 	},
 	{ additionalProperties: false },
 );
@@ -268,6 +270,7 @@ function previewState(spec: ProcedureSpec, templateApplication?: TemplateApplica
 		requiresConfirmation: preview.requiresConfirmation,
 		risks: preview.risks,
 		limits: preview.limits,
+		mappingAutofocus: preview.mappingAutofocus,
 		templateApplication: templateApplicationState(templateApplication),
 	};
 }
@@ -313,7 +316,7 @@ function calculateManualFocusPlane(params: ManualFocusPlaneParams): {
 				c: model.c,
 			},
 			validRegion,
-			localAutofocusHalfRangeUm: 40,
+			localAutofocusHalfRangeUm: params.localAutofocusHalfRangeUm ?? DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
 		},
 	};
 }
@@ -503,7 +506,7 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 					{ anchorId: "corner_3", xUm: 3_000, yUm: 2_000 },
 					{ anchorId: "corner_4", xUm: 2_000, yUm: 2_000 },
 				],
-				localAutofocusHalfRangeUm: 40,
+				localAutofocusHalfRangeUm: DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
 			},
 			perPoint: [
 				{ kind: "move_to_point" },
@@ -542,6 +545,7 @@ async function buildPreflightState(
 			requiresConfirmation: preview.requiresConfirmation,
 			risks: preview.risks,
 			limits: preview.limits,
+			mappingAutofocus: preview.mappingAutofocus,
 			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
 			requiredRolesPresent,
@@ -571,6 +575,7 @@ async function buildPreflightState(
 			requiresConfirmation: preview.requiresConfirmation,
 			risks: preview.risks,
 			limits: preview.limits,
+			mappingAutofocus: preview.mappingAutofocus,
 			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
 			requiredRolesPresent,
@@ -604,6 +609,7 @@ async function buildPreflightState(
 		requiresConfirmation: preview.requiresConfirmation,
 		risks: preview.risks,
 		limits: preview.limits,
+		mappingAutofocus: preview.mappingAutofocus,
 		templateApplication: templateApplicationState(templateApplication),
 		savePath: preview.savePath,
 		requiredRolesPresent,
@@ -1014,7 +1020,7 @@ export const registerOperatorFocusPlaneCalibrationTool = {
 					c: model.c,
 				},
 				validRegion,
-				localAutofocusHalfRangeUm: 40,
+				localAutofocusHalfRangeUm: params.localAutofocusHalfRangeUm ?? DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
 			};
 			return success("Registered focus-plane calibration artifact from operator-supplied XYZ coordinates.", {
 				calibrationRunId: params.calibrationRunId,

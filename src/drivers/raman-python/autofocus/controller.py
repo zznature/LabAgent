@@ -23,6 +23,38 @@ from stage.exceptions import StageError
 
 log = logging.getLogger(__name__)
 
+LOW_SCORE_REFINEMENT_THRESHOLD = 0.75
+LOW_SCORE_REFINEMENT_HALF_RANGE_UM = 8.0
+LOW_SCORE_REFINEMENT_POINT_COUNT = 5
+
+
+class LowScoreRefinementError(RuntimeError):
+    """Raised when a low-score autofocus refinement cannot improve the focus."""
+    pass
+
+
+def low_score_refinement_targets(center_um: float) -> list[float]:
+    return [float(z) for z in np.linspace(center_um - LOW_SCORE_REFINEMENT_HALF_RANGE_UM, center_um + LOW_SCORE_REFINEMENT_HALF_RANGE_UM, LOW_SCORE_REFINEMENT_POINT_COUNT)]
+
+
+def refine_low_score_focus(
+    targets: list[float],
+    current_score: float,
+    sample_score: Callable[[float], tuple[float, float]],
+) -> tuple[float, float]:
+    best_z_um = targets[len(targets) // 2]
+    best_score = current_score
+    for target_z_um in targets:
+        actual_z_um, score = sample_score(target_z_um)
+        if score > best_score:
+            best_z_um = actual_z_um
+            best_score = score
+    if best_score <= current_score:
+        raise LowScoreRefinementError(
+            f"Low-score autofocus refinement did not improve the score above {current_score:.4f}."
+        )
+    return best_z_um, best_score
+
 
 class AutofocusController:
     """High-level autofocus orchestrator: validates inputs, runs scans, applies confidence checks."""
@@ -174,6 +206,26 @@ class AutofocusController:
                 FocusStatus.STAGE_ERROR, f"Final verification: {e}", coarse=coarse, fine=fine
             )
 
+        if final_point.score < LOW_SCORE_REFINEMENT_THRESHOLD:
+            try:
+                def sample_refinement_point(target_z_um: float) -> tuple[float, float]:
+                    point = scanner.sample_score(target_z_um, roi, tolerance_um=params.fine_stage_tolerance_um)
+                    return point.z_um, point.score
+
+                refined_z_um, _ = refine_low_score_focus(
+                    low_score_refinement_targets(final_point.z_um),
+                    final_point.score,
+                    sample_refinement_point,
+                )
+                final_point = scanner.sample_score(refined_z_um, roi, tolerance_um=params.final_stage_tolerance_um)
+            except LowScoreRefinementError as e:
+                return self._result_error(
+                    FocusStatus.LOW_CONFIDENCE,
+                    str(e),
+                    coarse=coarse,
+                    fine=fine,
+                )
+
         fine_best_score = fine.best().score
         if final_point.score < 0.7 * fine_best_score:
             return FocusResult(
@@ -231,6 +283,8 @@ class AutofocusController:
             return self._result_error(FocusStatus.FRAME_ERROR, f"Fixed-range scan: {e}")
         except (StageTimeoutError, StageError) as e:
             return self._result_error(FocusStatus.STAGE_ERROR, f"Fixed-range scan: {e}")
+        except LowScoreRefinementError as e:
+            return self._result_error(FocusStatus.LOW_CONFIDENCE, f"Fixed-range scan: {e}")
         except Exception as e:
             return self._result_error(FocusStatus.NO_PEAK, f"Fixed-range scan: {e}")
 
@@ -589,21 +643,6 @@ class FixedRangeAutofocusController:
                 selection_source = "parabolic_verified"
             else:
                 selection_source = "sampled_after_prediction_check"
-        else:
-            local_refinement = self._sample_local_refinement(
-                scanner,
-                points,
-                peak.sampled_best,
-                roi,
-                params,
-            )
-            if local_refinement is not None:
-                prediction_verification = local_refinement
-                if local_refinement.score > peak.sampled_best.score:
-                    selected = local_refinement
-                    selection_source = "local_refinement_verified"
-                else:
-                    selection_source = "sampled_after_local_refinement"
 
         final_target_um = selected.actual_z_um
         final_z_um = scanner.move_to_z(final_target_um)
@@ -614,13 +653,40 @@ class FixedRangeAutofocusController:
             tolerance_um=params.final_tolerance_um,
             sample_role="final_verification",
         )
+        refinement_points: list[ScoredZPoint] = []
+        if final_verification.score < LOW_SCORE_REFINEMENT_THRESHOLD:
+            refinement_points = [
+                scanner.sample(
+                    target_z_um,
+                    roi,
+                    frames_per_z=params.final_verification_frames_per_z,
+                    tolerance_um=params.final_tolerance_um,
+                    sample_role="low_score_refinement",
+                )
+                for target_z_um in low_score_refinement_targets(selected.actual_z_um)
+            ]
+            refined_best = max(refinement_points, key=lambda point: point.score)
+            if refined_best.score <= final_verification.score:
+                raise LowScoreRefinementError(
+                    f"Low-score autofocus refinement around z={selected.actual_z_um:.3f} um did not improve the score above {final_verification.score:.4f}."
+                )
+            selected = refined_best
+            final_target_um = selected.actual_z_um
+            final_z_um = scanner.move_to_z(final_target_um)
+            final_verification = scanner.sample(
+                final_target_um,
+                roi,
+                frames_per_z=params.final_verification_frames_per_z,
+                tolerance_um=params.final_tolerance_um,
+                sample_role="refinement_verification",
+            )
         return FixedRangeAutofocusResult(
             best=peak.sampled_best,
             peak=peak,
             final_z_um=final_z_um,
             final_verification=final_verification,
             final_error_um=float(final_z_um - final_target_um),
-            points=points,
+            points=points + refinement_points,
             selected=selected,
             prediction_verification=prediction_verification,
             selection_source=selection_source,

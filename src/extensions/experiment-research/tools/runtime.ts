@@ -13,6 +13,7 @@ import {
 } from "../kernel/run-controller.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import { approveAndFreezeProcedureSpec, RunAdmissionError } from "../kernel/run-admission.ts";
+import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts";
 import { getRamanLiveRuntime } from "../runtime/raman/index.ts";
 import {
 	createProcedureProposal,
@@ -243,6 +244,7 @@ export const proposeRunTool = {
 				"invalid_procedure_spec",
 			);
 		}
+		const preview = summarizeProcedureProposal(params.spec);
 		const proposal = createProcedureProposal(ctx.cwd, params.spec);
 		const summary = `Run proposal ${proposal.proposalId} created and awaiting approval. specHash=${proposal.specHash}`;
 		return {
@@ -254,9 +256,14 @@ export const proposeRunTool = {
 				stateAfter: {
 					proposalId: proposal.proposalId,
 					specHash: proposal.specHash,
-					requiresConfirmation: true,
 					status: proposal.status,
 					procedureSpecId: proposal.procedureSpecId,
+					unitCount: preview.unitCount,
+					estimatedRuntimeMs: preview.estimatedRuntimeMs,
+					requiresConfirmation: preview.requiresConfirmation,
+					risks: preview.risks,
+					limits: preview.limits,
+					mappingAutofocus: preview.mappingAutofocus,
 					supportedExecutionModes: ["simulation", "live-supervised"],
 					templateApplication: params.templateApplication
 						? {
@@ -319,6 +326,7 @@ export const reviseProposalTool = {
 			);
 		}
 
+		const preview = summarizeProcedureProposal(revisedSpec);
 		const revised = createProcedureProposal(ctx.cwd, revisedSpec, proposal.proposalId);
 		supersedeProcedureProposal(ctx.cwd, proposal, revised.proposalId);
 		const summary = `Proposal ${proposal.proposalId} superseded by ${revised.proposalId}. specHash=${revised.specHash}. Operator approval does not carry over; the new hash must be acknowledged.`;
@@ -337,6 +345,11 @@ export const reviseProposalTool = {
 					requiresConfirmation: true,
 					status: revised.status,
 					procedureSpecId: revised.procedureSpecId,
+					unitCount: preview.unitCount,
+					estimatedRuntimeMs: preview.estimatedRuntimeMs,
+					risks: preview.risks,
+					limits: preview.limits,
+					mappingAutofocus: preview.mappingAutofocus,
 					reason: params.reason,
 				},
 			},

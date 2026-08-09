@@ -11,7 +11,7 @@ import {
 	type FocusPlaneCorner,
 	validateFocusPlaneCorners,
 } from "../planner/focus-plane.ts";
-import { buildProcedureSpec } from "../planner/procedure-spec-builder.ts";
+import { buildProcedureProposal, buildProcedureSpec } from "../planner/procedure-spec-builder.ts";
 import { successActionResult } from "../runtime/raman/actions.ts";
 import {
 	runLiveRamanUnit,
@@ -279,7 +279,7 @@ describe("focus-plane calibration and mapping", () => {
 		expect(() => compileProcedureSpec(spec)).toThrow(/Autofocus window.*exceeds the approved Z range/u);
 	});
 
-	it("predicts mapping Z from the approved plane and freezes a +/-40 um correction", () => {
+	it("predicts mapping Z from the approved plane and defaults to a +/-40 um correction", () => {
 		const region = defaultFocusPlaneCorners({ xUm: 0, yUm: 0 });
 		const spec = buildProcedureSpec({
 			procedureId: "raman_grid_mapping",
@@ -328,6 +328,53 @@ describe("focus-plane calibration and mapping", () => {
 			{ kind: "acquire_spectrum" },
 		];
 		expect(() => compileProcedureSpec(wrongOrder)).toThrow(/then one autofocus, then one acquire_spectrum/u);
+	});
+
+	it("freezes a custom mapping local autofocus half-range in the proposal", () => {
+		const region = defaultFocusPlaneCorners({ xUm: 0, yUm: 0 });
+		const proposal = buildProcedureProposal({
+			procedureId: "raman_grid_mapping",
+			intent,
+			resources,
+			limits,
+			autofocus,
+			acquisition,
+			grid: {
+				origin: { xUm: -100, yUm: -100 },
+				rows: 1,
+				cols: 1,
+				pitchXUm: 200,
+				pitchYUm: 200,
+			},
+			focusPlane: {
+				calibrationRunId: "run-calibration",
+				artifactId: "focus-plane-artifact",
+				checksum: "sha256:abc",
+				a: 0.05,
+				b: -0.02,
+				c: 1000,
+				validRegion: region,
+				localAutofocusHalfRangeUm: 20,
+			},
+		});
+
+		expect(ProcedureSpecValidator.Check(proposal.spec)).toBe(true);
+		expect(proposal.preview.mappingAutofocus).toEqual({
+			localHalfRangeUm: 20,
+			localFullRangeUm: 40,
+		});
+		expect(proposal.preview.risks).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					code: "mapping_local_autofocus_window",
+					message: expect.stringContaining("+/-20 um"),
+				}),
+			]),
+		);
+		if (proposal.spec.plan.kind !== "grid_scan" || proposal.spec.plan.surfaceCorrection?.kind !== "focus_plane") {
+			throw new Error("expected corrected grid mapping");
+		}
+		expect(proposal.spec.plan.surfaceCorrection.localAutofocusHalfRangeUm).toBe(20);
 	});
 
 	it("calculates a manual three-point focus plane for 1x10 mapping without artifact validation", async () => {
@@ -394,7 +441,7 @@ describe("focus-plane calibration and mapping", () => {
 		]);
 	});
 
-	it("executes calibration coarse-to-fine, publishes a model, then maps with +/-40 um correction", async () => {
+	it("executes calibration coarse-to-fine, publishes a model, then maps with a custom local correction", async () => {
 		const cwd = mkdtempSync(join(tmpdir(), "focus-plane-live-"));
 		try {
 			const autofocusActions: Array<{ params: { zStartUm: number; zEndUm: number; strategy?: string } }> = [];
@@ -518,6 +565,7 @@ describe("focus-plane calibration and mapping", () => {
 					checksum: planeRecord!.artifact.metadata!.checksum as string,
 					...plane.model,
 					validRegion: plane.validRegion,
+					localAutofocusHalfRangeUm: 20,
 				},
 			});
 			const calibrationArtifacts = readArtifactRecords(cwd, calibrationRunId).map((record) => record.artifact);
@@ -567,7 +615,7 @@ describe("focus-plane calibration and mapping", () => {
 			expect(mappingResult.status).toBe("completed");
 			const mappingAutofocus = autofocusActions.at(-1)!;
 			expect(mappingAutofocus.params.strategy).toBe("mapping_local_correction");
-			expect(mappingAutofocus.params.zEndUm - mappingAutofocus.params.zStartUm).toBe(80);
+			expect(mappingAutofocus.params.zEndUm - mappingAutofocus.params.zStartUm).toBe(40);
 
 			const tamperedMappingSpec = structuredClone(mappingSpec);
 			if (
@@ -594,6 +642,146 @@ describe("focus-plane calibration and mapping", () => {
 			if (tamperedResult.status === "failed") {
 				expect(tamperedResult.error.errorCode).toBe("focus_plane_artifact_mismatch");
 			}
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("centers each mapping autofocus window on the most recent successful focus z", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "focus-plane-window-"));
+		try {
+			const autofocusActions: Array<{ zStartUm: number; zEndUm: number }> = [];
+			const moveTargets: Array<{ xUm: number; yUm: number; zUm?: number }> = [];
+			let position = { xUm: 0, yUm: 0, zUm: 1000 };
+			const runtime = {
+				preflight: () => ({ preflightReady: true, controlAvailable: true }),
+				stage: {
+					resource: {
+						resourceId: "stage-main",
+						kind: "stage",
+						runtime: "raman_python",
+						driver: "memory",
+						config: { port: "memory", xChannel: 1, yChannel: 2, zChannel: 3, baudrate: 115_200 },
+						leasePolicy: "exclusive",
+						simulationAvailable: true,
+						limits: { xRangeUm: [0, 5_000], yRangeUm: [0, 5_000], zRangeUm: [0, 5_000] },
+					},
+					getPosition: () => successActionResult("position", { position }),
+					moveAbsoluteAndWait: (action: { target: { xUm: number; yUm: number; zUm?: number } }) => {
+						moveTargets.push(action.target);
+						position = { xUm: action.target.xUm, yUm: action.target.yUm, zUm: action.target.zUm ?? position.zUm };
+						return successActionResult("moved", { position });
+					},
+				},
+				autofocus: {
+					runSingle: (action: { params: { zStartUm: number; zEndUm: number } }) => {
+						autofocusActions.push(action.params);
+						const zBestUm = action.params.zStartUm + 30;
+						position = { ...position, zUm: zBestUm };
+						return successActionResult("focused", {
+							zBestUm,
+							confidence: 1,
+						});
+					},
+				},
+				frame: {
+					resource: {
+						resourceId: "frame-main",
+						kind: "frame_provider",
+						runtime: "raman_python",
+						driver: "memory",
+						config: { bridgeDir: "memory", imageFormat: "tif", minCaptureIntervalMs: 0 },
+						leasePolicy: "shared-read",
+						simulationAvailable: true,
+					},
+					captureLatest: () => successActionResult("frame"),
+				},
+				spectrometer: {
+					resource: {
+						resourceId: "spectrometer-main",
+						kind: "spectrometer",
+						runtime: "raman_python",
+						driver: "memory",
+						config: { bridgeDir: "memory", requestFilename: "request", resultFilename: "result" },
+						leasePolicy: "exclusive",
+						simulationAvailable: true,
+					},
+					acquireSpectrum: () =>
+						successActionResult("spectrum", {
+							saturated: false,
+							snr: 20,
+							targetPeakBaselineRatio: 5,
+						}),
+				},
+			} as unknown as RamanLiveRuntime;
+			const mappingSpec = buildProcedureSpec({
+				procedureId: "raman_grid_mapping",
+				intent,
+				resources,
+				limits: {
+					...limits,
+					zRangeUm: { minUm: 0, maxUm: 5_000 },
+				},
+				autofocus,
+				acquisition,
+				grid: {
+					origin: { xUm: 10, yUm: 10 },
+					rows: 1,
+					cols: 2,
+					pitchXUm: 50,
+					pitchYUm: 0,
+				},
+				focusPlane: {
+					source: "manual_xyz_points",
+					anchors: [
+						{ anchorId: "p1", xUm: 0, yUm: 0, zUm: 1000 },
+						{ anchorId: "p2", xUm: 200, yUm: 0, zUm: 1010 },
+						{ anchorId: "p3", xUm: 0, yUm: 200, zUm: 995 },
+					],
+					a: 0.05,
+					b: 0.02,
+					c: 1000,
+					localAutofocusHalfRangeUm: 20,
+					validRegion: [
+						{ anchorId: "corner_1", xUm: 0, yUm: 0 },
+						{ anchorId: "corner_2", xUm: 200, yUm: 0 },
+						{ anchorId: "corner_3", xUm: 200, yUm: 200 },
+						{ anchorId: "corner_4", xUm: 0, yUm: 200 },
+					],
+				},
+			});
+			const units = compileProcedureSpec(mappingSpec);
+			expect(units).toHaveLength(2);
+
+			for (const unit of units) {
+				const result = await runLiveRamanUnit(cwd, "mapping-run", unit, mappingSpec, runtime, {} as RunState);
+				expect(result.status).toBe("completed");
+			}
+
+			expect(moveTargets.map((target) => target.zUm)).toEqual(units.map((unit) => unit.point!.zUm));
+			expect(autofocusActions).toHaveLength(2);
+			const firstAutofocus = autofocusActions[0];
+			const secondAutofocus = autofocusActions[1];
+			const firstUnit = units[0];
+			if (!firstAutofocus || !secondAutofocus) {
+				throw new Error("expected two autofocus calls");
+			}
+			if (!firstUnit || !firstUnit.point) {
+				throw new Error("expected the first compiled mapping unit");
+			}
+			const firstPointZ = firstUnit.point.zUm;
+			if (firstPointZ === undefined) {
+				throw new Error("expected the first compiled mapping unit to have a Z coordinate");
+			}
+			const firstFocusZ = firstAutofocus.zStartUm + 30;
+			expect(firstAutofocus).toMatchObject({
+				zStartUm: firstPointZ - 20,
+				zEndUm: firstPointZ + 20,
+			});
+			expect(secondAutofocus).toMatchObject({
+				zStartUm: firstFocusZ - 20,
+				zEndUm: firstFocusZ + 20,
+			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}

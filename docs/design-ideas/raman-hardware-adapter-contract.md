@@ -114,7 +114,9 @@ TypeScript runtime 解析 strategy 和窗口；Python daemon 只执行单次有�
 
 For mapping, `plan.z` is only the point-placement target. The current autofocus center is runtime state, surfaced as `lastAcceptedFocusZUm` so planners do not confuse predicted point Z with the autofocus center.
 
-默认 `metricName = labspec_center_spot_focus` 使用亮斑紧凑度乘以 Tenengrad 平方根，并除以 ROI 平均亮度；它同时要求焦斑紧凑和边缘清晰，并抵消统一亮度缩放。旧的同心亮斑 / 环纹启发式保留为显式兼容名称 `labspec_center_spot_focus_old`，不再作为默认 metric。
+默认 `metricName = labspec_center_spot_focus` 使用 Tenengrad 平方根除以 ROI 平均亮度，再乘以连续的光轴中心填充支持度。亮度归一化梯度负责保留接近焦点时的上升/下降曲线；光轴中心填充支持度抑制离焦空心环，即使环纹本身具有很强边缘也不会被误判为最佳焦点。对于清晰、紧凑、接近中心但中心小圆存在暗纹结构的环纹焦点，metric 会给光轴支持度一个有限下限，避免把真实清晰焦点压低到相邻离焦帧之下。对已经得到高基础分且中心填充充分的帧，metric 还会用竖向拖尾 guard 惩罚亮斑质心偏移和纵向拉伸，避免把中心仍然发亮但形态拖尾的帧当成高质量焦点。metric 名称和调用契约保持不变；最终验证分数严格小于 `0.75` 时触发低分二次聚焦，等于 `0.75` 时不触发。旧的同心亮斑 / 环纹启发式保留为显式兼容名称 `labspec_center_spot_focus_old`，不再作为默认 metric。
+
+历史 live mapping 记录显示，成功 autofocus 的保存帧最大间隔约 21.3 秒，保存帧等待超时保持 `frameTimeoutMs = 30000`；失败样本集中在 `stageTimeoutMs = 10000`，Z 轴仍在进入 5 µm 容差或稳定性判定阶段，因此 live runtime 会把 autofocus 单次 stage settle timeout 夹紧到至少 `60000`，最高仍不超过 `120000`。完整 autofocus action timeout 使用 `300000`，覆盖最近 18 帧 autofocus 流程约 180 秒的历史上界并保留恢复余量。
 
 ## 6. Tool surface
 
@@ -234,7 +236,7 @@ mapping spec 冻结：
 - artifact identity 与 checksum，或 manual anchors
 - coefficients
 - valid region
-- local autofocus range
+- local autofocus range as `surfaceCorrection.localAutofocusHalfRangeUm` (default 40 um, explicitly overridable per mapping proposal)
 
 compiler 拒绝区域外点，计算 predicted Z，并要求 `move_to_point -> autofocus -> acquire_spectrum` 顺序。preflight/live runtime 对 artifact 路径重新校验 identity、checksum、coefficients 与 region；不匹配时 fail closed，不静默退回 fixed Z。
 

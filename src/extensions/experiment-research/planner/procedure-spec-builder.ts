@@ -10,19 +10,38 @@ import {
 	type FocusPlaneCorner,
 	type FocusPlanePoint,
 } from "./focus-plane.ts";
-import type {
-	ExperimentIntent,
-	ExecutionUnit,
-	Point,
-	ProcedureDomain,
-	ProcedureId,
-	ProcedureLimits,
-	ProcedureSpec,
-	ResourceRef,
-	RamanParameterSearch,
-	SemanticStep,
-	StoppingRules,
+import {
+	DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
+	type ExperimentIntent,
+	type ExecutionUnit,
+	type Point,
+	type ProcedureDomain,
+	type ProcedureId,
+	type ProcedureLimits,
+	type ProcedureSpec,
+	type ResourceRef,
+	type RamanParameterSearch,
+	type SemanticStep,
+	type StoppingRules,
 } from "../schemas/index.ts";
+
+interface MappingAutofocusPreview {
+	localHalfRangeUm: number;
+	localFullRangeUm: number;
+}
+
+type FocusPlaneInput = {
+	source?: "calibration_run" | "manual_xyz_points";
+	calibrationRunId?: string;
+	artifactId?: string;
+	checksum?: string;
+	anchors?: Array<{ anchorId: string; xUm: number; yUm: number; zUm: number }>;
+	a: number;
+	b: number;
+	c: number;
+	validRegion: Array<FocusPlanePoint & { anchorId: string }>;
+	localAutofocusHalfRangeUm?: number;
+};
 
 export type ProposalRiskLevel = "notice" | "confirm_required" | "forbidden";
 
@@ -39,6 +58,7 @@ export interface ProcedureProposalPreview {
 	savePath: string;
 	requiresConfirmation: true;
 	unitCount: number;
+	mappingAutofocus?: MappingAutofocusPreview;
 }
 
 interface RamanResourceBindings {
@@ -118,17 +138,7 @@ export interface GridMappingBuilderInput extends BaseProcedureBuilderInput {
 		pitchYUm: number;
 		order?: "row_major" | "snake";
 	};
-	focusPlane?: {
-		source?: "calibration_run" | "manual_xyz_points";
-		calibrationRunId?: string;
-		artifactId?: string;
-		checksum?: string;
-		anchors?: Array<{ anchorId: string; xUm: number; yUm: number; zUm: number }>;
-		a: number;
-		b: number;
-		c: number;
-		validRegion: Array<FocusPlanePoint & { anchorId: string }>;
-	};
+	focusPlane?: FocusPlaneInput;
 	focusPlaneDecision?: "user_declined";
 }
 
@@ -177,6 +187,29 @@ function toResourceRefs(resources: RamanResourceBindings): ResourceRef[] {
 	];
 }
 
+function mappingLocalAutofocusHalfRangeUm(focusPlane: FocusPlaneInput): number {
+	const halfRangeUm = focusPlane.localAutofocusHalfRangeUm ?? DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM;
+	if (halfRangeUm <= 0) {
+		throw new Error("Mapping local autofocus half-range must be greater than 0 um.");
+	}
+	return halfRangeUm;
+}
+
+function mappingAutofocusPreview(spec: ProcedureSpec): MappingAutofocusPreview | undefined {
+	const surfaceCorrection =
+		(spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list") &&
+		spec.plan.surfaceCorrection?.kind === "focus_plane"
+			? spec.plan.surfaceCorrection
+			: undefined;
+	if (!surfaceCorrection) {
+		return undefined;
+	}
+	return {
+		localHalfRangeUm: surfaceCorrection.localAutofocusHalfRangeUm,
+		localFullRangeUm: surfaceCorrection.localAutofocusHalfRangeUm * 2,
+	};
+}
+
 function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
 	const strategy =
 		input.procedureId === "raman_focus_plane_calibration"
@@ -219,6 +252,9 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 		) {
 			throw new Error("Calibration-run focus-plane mapping requires calibrationRunId, artifactId, and checksum.");
 		}
+		const localAutofocusHalfRangeUm = input.focusPlane
+			? mappingLocalAutofocusHalfRangeUm(input.focusPlane)
+			: DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM;
 		return {
 			kind: "grid_scan",
 			grid: input.grid,
@@ -234,7 +270,7 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 								c: input.focusPlane.c,
 							},
 							validRegion: validateFocusPlaneRegion(input.focusPlane.validRegion),
-							localAutofocusHalfRangeUm: 40,
+							localAutofocusHalfRangeUm,
 						}
 					: {
 							kind: "focus_plane",
@@ -248,7 +284,7 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 								c: input.focusPlane.c,
 							},
 							validRegion: validateFocusPlaneArtifactRegion(input.focusPlane.validRegion),
-							localAutofocusHalfRangeUm: 40,
+							localAutofocusHalfRangeUm,
 						}
 				: { kind: "disabled", reason: "user_declined" },
 			perPoint: defaultActions(),
@@ -442,17 +478,23 @@ export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedurePropos
 
 	risks.push(...classifyMotionRangeRisks(spec));
 
-	if (spec.plan.kind === "grid_scan") {
+	if (spec.procedureId === "raman_grid_mapping" && (spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list")) {
 		risks.push({
 			level: "confirm_required",
 			code: "multi_point_mapping",
-			message: "This mapping run will execute repeated motion and Raman acquisition across the approved grid.",
+			message: "This mapping run will execute repeated motion and Raman acquisition across the approved points.",
 		});
 		if (spec.plan.surfaceCorrection?.kind === "disabled") {
 			risks.push({
 				level: "confirm_required",
 				code: "focus_plane_correction_declined",
 				message: "The user explicitly declined focus-plane correction; this mapping run will use the planned fixed Z values.",
+			});
+		} else if (spec.plan.surfaceCorrection?.kind === "focus_plane") {
+			risks.push({
+				level: "notice",
+				code: "mapping_local_autofocus_window",
+				message: `Mapping local autofocus will use +/-${spec.plan.surfaceCorrection.localAutofocusHalfRangeUm} um around the runtime focus center at each point.`,
 			});
 		}
 	}
@@ -480,6 +522,7 @@ export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedurePropos
 		savePath: defaultProposalSavePath(spec),
 		requiresConfirmation: true,
 		unitCount: units.length,
+		mappingAutofocus: mappingAutofocusPreview(spec),
 	};
 }
 
