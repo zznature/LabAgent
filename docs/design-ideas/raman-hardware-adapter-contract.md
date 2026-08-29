@@ -116,6 +116,8 @@ For mapping, `plan.z` is only the point-placement target. The current autofocus 
 
 默认 `metricName = labspec_center_spot_focus` 使用 Tenengrad 平方根除以 ROI 平均亮度，再乘以连续的光轴中心填充支持度。亮度归一化梯度负责保留接近焦点时的上升/下降曲线；光轴中心填充支持度抑制离焦空心环，即使环纹本身具有很强边缘也不会被误判为最佳焦点。对于清晰、紧凑、接近中心但中心小圆存在暗纹结构的环纹焦点，metric 会给光轴支持度一个有限下限，避免把真实清晰焦点压低到相邻离焦帧之下。对已经得到高基础分且中心填充充分的帧，metric 还会用竖向拖尾 guard 惩罚亮斑质心偏移和纵向拉伸，避免把中心仍然发亮但形态拖尾的帧当成高质量焦点。metric 名称和调用契约保持不变；最终验证分数严格小于 `0.75` 时触发低分二次聚焦，等于 `0.75` 时不触发。旧的同心亮斑 / 环纹启发式保留为显式兼容名称 `labspec_center_spot_focus_old`，不再作为默认 metric。
 
+无光窗实验显式设置 `domain.raman.autofocus.params.metricName = labspec_no_window_spot_focus`。该 profile 复用 `labspec_spot_compactness`：先按 ROI 的稳健百分位归一化并扣除中位背景，再以信号三次方作为权重，按亮斑核心能量占比与加权 RMS 半径的比值评分；无光窗标定序列中紧凑亮斑因此得到最高分，而宽散光斑回落。`metricName` 是被冻结并随 proposal 审查的实验条件选择，不由 runtime 根据“有无光窗”或“是否真空”自行猜测；新增真空等条件时，应先用对应标定序列验证一个新 metric，再把稳定名称加入 driver registry 和 planner allowlist。
+
 历史 live mapping 记录显示，成功 autofocus 的保存帧最大间隔约 21.3 秒，保存帧等待超时保持 `frameTimeoutMs = 30000`；失败样本集中在 `stageTimeoutMs = 10000`，Z 轴仍在进入 5 µm 容差或稳定性判定阶段，因此 live runtime 会把 autofocus 单次 stage settle timeout 夹紧到至少 `60000`，最高仍不超过 `120000`。完整 autofocus action timeout 使用 `300000`，覆盖最近 18 帧 autofocus 流程约 180 秒的历史上界并保留恢复余量。
 
 ## 6. Tool surface

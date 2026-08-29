@@ -79,6 +79,7 @@ METRICS: dict[str, Callable[[np.ndarray, ROI], float]] = {
     "labspec_center_spot_focus": labspec_center_spot_focus,
     "labspec_center_spot_focus_old": labspec_center_spot_focus_old,
     "labspec_spot_compactness": labspec_spot_compactness,
+    "labspec_no_window_spot_focus": labspec_spot_compactness,
 }
 
 

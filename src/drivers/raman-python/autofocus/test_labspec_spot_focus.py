@@ -8,15 +8,15 @@ from autofocus.labspec_spot_focus import (
     labspec_crisp_ring_axis_support,
     labspec_optical_axis_support,
 )
-from autofocus.metrics import get_metric, labspec_center_spot_focus
+from autofocus.metrics import MetricStrategy, get_metric, labspec_center_spot_focus
 from autofocus.models import ROI
 
 
-def centered_spot(size: int = 225) -> np.ndarray:
+def centered_spot(size: int = 225, sigma: float = 9.0) -> np.ndarray:
     rows, cols = np.indices((size, size), dtype=np.float32)
     center = (size - 1) / 2.0
     radius_sq = (cols - center) ** 2 + (rows - center) ** 2
-    image = 20.0 + 210.0 * np.exp(-(radius_sq / (2.0 * 9.0**2)))
+    image = 20.0 + 210.0 * np.exp(-(radius_sq / (2.0 * sigma**2)))
     return image.astype(np.float32)
 
 
@@ -149,6 +149,21 @@ class LabSpecSpotFocusTest(unittest.TestCase):
     def test_metric_registry_exposes_new_and_old_center_spot_metrics(self) -> None:
         self.assertIs(get_metric("labspec_center_spot_focus"), labspec_center_spot_focus)
         self.assertIs(get_metric("labspec_center_spot_focus_old"), labspec_center_spot_focus_old)
+
+    def test_no_window_metric_scores_compact_spot_above_broad_spot(self) -> None:
+        roi = ROI(x=0, y=0, width=225, height=225)
+        metric = MetricStrategy("labspec_no_window_spot_focus")
+
+        self.assertGreater(metric.score(centered_spot(), roi), metric.score(broad_ring(), roi))
+
+    def test_no_window_metric_peaks_at_tightest_spot_in_focus_sequence(self) -> None:
+        roi = ROI(x=0, y=0, width=225, height=225)
+        metric = MetricStrategy("labspec_no_window_spot_focus")
+        scores = [metric.score(centered_spot(sigma=sigma), roi) for sigma in [30, 20, 12, 7, 12, 20, 30]]
+
+        self.assertEqual(int(np.argmax(scores)), 3)
+        self.assertTrue(all(left < right for left, right in zip(scores[:3], scores[1:4])))
+        self.assertTrue(all(left > right for left, right in zip(scores[3:6], scores[4:])))
 
 
 if __name__ == "__main__":

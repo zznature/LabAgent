@@ -38,6 +38,7 @@ const SUPPORTED_RAMAN_AUTOFOCUS_METRICS = new Set([
 	"labspec_center_spot_focus",
 	"labspec_center_spot_focus_old",
 	"labspec_spot_compactness",
+	"labspec_no_window_spot_focus",
 ]);
 const ProcedureSpecTemplateParamsSchema = Type.Object(
 	{
