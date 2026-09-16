@@ -19,6 +19,7 @@ import type {
 	ProcedureSpec,
 	SurfaceCorrection,
 } from "../schemas/procedure-spec.ts";
+import { DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM } from "../schemas/procedure-spec.ts";
 import { formatValidationErrors } from "../schemas/validation.ts";
 
 function formatUnitIndex(index: number): string {
@@ -331,14 +332,26 @@ function assertAutofocusWindowsWithinSpecLimits(spec: ProcedureSpec, units: Exec
 		spec.plan.surfaceCorrection?.kind === "focus_plane"
 			? spec.plan.surfaceCorrection
 			: undefined;
+	const fixedRange =
+		typeof spec.domain.raman.autofocus.params?.zStartUm === "number" &&
+		typeof spec.domain.raman.autofocus.params.zEndUm === "number"
+			? Math.abs(spec.domain.raman.autofocus.params.zEndUm - spec.domain.raman.autofocus.params.zStartUm) / 2
+			: undefined;
+	const paramsLocalRange = spec.domain.raman.autofocus.params?.localAutofocusHalfRangeUm;
+	const mappingHalfRangeUm =
+		surfaceCorrection?.localAutofocusHalfRangeUm ??
+		(typeof paramsLocalRange === "number" && paramsLocalRange > 0 ? paramsLocalRange : undefined) ??
+		(fixedRange !== undefined && fixedRange > 0 ? fixedRange : DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM);
+	const usesMappingLocalAutofocus =
+		spec.procedureId === "raman_grid_mapping" && spec.domain.raman.autofocus.params?.strategy !== "fixed_absolute";
 	const windows =
 		spec.plan.kind === "focus_plane_calibration"
 			? [{ unitId: units[0]?.unitId ?? spec.procedureSpecId, minimum: spec.plan.seedZUm - 100, maximum: spec.plan.seedZUm + 100 }]
-			: surfaceCorrection
+			: usesMappingLocalAutofocus
 				? units.map((unit) => ({
 						unitId: unit.unitId,
-						minimum: unit.point!.zUm! - surfaceCorrection.localAutofocusHalfRangeUm,
-						maximum: unit.point!.zUm! + surfaceCorrection.localAutofocusHalfRangeUm,
+						minimum: unit.point!.zUm! - mappingHalfRangeUm,
+						maximum: unit.point!.zUm! + mappingHalfRangeUm,
 					}))
 				: [];
 	for (const window of windows) {

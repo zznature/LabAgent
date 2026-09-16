@@ -144,6 +144,7 @@ export const RamanAutofocusSchema = Type.Object(
 							Type.Literal("mapping_local_correction"),
 						]),
 					),
+					localAutofocusHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 					coarseStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 					fineHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 					fineStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
@@ -174,6 +175,18 @@ export const RamanNumericRangeSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const RamanVacuumStateSchema = Type.Union([
+	Type.Literal("vacuum"),
+	Type.Literal("not_vacuum"),
+]);
+
+export const RamanEnvironmentSchema = Type.Object(
+	{
+		vacuumState: RamanVacuumStateSchema,
+	},
+	{ additionalProperties: false },
+);
+
 export const RamanParameterSearchSchema = Type.Object(
 	{
 		maxAttempts: Type.Integer({ minimum: 1 }),
@@ -194,6 +207,7 @@ export const RamanParameterSearchSchema = Type.Object(
 
 export const RamanDomainSchema = Type.Object(
 	{
+		environment: Type.Optional(RamanEnvironmentSchema),
 		autofocus: RamanAutofocusSchema,
 		acquisition: RamanAcquisitionSchema,
 		parameterSearch: Type.Optional(RamanParameterSearchSchema),
@@ -427,6 +441,8 @@ export type RetryableFailureReasons = Static<typeof RetryableFailureReasonsSchem
 export type RetryPolicy = Static<typeof RetryPolicySchema>;
 export type RamanAutofocus = Static<typeof RamanAutofocusSchema>;
 export type RamanAcquisition = Static<typeof RamanAcquisitionSchema>;
+export type RamanVacuumState = Static<typeof RamanVacuumStateSchema>;
+export type RamanEnvironment = Static<typeof RamanEnvironmentSchema>;
 export type RamanParameterSearch = Static<typeof RamanParameterSearchSchema>;
 export type RamanDomain = Static<typeof RamanDomainSchema>;
 export type ProcedureDomain = Static<typeof ProcedureDomainSchema>;

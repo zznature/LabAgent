@@ -135,6 +135,27 @@ def _stage_error_payload(stage: Any | None, extra: dict | None = None) -> dict:
     return payload
 
 
+def _apply_z_motion_profile(stage: Any, profile: Any) -> dict[str, Any] | None:
+    if not isinstance(profile, dict):
+        return None
+    resolved = {
+        "units": profile.get("units", "mm"),
+        "mode": profile.get("mode", "step"),
+        "voltageV": int(profile.get("voltageV", 50)),
+        "frequencyHz": int(profile.get("frequencyHz", 1000)),
+    }
+    set_z_motion_profile = getattr(stage, "set_z_motion_profile", None)
+    if callable(set_z_motion_profile):
+        set_z_motion_profile(
+            units=str(resolved["units"]),
+            mode=str(resolved["mode"]),
+            voltage_v=int(resolved["voltageV"]),
+            frequency_hz=int(resolved["frequencyHz"]),
+        )
+        return resolved
+    raise RuntimeError("Stage driver does not support per-action Z motion profiles.")
+
+
 def _stable_file(path: Path) -> bool:
     try:
         return path.exists() and path.stat().st_size > 0
@@ -374,7 +395,9 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
     target = payload["target"]
     stage = session.stage(request["stage"])
     _clear_stage_diagnostics(stage)
+    resolved_z_motion_profile = None
     try:
+        resolved_z_motion_profile = _apply_z_motion_profile(stage, payload.get("zMotionProfile"))
         stage.move_absolute_and_wait_um(
             x_um=target.get("xUm"),
             y_um=target.get("yUm"),
@@ -402,6 +425,7 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
         "Stage moved to requested point.",
         {
             "finalPosition": {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um},
+            "zMotionProfile": resolved_z_motion_profile,
             "stageMoveCommands": _stage_move_commands(stage),
             "stageSettleDiagnostics": _stage_settle_diagnostics(stage),
         },
@@ -461,7 +485,9 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     provider.artifact_dir = point_dir
     controller = AutofocusController(stage, provider)
     resolved_params: dict[str, Any] = {}
+    resolved_z_motion_profile = None
     try:
+        resolved_z_motion_profile = _apply_z_motion_profile(xyz_stage, params.get("zMotionProfile"))
         roi = ROI(**payload["roi"])
         if "zStartUm" not in params or "zEndUm" not in params:
             return _fail(
@@ -487,6 +513,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
                 "settleMs": params.get("settleMs", 100),
                 "framesPerZ": params.get("framesPerZ", 3),
                 "metricName": params.get("metricName", "labspec_center_spot_focus"),
+                "zMotionProfile": resolved_z_motion_profile,
             }
             result = controller.run_single(
                 roi,
@@ -527,6 +554,7 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
                 "interpolatePeak": params.get("interpolatePeak", True),
                 "finalVerificationFramesPerZ": params.get("finalVerificationFramesPerZ", 1),
                 "metricName": params.get("metricName", "labspec_center_spot_focus"),
+                "zMotionProfile": resolved_z_motion_profile,
                 "confidenceMethod": params.get("confidenceMethod", "curve_quality"),
             }
             result = controller.run_fixed_range(

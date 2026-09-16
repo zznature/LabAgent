@@ -19,11 +19,13 @@ import {
 	type ProcedureId,
 	type ProcedureLimits,
 	type ProcedureSpec,
+	type RamanEnvironment,
 	type ResourceRef,
 	type RamanParameterSearch,
 	type SemanticStep,
 	type StoppingRules,
 } from "../schemas/index.ts";
+import { resolveRamanEnvironmentRuntimeProfile, type RamanEnvironmentRuntimeProfile } from "../raman-environment-profile.ts";
 
 interface MappingAutofocusPreview {
 	localHalfRangeUm: number;
@@ -59,6 +61,7 @@ export interface ProcedureProposalPreview {
 	requiresConfirmation: true;
 	unitCount: number;
 	mappingAutofocus?: MappingAutofocusPreview;
+	ramanEnvironment: RamanEnvironmentRuntimeProfile;
 }
 
 interface RamanResourceBindings {
@@ -99,6 +102,7 @@ interface AutofocusInput {
 		finalVerificationFramesPerZ?: number;
 		metricName?: string;
 		strategy?: "fixed_absolute" | "calibration_coarse_to_fine" | "mapping_local_correction";
+		localAutofocusHalfRangeUm?: number;
 		coarseStepUm?: number;
 		fineHalfRangeUm?: number;
 		fineStepUm?: number;
@@ -112,6 +116,7 @@ interface BaseProcedureBuilderInput {
 	resources: RamanResourceBindings;
 	limits: ProcedureLimits;
 	stoppingRules?: StoppingRules;
+	environment?: RamanEnvironment;
 	autofocus: AutofocusInput;
 	acquisition: RamanAcquisitionInput;
 	interPointDelayMs?: number;
@@ -195,18 +200,43 @@ function mappingLocalAutofocusHalfRangeUm(focusPlane: FocusPlaneInput): number {
 	return halfRangeUm;
 }
 
-function mappingAutofocusPreview(spec: ProcedureSpec): MappingAutofocusPreview | undefined {
-	const surfaceCorrection =
-		(spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list") &&
-		spec.plan.surfaceCorrection?.kind === "focus_plane"
-			? spec.plan.surfaceCorrection
-			: undefined;
-	if (!surfaceCorrection) {
+function autofocusParamsHalfRangeUm(params: AutofocusInput["params"]): number | undefined {
+	if (typeof params?.zStartUm !== "number" || typeof params.zEndUm !== "number") {
 		return undefined;
 	}
+	const halfRangeUm = Math.abs(params.zEndUm - params.zStartUm) / 2;
+	return halfRangeUm > 0 ? halfRangeUm : undefined;
+}
+
+function mappingAutofocusParamsHalfRangeUm(params: AutofocusInput["params"]): number | undefined {
+	const halfRangeUm = params?.localAutofocusHalfRangeUm;
+	if (halfRangeUm === undefined) {
+		return undefined;
+	}
+	if (halfRangeUm <= 0) {
+		throw new Error("Mapping local autofocus half-range must be greater than 0 um.");
+	}
+	return halfRangeUm;
+}
+
+function mappingAutofocusPreview(spec: ProcedureSpec): MappingAutofocusPreview | undefined {
+	if (
+		spec.procedureId !== "raman_grid_mapping" ||
+		spec.domain.raman.autofocus.params?.strategy === "fixed_absolute" ||
+		(spec.plan.kind !== "grid_scan" && spec.plan.kind !== "point_list")
+	) {
+		return undefined;
+	}
+	const surfaceCorrection = spec.plan.surfaceCorrection;
+	const localHalfRangeUm =
+		surfaceCorrection?.kind === "focus_plane"
+			? surfaceCorrection.localAutofocusHalfRangeUm
+			: mappingAutofocusParamsHalfRangeUm(spec.domain.raman.autofocus.params) ??
+				autofocusParamsHalfRangeUm(spec.domain.raman.autofocus.params) ??
+				DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM;
 	return {
-		localHalfRangeUm: surfaceCorrection.localAutofocusHalfRangeUm,
-		localFullRangeUm: surfaceCorrection.localAutofocusHalfRangeUm * 2,
+		localHalfRangeUm,
+		localFullRangeUm: localHalfRangeUm * 2,
 	};
 }
 
@@ -214,11 +244,12 @@ function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
 	const strategy =
 		input.procedureId === "raman_focus_plane_calibration"
 			? "calibration_coarse_to_fine"
-			: input.procedureId === "raman_grid_mapping" && input.focusPlane
-				? "mapping_local_correction"
+			: input.procedureId === "raman_grid_mapping"
+				? input.autofocus.params?.strategy ?? "mapping_local_correction"
 				: input.autofocus.params?.strategy;
 	return {
 		raman: {
+			environment: input.environment,
 			autofocus: {
 				...input.autofocus,
 				params: {
@@ -479,6 +510,7 @@ export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedurePropos
 	risks.push(...classifyMotionRangeRisks(spec));
 
 	if (spec.procedureId === "raman_grid_mapping" && (spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list")) {
+		const mappingAutofocus = mappingAutofocusPreview(spec);
 		risks.push({
 			level: "confirm_required",
 			code: "multi_point_mapping",
@@ -490,11 +522,12 @@ export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedurePropos
 				code: "focus_plane_correction_declined",
 				message: "The user explicitly declined focus-plane correction; this mapping run will use the planned fixed Z values.",
 			});
-		} else if (spec.plan.surfaceCorrection?.kind === "focus_plane") {
+		}
+		if (mappingAutofocus) {
 			risks.push({
 				level: "notice",
 				code: "mapping_local_autofocus_window",
-				message: `Mapping local autofocus will use +/-${spec.plan.surfaceCorrection.localAutofocusHalfRangeUm} um around the runtime focus center at each point.`,
+				message: `Mapping local autofocus will use +/-${mappingAutofocus.localHalfRangeUm} um around the runtime focus center at each point.`,
 			});
 		}
 	}
@@ -523,6 +556,7 @@ export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedurePropos
 		requiresConfirmation: true,
 		unitCount: units.length,
 		mappingAutofocus: mappingAutofocusPreview(spec),
+		ramanEnvironment: resolveRamanEnvironmentRuntimeProfile(spec.domain.raman),
 	};
 }
 

@@ -16,6 +16,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 
 type CapturedHandler = (...args: unknown[]) => unknown;
 type CapturedAutofocusAction = Parameters<RamanLiveRuntime["autofocus"]["runSingle"]>[0];
+type CapturedStageMoveAction = Parameters<RamanLiveRuntime["stage"]["moveAbsoluteAndWait"]>[0];
 
 interface CapturedExtension {
 	tools: Map<string, ToolDefinition>;
@@ -68,6 +69,8 @@ function createSinglePointSpec(overrides?: {
 	currentPosition?: boolean;
 	procedureId?: "raman_single_point_probe" | "raman_parameter_search" | "raman_grid_mapping";
 	maxAttempts?: number;
+	vacuumState?: "vacuum" | "not_vacuum";
+	metricName?: string;
 }): {
 	procedureSpecId: string;
 	experimentId: string;
@@ -140,6 +143,7 @@ function createSinglePointSpec(overrides?: {
 						pointCount: 10,
 						framesPerZ: 1,
 						warmupFramesPerZ: 1,
+						...(overrides?.metricName ? { metricName: overrides.metricName } : {}),
 					},
 				},
 				acquisition: {
@@ -158,6 +162,7 @@ function createSinglePointSpec(overrides?: {
 							},
 						}
 					: {}),
+				...(overrides?.vacuumState ? { environment: { vacuumState: overrides.vacuumState } } : {}),
 			},
 		},
 	};
@@ -171,6 +176,7 @@ function createLiveRuntime(
 	capturedFrameLaserOff?: boolean[],
 	capturedFrameTimeouts?: number[],
 	capturedAutofocusActions?: CapturedAutofocusAction[],
+	capturedStageMoveActions?: CapturedStageMoveAction[],
 ): RamanLiveRuntime {
 	let spectrumCall = 0;
 	return {
@@ -211,6 +217,7 @@ function createLiveRuntime(
 				});
 			},
 			moveAbsoluteAndWait(action) {
+				capturedStageMoveActions?.push(action);
 				if (metrics) {
 					metrics.stageMoveCalls += 1;
 				}
@@ -635,6 +642,317 @@ describe("experiment research real supervised single-point runtime", () => {
 		expect(capturedAutofocusActions[0]?.params?.stageTimeoutMs).toBe(60_000);
 		expect(capturedAutofocusActions[0]?.params?.frameTimeoutMs).toBe(30_000);
 		expect(capturedAutofocusActions[0]?.timeoutMs).toBe(300_000);
+	});
+
+	it("selects the not-vacuum autofocus metric and 30 V Z profile from the frozen environment", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedAutofocusActions: CapturedAutofocusAction[] = [];
+		const capturedStageMoveActions: CapturedStageMoveAction[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(
+				true,
+				true,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				capturedAutofocusActions,
+				capturedStageMoveActions,
+			),
+		);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ vacuumState: "not_vacuum" });
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-not-vacuum",
+			{
+				proposalId,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+				operatorApproval: operatorApproval(proposalId, spec),
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedStageMoveActions[0]?.zMotionProfile).toEqual({
+			units: "mm",
+			mode: "step",
+			voltageV: 30,
+			frequencyHz: 1000,
+		});
+		expect(capturedAutofocusActions[0]?.params?.metricName).toBe("labspec_no_window_spot_focus");
+		expect(capturedAutofocusActions[0]?.params?.zMotionProfile).toEqual({
+			units: "mm",
+			mode: "step",
+			voltageV: 30,
+			frequencyHz: 1000,
+		});
+	});
+
+	it("uses the vacuum autofocus metric and 50 V Z profile by default", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedAutofocusActions: CapturedAutofocusAction[] = [];
+		const capturedStageMoveActions: CapturedStageMoveAction[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(
+				true,
+				true,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				capturedAutofocusActions,
+				capturedStageMoveActions,
+			),
+		);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec();
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-default-vacuum",
+			{
+				proposalId,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+				operatorApproval: operatorApproval(proposalId, spec),
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedStageMoveActions[0]?.zMotionProfile).toEqual({
+			units: "mm",
+			mode: "step",
+			voltageV: 50,
+			frequencyHz: 1000,
+		});
+		expect(capturedAutofocusActions[0]?.params?.metricName).toBe("labspec_center_spot_focus");
+		expect(capturedAutofocusActions[0]?.params?.zMotionProfile).toEqual({
+			units: "mm",
+			mode: "step",
+			voltageV: 50,
+			frequencyHz: 1000,
+		});
+	});
+
+	it("preserves explicit autofocus metric overrides while applying the environment Z profile", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedAutofocusActions: CapturedAutofocusAction[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(true, true, undefined, undefined, undefined, undefined, capturedAutofocusActions),
+		);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({
+			vacuumState: "not_vacuum",
+			metricName: "labspec_center_spot_focus_old",
+		});
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-explicit-metric-env-profile",
+			{
+				proposalId,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+				operatorApproval: operatorApproval(proposalId, spec),
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedAutofocusActions[0]?.params?.metricName).toBe("labspec_center_spot_focus_old");
+		expect(capturedAutofocusActions[0]?.params?.zMotionProfile).toEqual({
+			units: "mm",
+			mode: "step",
+			voltageV: 30,
+			frequencyHz: 1000,
+		});
+	});
+
+	it("defaults live grid mapping autofocus to local correction when fixed absolute is not requested", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedAutofocusActions: CapturedAutofocusAction[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(true, true, undefined, undefined, undefined, undefined, capturedAutofocusActions),
+		);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ procedureId: "raman_grid_mapping" });
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-local-autofocus",
+			{
+				proposalId,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+				operatorApproval: operatorApproval(proposalId, spec),
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedAutofocusActions).toHaveLength(1);
+		expect(capturedAutofocusActions[0]?.params?.strategy).toBe("mapping_local_correction");
+		expect(capturedAutofocusActions[0]?.params?.zStartUm).toBe(210);
+		expect(capturedAutofocusActions[0]?.params?.zEndUm).toBe(290);
+	});
+
+	it("uses explicit mapping local half-range when focus-plane correction is declined", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedAutofocusActions: CapturedAutofocusAction[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(true, true, undefined, undefined, undefined, undefined, capturedAutofocusActions),
+		);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ procedureId: "raman_grid_mapping" });
+		const raman = (spec.domain as Record<string, unknown>).raman as Record<string, unknown>;
+		const autofocus = raman.autofocus as Record<string, unknown>;
+		autofocus.params = {
+			...(autofocus.params as Record<string, unknown>),
+			localAutofocusHalfRangeUm: 20,
+		};
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-explicit-local-autofocus",
+			{
+				proposalId,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+				operatorApproval: operatorApproval(proposalId, spec),
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedAutofocusActions).toHaveLength(1);
+		expect(capturedAutofocusActions[0]?.params?.strategy).toBe("mapping_local_correction");
+		expect(capturedAutofocusActions[0]?.params?.zStartUm).toBe(230);
+		expect(capturedAutofocusActions[0]?.params?.zEndUm).toBe(270);
+	});
+
+	it("preserves explicit fixed absolute autofocus for special mapping requests", async () => {
+		const cwd = createTempCwd();
+		tempRoots.push(cwd);
+		const capturedAutofocusActions: CapturedAutofocusAction[] = [];
+		registerRamanLiveRuntime(
+			cwd,
+			createLiveRuntime(true, true, undefined, undefined, undefined, undefined, capturedAutofocusActions),
+		);
+		const extension = loadExperimentExtension();
+		const context = { cwd } as ExtensionContext;
+		const spec = createSinglePointSpec({ procedureId: "raman_grid_mapping" });
+		const raman = (spec.domain as Record<string, unknown>).raman as Record<string, unknown>;
+		const autofocus = raman.autofocus as Record<string, unknown>;
+		autofocus.params = {
+			...(autofocus.params as Record<string, unknown>),
+			strategy: "fixed_absolute",
+			zStartUm: 220,
+			zEndUm: 300,
+		};
+		if (spec.plan.kind !== "point_list") {
+			throw new Error("expected point_list mapping spec");
+		}
+		spec.plan.surfaceCorrection = {
+			kind: "focus_plane",
+			source: "manual_xyz_points",
+			anchors: [
+				{ anchorId: "p1", xUm: 0, yUm: 0, zUm: 250 },
+				{ anchorId: "p2", xUm: 50_000, yUm: 0, zUm: 250 },
+				{ anchorId: "p3", xUm: 0, yUm: 50_000, zUm: 250 },
+			],
+			coefficients: { a: 0, b: 0, c: 250 },
+			validRegion: [
+				{ anchorId: "p1", xUm: 0, yUm: 0 },
+				{ anchorId: "p2", xUm: 50_000, yUm: 0 },
+				{ anchorId: "p3", xUm: 0, yUm: 50_000 },
+			],
+			localAutofocusHalfRangeUm: 20,
+		};
+		const proposalId = await proposeRun(extension, spec, context);
+
+		const started = await extension.tools.get("approve_and_start_run")?.execute(
+			"approve-live-fixed-autofocus",
+			{
+				proposalId,
+				specHash: hashProcedureSpec(spec as ProcedureSpec),
+				executionMode: "live-supervised",
+				admission: {
+					preflightReady: true,
+					controlAvailable: true,
+				},
+				operatorApproval: operatorApproval(proposalId, spec),
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const runId = (started?.details as Record<string, unknown>).runId as string;
+		const terminalState = await pollUntilTerminal(extension, runId, context, ["completed"]);
+
+		expect(terminalState.status).toBe("completed");
+		expect(capturedAutofocusActions).toHaveLength(1);
+		expect(capturedAutofocusActions[0]?.params?.strategy).toBe("fixed_absolute");
+		expect(capturedAutofocusActions[0]?.params?.zStartUm).toBe(220);
+		expect(capturedAutofocusActions[0]?.params?.zEndUm).toBe(300);
 	});
 
 	it("executes live bounded parameter search and stops early once acceptable conditions are confirmed", async () => {

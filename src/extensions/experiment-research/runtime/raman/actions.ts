@@ -33,6 +33,16 @@ export const ActionResultSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const ZMotionProfileSchema = Type.Object(
+	{
+		units: Type.Literal("mm"),
+		mode: Type.Literal("step"),
+		voltageV: Type.Integer({ minimum: 0, maximum: 50 }),
+		frequencyHz: Type.Integer({ minimum: 1, maximum: 2000 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const StageMoveAbsoluteAndWaitActionSchema = Type.Object(
 	{
 		action: Type.Literal("stage.move_absolute_and_wait"),
@@ -46,6 +56,7 @@ export const StageMoveAbsoluteAndWaitActionSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		timeoutMs: Type.Integer({ minimum: 1 }),
+		zMotionProfile: Type.Optional(ZMotionProfileSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -96,6 +107,8 @@ export const AutofocusRunSingleActionSchema = Type.Object(
 						Type.Literal("mapping_local_correction"),
 					]),
 				),
+				localAutofocusHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+				zMotionProfile: Type.Optional(ZMotionProfileSchema),
 				coarseStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 				fineHalfRangeUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 				fineStepUm: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
@@ -146,6 +159,7 @@ export const RamanRuntimeActionSchema = Type.Union([
 export type ActionStatus = Static<typeof ActionStatusSchema>;
 export type ActionError = Static<typeof ActionErrorSchema>;
 export type ActionResult = Static<typeof ActionResultSchema>;
+export type ZMotionProfile = Static<typeof ZMotionProfileSchema>;
 export type StageGetPositionAction = Static<typeof StageGetPositionActionSchema>;
 export type StageMoveAbsoluteAndWaitAction = Static<typeof StageMoveAbsoluteAndWaitActionSchema>;
 export type AutofocusRunSingleAction = Static<typeof AutofocusRunSingleActionSchema>;

@@ -225,6 +225,29 @@ class MCNewtonXYZStageController:
         self._axis_motion_profiles["z"] = z_profile
         self._configured_axis_profiles.clear()
 
+    def set_z_motion_profile(
+        self,
+        *,
+        units: str = "mm",
+        mode: str = "step",
+        voltage_v: int = 50,
+        frequency_hz: int = 1000,
+    ) -> None:
+        normalized_units = units.strip().lower()
+        if normalized_units != "mm":
+            raise ValueError("Z motion profile units must be 'mm'.")
+        normalized_mode = mode.strip().lower()
+        if normalized_mode != "step":
+            raise ValueError("Z motion profile mode must be 'step'.")
+        voltage = int(voltage_v)
+        if voltage < 0 or voltage > 50:
+            raise ValueError("Z motion profile voltage_v must be between 0 and 50 V.")
+        frequency = int(frequency_hz)
+        if frequency <= 0 or frequency > 2000:
+            raise ValueError("Z motion profile frequency_hz must be between 1 and 2000 Hz.")
+        self._axis_motion_profiles["z"] = (normalized_units, normalized_mode, voltage, frequency)
+        self._configured_axis_profiles.pop("z", None)
+
     def disconnect(self) -> None:
         if not self._connected or self._sdk is None:
             return

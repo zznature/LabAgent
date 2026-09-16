@@ -82,6 +82,7 @@ describe("experiment research Raman runtime contract", () => {
 			resourceId: "mc_newton_xyz_main",
 			target: { xUm: 1000, yUm: 2000, zUm: 50 },
 			timeoutMs: 5_000,
+			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
 		};
 		const autofocusAction = {
 			action: "autofocus.run_single",
@@ -103,6 +104,7 @@ describe("experiment research Raman runtime contract", () => {
 				interpolatePeak: true,
 				finalVerificationFramesPerZ: 1,
 				metricName: "labspec_spot_compactness",
+				zMotionProfile: { units: "mm", mode: "step", voltageV: 50, frequencyHz: 1000 },
 			},
 			timeoutMs: 15_000,
 		};

@@ -36,6 +36,7 @@ rl.on("line", (raw) => {
       payload.position = { xUm: 11, yUm: 22, zUm: 33 };
     } else if (req.action === "stage_move") {
       payload.finalPosition = req.payload.target;
+      payload.zMotionProfile = req.payload.zMotionProfile;
       payload.stageMoveCommands = [{ axis: "z", target_um: req.payload.target.zUm, method: "fake.move" }];
       payload.stageSettleDiagnostics = { status: "settled", axes: ["z"] };
     } else if (req.action === "frame_capture") {
@@ -55,7 +56,9 @@ rl.on("line", (raw) => {
         zStartUm: req.payload.params.zStartUm,
         zEndUm: req.payload.params.zEndUm,
         effectivePointCount: 10,
-        warmupFramesPerZ: req.payload.params.warmupFramesPerZ ?? 1
+        warmupFramesPerZ: req.payload.params.warmupFramesPerZ ?? 1,
+        metricName: req.payload.params.metricName,
+        zMotionProfile: req.payload.params.zMotionProfile
       };
       payload.scanPoints = [{ zUm: 260, score: 1.2, saturationRatio: 0 }];
       payload.stageMoveCommands = [{ axis: "z", target_um: 260, method: "fake.move" }];
@@ -177,9 +180,11 @@ describe("experiment research Raman Python daemon transport", () => {
 			resourceId: "stage-main",
 			target: { xUm: 1000, yUm: 2000, zUm: 250 },
 			timeoutMs: 5_000,
+			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
 		});
 		expect(move.status).toBe("success");
 		expect((move.payload?.finalPosition as Record<string, number>).xUm).toBe(1000);
+		expect(move.payload?.zMotionProfile).toEqual({ units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 });
 
 		const frame = await runtime.frame.captureLatest({
 			action: "frame.capture_latest",
@@ -214,11 +219,25 @@ describe("experiment research Raman Python daemon transport", () => {
 			stageResourceId: "stage-main",
 			frameProviderResourceId: "frame-main",
 			roi: { x: 100, y: 100, width: 64, height: 64 },
-			params: { zStartUm: 220, zEndUm: 300, pointCount: 10, warmupFramesPerZ: 1 },
+			params: {
+				zStartUm: 220,
+				zEndUm: 300,
+				pointCount: 10,
+				warmupFramesPerZ: 1,
+				metricName: "labspec_no_window_spot_focus",
+				zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
+			},
 			timeoutMs: 5_000,
 		});
 		expect(autofocus.status).toBe("success");
 		expect((autofocus.payload?.params as Record<string, unknown>).effectivePointCount).toBe(10);
+		expect((autofocus.payload?.params as Record<string, unknown>).metricName).toBe("labspec_no_window_spot_focus");
+		expect((autofocus.payload?.params as Record<string, unknown>).zMotionProfile).toEqual({
+			units: "mm",
+			mode: "step",
+			voltageV: 30,
+			frequencyHz: 1000,
+		});
 		expect(autofocus.payload?.stageSettleDiagnostics).toEqual({ status: "settled", axes: ["z"] });
 	});
 

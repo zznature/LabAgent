@@ -662,6 +662,7 @@ class LabSpecFileBridgeRamanAcquirer:
         bridge_dir = self.config.bridge_path
         request_path = bridge_dir / self.config.request_filename
         result_path = bridge_dir / self.config.result_filename
+        output_path = Path(self.config.save_path) if self.config.save_path else None
         started_at = time.time()
         acquisition_metadata = {
             **self.config.to_metadata(),
@@ -679,6 +680,13 @@ class LabSpecFileBridgeRamanAcquirer:
                 return self._failed(
                     "request_pending",
                     RuntimeError(f"Pending request already exists: {request_path}"),
+                    acquisition_metadata,
+                    started_at,
+                )
+            if output_path is not None and output_path.exists():
+                return self._failed(
+                    "output_path_exists",
+                    RuntimeError(f"Expected spectrum output already exists: {output_path}"),
                     acquisition_metadata,
                     started_at,
                 )
@@ -755,6 +763,24 @@ class LabSpecFileBridgeRamanAcquirer:
             self._safe_delete(request_path)
             return self._failed("poll_failed", exc, acquisition_metadata, started_at)
 
+        if output_path is not None and self._is_stable_nonempty_file(output_path):
+            finished_at = time.time()
+            acquisition_metadata.update(
+                {
+                    "finished_at": finished_at,
+                    "duration_s": finished_at - started_at,
+                    "completion_source": "saved_output_reconciliation",
+                    "worker_result_pending": True,
+                }
+            )
+            self._create_spectrum_plot(str(output_path), acquisition_metadata)
+            self._safe_delete(request_path)
+            return AcquisitionResult(
+                status="ok",
+                output_path=str(output_path),
+                metadata=acquisition_metadata,
+            )
+
         self._safe_delete(request_path)
         finished_at = time.time()
         acquisition_metadata.update(
@@ -788,6 +814,16 @@ class LabSpecFileBridgeRamanAcquirer:
                 path.unlink()
         except Exception:
             return
+
+    def _is_stable_nonempty_file(self, path: Path) -> bool:
+        try:
+            first_size = path.stat().st_size
+            if first_size <= 0:
+                return False
+            self._sleeper(min(self.config.poll_interval_s, 0.2))
+            return path.exists() and path.stat().st_size == first_size
+        except OSError:
+            return False
 
     def _create_spectrum_plot(
         self,

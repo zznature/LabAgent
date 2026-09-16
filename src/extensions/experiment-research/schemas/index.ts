@@ -20,6 +20,8 @@ export {
 	DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
 	ProcedureDomainSchema,
 	RamanDomainSchema,
+	RamanEnvironmentSchema,
+	RamanVacuumStateSchema,
 	RamanAcquisitionSchema,
 	RamanParameterSearchSchema,
 	type ProcedureSpec,
@@ -40,6 +42,8 @@ export {
 	type RetryFailureReason,
 	type ProcedureDomain,
 	type RamanAcquisition,
+	type RamanEnvironment,
+	type RamanVacuumState,
 	type RamanParameterSearch,
 	type RamanDomain,
 } from "./procedure-spec.ts";

@@ -79,6 +79,7 @@ function commonBuilderInput() {
 			xRangeUm: { minUm: 0, maxUm: 50_000 },
 			yRangeUm: { minUm: 0, maxUm: 50_000 },
 		},
+		environment: { vacuumState: "not_vacuum" as const },
 		autofocus: {
 			enabled: true,
 			roi: { x: 100, y: 100, width: 64, height: 64 },
@@ -161,6 +162,12 @@ describe("experiment research planner proposal flow", () => {
 		expect(ProcedureSpecValidator.Check(singlePoint.spec)).toBe(true);
 		expect(ProcedureSpecValidator.Check(parameterSearch.spec)).toBe(true);
 		expect(ProcedureSpecValidator.Check(gridMapping.spec)).toBe(true);
+		expect(singlePoint.spec.domain.raman.environment?.vacuumState).toBe("not_vacuum");
+		expect(singlePoint.preview.ramanEnvironment).toEqual({
+			vacuumState: "not_vacuum",
+			defaultAutofocusMetricName: "labspec_no_window_spot_focus",
+			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
+		});
 		expect(parameterSearch.spec.domain.raman.parameterSearch?.maxAttempts).toBe(3);
 		expect(singlePoint.preview.requiresConfirmation).toBe(true);
 		expect(parameterSearch.preview.unitCount).toBe(3);
@@ -226,6 +233,11 @@ describe("experiment research planner proposal flow", () => {
 			localHalfRangeUm: 20,
 			localFullRangeUm: 40,
 		});
+		expect(validateState.ramanEnvironment).toEqual({
+			vacuumState: "not_vacuum",
+			defaultAutofocusMetricName: "labspec_no_window_spot_focus",
+			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
+		});
 		expect(validateState.savePath).toEqual(expect.stringContaining(proposal.spec.procedureSpecId));
 
 		const preflightResult = await extension.tools
@@ -239,6 +251,11 @@ describe("experiment research planner proposal flow", () => {
 		expect(preflightState.mappingAutofocus).toEqual({
 			localHalfRangeUm: 20,
 			localFullRangeUm: 40,
+		});
+		expect(preflightState.ramanEnvironment).toEqual({
+			vacuumState: "not_vacuum",
+			defaultAutofocusMetricName: "labspec_no_window_spot_focus",
+			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
 		});
 		expect(preflightState.canProposeRun).toBe(true);
 	});
@@ -278,14 +295,18 @@ describe("experiment research planner proposal flow", () => {
 		const plan = asRecord(template.plan);
 		const domain = asRecord(template.domain);
 		const raman = asRecord(domain.raman);
+		const environment = asRecord(raman.environment);
 		const autofocus = asRecord(raman.autofocus);
 		const autofocusParams = asRecord(autofocus.params);
 		expect(templateDetails.status).toBe("success");
 		expect(template.procedureId).toBe("raman_grid_mapping");
 		expect(plan.kind).toBe("grid_scan");
+		expect(environment.vacuumState).toBe("vacuum");
 		expect(asRecord(plan.grid).rows).toBe(16);
 		expect(asRecord(plan.grid).cols).toBe(16);
 		expect(autofocusParams.frameTimeoutMs).toBe(30_000);
+		expect(autofocusParams.strategy).toBe("mapping_local_correction");
+		expect(autofocusParams.localAutofocusHalfRangeUm).toBe(40);
 		expect(asRecord(template.stoppingRules).maxUnits).toBe(256);
 		expect(templateState.notes).toEqual(expect.arrayContaining([expect.stringContaining("Line scans should use point_list")]));
 	});
@@ -296,6 +317,12 @@ describe("experiment research planner proposal flow", () => {
 		const proposal = buildProcedureProposal({
 			...commonBuilderInput(),
 			procedureId: "raman_grid_mapping",
+			autofocus: {
+				...commonBuilderInput().autofocus,
+				params: {
+					localAutofocusHalfRangeUm: 20,
+				},
+			},
 			focusPlaneDecision: "user_declined",
 			stoppingRules: {
 				maxRuntimeMinutes: 1_200,
@@ -323,8 +350,15 @@ describe("experiment research planner proposal flow", () => {
 		expect(preflightDetails.status).toBe("success");
 		expect(preflightState.unitCount).toBe(256);
 		expect(preflightState.readyForApproval).toBe(true);
+		expect(proposal.spec.domain.raman.autofocus.params?.strategy).toBe("mapping_local_correction");
+		expect(proposal.spec.domain.raman.autofocus.params?.localAutofocusHalfRangeUm).toBe(20);
+		expect(preflightState.mappingAutofocus).toEqual({
+			localHalfRangeUm: 20,
+			localFullRangeUm: 40,
+		});
 		expect(risks.some((risk) => risk.level === "forbidden")).toBe(false);
 		expect(risks.some((risk) => risk.code === "multi_point_mapping")).toBe(true);
+		expect(risks.some((risk) => risk.code === "mapping_local_autofocus_window")).toBe(true);
 	});
 
 	it("matches workspace experiment procedure templates and surfaces template application metadata", async () => {

@@ -74,12 +74,16 @@ describe("experiment research core schemas", () => {
 			},
 			domain: {
 				raman: {
+					environment: {
+						vacuumState: "not_vacuum",
+					},
 					autofocus: {
 						enabled: true,
 						roi: { x: 100, y: 120, width: 80, height: 80 },
 						params: {
 							zStartUm: 260,
 							zEndUm: 340,
+							localAutofocusHalfRangeUm: 20,
 							pointCount: 10,
 							framesPerZ: 1,
 							warmupFramesPerZ: 1,
@@ -122,6 +126,19 @@ describe("experiment research core schemas", () => {
 
 		expect(ProcedureSpecValidator.Check(pointListSpec)).toBe(true);
 		expect(ProcedureSpecValidator.Check(gridScanSpec)).toBe(true);
+		expect(
+			ProcedureSpecValidator.Check({
+				...pointListSpec,
+				domain: {
+					raman: {
+						...pointListSpec.domain.raman,
+						environment: {
+							vacuumState: "ambient",
+						},
+					},
+				},
+			}),
+		).toBe(false);
 		expect(
 			ProcedureSpecValidator.Check({
 				...pointListSpec,

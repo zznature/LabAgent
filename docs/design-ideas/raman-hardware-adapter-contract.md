@@ -108,15 +108,15 @@ driver/daemon 不拥有 experiment workflow state，也不决定是否提出下�
 | --- | --- | --- |
 | `fixed_absolute` | 单点与 operator autofocus | spec/tool 给出的绝对范围 |
 | `calibration_coarse_to_fine` | 硬件焦平面校准 | 当前 unit 恢复出的 accepted focus seed |
-| `mapping_local_correction` | surface-following mapping | runtime centers the local range on the most recent successful focus Z, falling back to the point Z on the first point |
+| `mapping_local_correction` | default mapping autofocus | runtime centers the local range on the most recent successful focus Z, falling back to the point Z on the first point |
 
 TypeScript runtime 解析 strategy 和窗口；Python daemon 只执行单次有界 autofocus，不保存 previous focus 或焦平面模型。
 
-For mapping, `plan.z` is only the point-placement target. The current autofocus center is runtime state, surfaced as `lastAcceptedFocusZUm` so planners do not confuse predicted point Z with the autofocus center.
+For mapping, `mapping_local_correction` is the default unless `autofocus.params.strategy` explicitly requests `fixed_absolute`. `plan.z` is only the point-placement target. The current autofocus center is runtime state, surfaced as `lastAcceptedFocusZUm` so planners do not confuse predicted point Z with the autofocus center. When focus-plane correction is attached, the local half-range is frozen as `surfaceCorrection.localAutofocusHalfRangeUm`. When `surfaceCorrection = disabled/user_declined`, the local half-range is frozen as `domain.raman.autofocus.params.localAutofocusHalfRangeUm`; if that is omitted, the runtime falls back to the approved fixed autofocus range when present, otherwise `DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM`. `fineHalfRangeUm` belongs to calibration coarse-to-fine autofocus and must not define the mapping local correction window.
 
-默认 `metricName = labspec_center_spot_focus` 使用 Tenengrad 平方根除以 ROI 平均亮度，再乘以连续的光轴中心填充支持度。亮度归一化梯度负责保留接近焦点时的上升/下降曲线；光轴中心填充支持度抑制离焦空心环，即使环纹本身具有很强边缘也不会被误判为最佳焦点。对于清晰、紧凑、接近中心但中心小圆存在暗纹结构的环纹焦点，metric 会给光轴支持度一个有限下限，避免把真实清晰焦点压低到相邻离焦帧之下。对已经得到高基础分且中心填充充分的帧，metric 还会用竖向拖尾 guard 惩罚亮斑质心偏移和纵向拉伸，避免把中心仍然发亮但形态拖尾的帧当成高质量焦点。metric 名称和调用契约保持不变；最终验证分数严格小于 `0.75` 时触发低分二次聚焦，等于 `0.75` 时不触发。旧的同心亮斑 / 环纹启发式保留为显式兼容名称 `labspec_center_spot_focus_old`，不再作为默认 metric。
+默认 `domain.raman.environment.vacuumState = vacuum` 使用 `metricName = labspec_center_spot_focus` 与 Z motion profile `("mm", "step", 50, 1000)`。`labspec_center_spot_focus` 使用 Tenengrad 平方根除以 ROI 平均亮度，再乘以连续的光轴中心填充支持度。亮度归一化梯度负责保留接近焦点时的上升/下降曲线；光轴中心填充支持度抑制离焦空心环，即使环纹本身具有很强边缘也不会被误判为最佳焦点。对于清晰、紧凑、接近中心但中心小圆存在暗纹结构的环纹焦点，metric 会给光轴支持度一个有限下限，避免把真实清晰焦点压低到相邻离焦帧之下。对已经得到高基础分且中心填充充分的帧，metric 还会用竖向拖尾 guard 惩罚亮斑质心偏移和纵向拉伸，避免把中心仍然发亮但形态拖尾的帧当成高质量焦点。metric 名称和调用契约保持不变；最终验证分数严格小于 `0.75` 时触发低分二次聚焦，等于 `0.75` 时不触发。旧的同心亮斑 / 环纹启发式保留为显式兼容名称 `labspec_center_spot_focus_old`，不再作为默认 metric。
 
-无光窗实验显式设置 `domain.raman.autofocus.params.metricName = labspec_no_window_spot_focus`。该 profile 复用 `labspec_spot_compactness`：先按 ROI 的稳健百分位归一化并扣除中位背景，再以信号三次方作为权重，按亮斑核心能量占比与加权 RMS 半径的比值评分；无光窗标定序列中紧凑亮斑因此得到最高分，而宽散光斑回落。`metricName` 是被冻结并随 proposal 审查的实验条件选择，不由 runtime 根据“有无光窗”或“是否真空”自行猜测；新增真空等条件时，应先用对应标定序列验证一个新 metric，再把稳定名称加入 driver registry 和 planner allowlist。
+未抽真空 / 无光窗实验显式设置 `domain.raman.environment.vacuumState = not_vacuum`；runtime 从该冻结字段派生 `metricName = labspec_no_window_spot_focus` 与 Z motion profile `("mm", "step", 30, 1000)`。该 metric profile 复用 `labspec_spot_compactness`：先按 ROI 的稳健百分位归一化并扣除中位背景，再以信号三次方作为权重，按亮斑核心能量占比与加权 RMS 半径的比值评分；无光窗标定序列中紧凑亮斑因此得到最高分，而宽散光斑回落。`vacuumState` 是被冻结并随 proposal 审查的实验条件选择；runtime 只按该字段解析，不根据硬件现场状态自行猜测。`autofocus.params.metricName` 仍可作为特殊实验的显式覆盖，但普通真空/未抽真空切换应优先使用环境字段。
 
 历史 live mapping 记录显示，成功 autofocus 的保存帧最大间隔约 21.3 秒，保存帧等待超时保持 `frameTimeoutMs = 30000`；失败样本集中在 `stageTimeoutMs = 10000`，Z 轴仍在进入 5 µm 容差或稳定性判定阶段，因此 live runtime 会把 autofocus 单次 stage settle timeout 夹紧到至少 `60000`，最高仍不超过 `120000`。完整 autofocus action timeout 使用 `300000`，覆盖最近 18 帧 autofocus 流程约 180 秒的历史上界并保留恢复余量。
 
@@ -176,6 +176,7 @@ operator tool 适合维护、观察和诊断。正式单点、参数搜索、cal
 
 Raman 参数只进入 typed `domain.raman`：
 
+- `environment?`：`vacuumState = vacuum | not_vacuum`，用于派生默认 autofocus metric 与 Z motion profile；未声明时按 `vacuum` 兼容旧 spec
 - `autofocus`：enabled、ROI、params、strategy
 - `acquisition`：integration time、laser power、accumulations、format、timeout
 - `parameterSearch?`：max attempts 与批准 envelope
@@ -238,7 +239,7 @@ mapping spec 冻结：
 - artifact identity 与 checksum，或 manual anchors
 - coefficients
 - valid region
-- local autofocus range as `surfaceCorrection.localAutofocusHalfRangeUm` (default 40 um, explicitly overridable per mapping proposal)
+- local autofocus range as `surfaceCorrection.localAutofocusHalfRangeUm` for corrected mapping, or `domain.raman.autofocus.params.localAutofocusHalfRangeUm` when focus-plane correction is disabled (default 40 um, explicitly overridable per mapping proposal)
 
 compiler 拒绝区域外点，计算 predicted Z，并要求 `move_to_point -> autofocus -> acquire_spectrum` 顺序。preflight/live runtime 对 artifact 路径重新校验 identity、checksum、coefficients 与 region；不匹配时 fail closed，不静默退回 fixed Z。
 
@@ -277,6 +278,14 @@ approval 不能绕过这些 hard limits。
 所有 payload 通过 `ArtifactRef` 登记；上层不能靠 message 猜路径。
 
 Raman/transport error 必须有稳定 `errorCode` 和 retry/operator/resume flags。当前代码覆盖 stage、frame、autofocus、spectrum、bridge、focus-plane 与 Python daemon 类错误；完整 code 列表以 runtime source 为准，避免在设计文档复制后漂移。
+
+Spectrum file bridge uses two bounded completion signals. A matching worker result
+is authoritative. At the unchanged acquisition deadline, a non-empty,
+size-stable file at the unique approved output path is accepted as a completed
+acquisition and recorded as `completion_source =
+saved_output_reconciliation`. An output file that existed before the request
+fails closed. This prevents delayed control-plane status from discarding an
+already-saved spectrum without extending the approved acquisition timeout.
 
 ## 11. 非目标
 

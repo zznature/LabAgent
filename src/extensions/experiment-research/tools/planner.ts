@@ -22,6 +22,7 @@ import {
 	saveExperimentIntent,
 } from "../store/index.ts";
 import { DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM, FOCUS_CENTER_POLICY } from "../schemas/index.ts";
+import { DEFAULT_RAMAN_ENVIRONMENT_RUNTIME_PROFILE } from "../raman-environment-profile.ts";
 import {
 	ProcedureSpecParamsSchema,
 	type ExecutionMode,
@@ -272,6 +273,7 @@ function previewState(spec: ProcedureSpec, templateApplication?: TemplateApplica
 		risks: preview.risks,
 		limits: preview.limits,
 		mappingAutofocus: preview.mappingAutofocus,
+		ramanEnvironment: preview.ramanEnvironment,
 		templateApplication: templateApplicationState(templateApplication),
 	};
 }
@@ -349,6 +351,7 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 		},
 		domain: {
 			raman: {
+				environment: { vacuumState: "vacuum" },
 				autofocus: {
 					enabled: true,
 					roi: { x: 492, y: 353, width: 225, height: 225 },
@@ -517,6 +520,19 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 				{ kind: "acquire_spectrum" },
 			],
 		},
+		domain: {
+			raman: {
+				...(common.domain.raman),
+				autofocus: {
+					...(common.domain.raman.autofocus),
+					params: {
+						...(common.domain.raman.autofocus.params),
+						strategy: "mapping_local_correction",
+						localAutofocusHalfRangeUm: DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
+					},
+				},
+			},
+		},
 	};
 }
 
@@ -547,6 +563,7 @@ async function buildPreflightState(
 			risks: preview.risks,
 			limits: preview.limits,
 			mappingAutofocus: preview.mappingAutofocus,
+			ramanEnvironment: preview.ramanEnvironment,
 			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
 			requiredRolesPresent,
@@ -577,6 +594,7 @@ async function buildPreflightState(
 			risks: preview.risks,
 			limits: preview.limits,
 			mappingAutofocus: preview.mappingAutofocus,
+			ramanEnvironment: preview.ramanEnvironment,
 			templateApplication: templateApplicationState(templateApplication),
 			savePath: preview.savePath,
 			requiredRolesPresent,
@@ -611,6 +629,7 @@ async function buildPreflightState(
 		risks: preview.risks,
 		limits: preview.limits,
 		mappingAutofocus: preview.mappingAutofocus,
+		ramanEnvironment: preview.ramanEnvironment,
 		templateApplication: templateApplicationState(templateApplication),
 		savePath: preview.savePath,
 		requiredRolesPresent,
@@ -846,6 +865,7 @@ export const getLabStateTool = {
 			executionEntryPoint: "validate_procedure_spec -> run_preflight -> propose_run -> approve_and_start_run",
 			goodEnoughDecisionMode: "explicit_rules",
 			ramanRuntimeContractDefined: true,
+			defaultRamanEnvironment: DEFAULT_RAMAN_ENVIRONMENT_RUNTIME_PROFILE,
 			focusCenterPolicy: FOCUS_CENTER_POLICY,
 			nextMilestone: "verification and operator-facing refinement",
 		});

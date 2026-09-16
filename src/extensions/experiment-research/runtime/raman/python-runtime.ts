@@ -642,7 +642,15 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 				createActionResult(await daemon.request("stage_position", { timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000)),
 			moveAbsoluteAndWait: async (action: StageMoveAbsoluteAndWaitAction): Promise<ActionResult> =>
 				createActionResult(
-					await daemon.request("stage_move", { target: action.target, timeoutMs: action.timeoutMs }, action.timeoutMs + 10_000),
+					await daemon.request(
+						"stage_move",
+						{
+							target: action.target,
+							timeoutMs: action.timeoutMs,
+							zMotionProfile: action.zMotionProfile,
+						},
+						action.timeoutMs + 10_000,
+					),
 				),
 		},
 		autofocus: {

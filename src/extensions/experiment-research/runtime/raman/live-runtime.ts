@@ -13,6 +13,7 @@ import type {
 	RuntimeError,
 	SurfaceCorrection,
 } from "../../schemas/index.ts";
+import { DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM } from "../../schemas/index.ts";
 import { appendArtifactRecord } from "../../store/artifact-store.ts";
 import { readArtifactRecords } from "../../store/artifact-store.ts";
 import { readRunStateSnapshot } from "../../store/run-store.ts";
@@ -20,6 +21,7 @@ import { runRoot } from "../../store/layout.ts";
 import { compileProcedureSpec } from "../../kernel/compile-units.ts";
 import { evaluateRamanGoodEnough } from "../../planner/evaluate-good-enough.ts";
 import { fitFocusPlane } from "../../planner/focus-plane.ts";
+import { resolveRamanEnvironmentRuntimeProfile } from "../../raman-environment-profile.ts";
 import {
 	failedActionResult,
 	type ActionResult,
@@ -478,6 +480,45 @@ function mappingSurfaceCorrection(spec: ProcedureSpec): SurfaceCorrection | unde
 		: undefined;
 }
 
+function fixedAutofocusHalfRangeUm(params: ProcedureSpec["domain"]["raman"]["autofocus"]["params"]): number | undefined {
+	if (typeof params?.zStartUm !== "number" || typeof params.zEndUm !== "number") {
+		return undefined;
+	}
+	const halfRangeUm = Math.abs(params.zEndUm - params.zStartUm) / 2;
+	return halfRangeUm > 0 ? halfRangeUm : undefined;
+}
+
+function mappingAutofocusParamsHalfRangeUm(params: ProcedureSpec["domain"]["raman"]["autofocus"]["params"]): number | undefined {
+	const halfRangeUm = params?.localAutofocusHalfRangeUm;
+	return typeof halfRangeUm === "number" && halfRangeUm > 0 ? halfRangeUm : undefined;
+}
+
+function mappingLocalAutofocusHalfRangeUm(spec: ProcedureSpec): number {
+	const surfaceCorrection = mappingSurfaceCorrection(spec);
+	if (surfaceCorrection?.kind === "focus_plane") {
+		return surfaceCorrection.localAutofocusHalfRangeUm;
+	}
+	return mappingAutofocusParamsHalfRangeUm(spec.domain.raman.autofocus.params) ??
+		fixedAutofocusHalfRangeUm(spec.domain.raman.autofocus.params) ??
+		DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM;
+}
+
+function usesMappingLocalAutofocus(spec: ProcedureSpec): boolean {
+	return spec.procedureId === "raman_grid_mapping" && spec.domain.raman.autofocus.params?.strategy !== "fixed_absolute";
+}
+
+function withEnvironmentAutofocusDefaults(
+	spec: ProcedureSpec,
+	params: NonNullable<AutofocusRunSingleAction["params"]>,
+): NonNullable<AutofocusRunSingleAction["params"]> {
+	const profile = resolveRamanEnvironmentRuntimeProfile(spec.domain.raman);
+	return {
+		...params,
+		metricName: params.metricName ?? profile.defaultAutofocusMetricName,
+		zMotionProfile: profile.zMotionProfile,
+	};
+}
+
 function resolveAutofocusActionParams(
 	spec: ProcedureSpec,
 	unit: ExecutionUnit,
@@ -486,7 +527,7 @@ function resolveAutofocusActionParams(
 	const params = spec.domain.raman.autofocus.params;
 	const surfaceCorrection = mappingSurfaceCorrection(spec);
 	if (unit.focusCalibration && spec.plan.kind === "focus_plane_calibration") {
-		return {
+		return withEnvironmentAutofocusDefaults(spec, {
 			...params,
 			strategy: "calibration_coarse_to_fine",
 			zStartUm: focusCenterZUm - 100,
@@ -494,15 +535,24 @@ function resolveAutofocusActionParams(
 			coarseStepUm: params?.coarseStepUm ?? 10,
 			fineHalfRangeUm: params?.fineHalfRangeUm ?? 15,
 			fineStepUm: params?.fineStepUm ?? 2,
-		};
+		});
 	}
-	if (surfaceCorrection?.kind === "focus_plane") {
-		return {
+	if (surfaceCorrection?.kind === "focus_plane" && usesMappingLocalAutofocus(spec)) {
+		return withEnvironmentAutofocusDefaults(spec, {
 			...params,
 			strategy: "mapping_local_correction",
 			zStartUm: focusCenterZUm - surfaceCorrection.localAutofocusHalfRangeUm,
 			zEndUm: focusCenterZUm + surfaceCorrection.localAutofocusHalfRangeUm,
-		};
+		});
+	}
+	if (usesMappingLocalAutofocus(spec)) {
+		const halfRangeUm = mappingLocalAutofocusHalfRangeUm(spec);
+		return withEnvironmentAutofocusDefaults(spec, {
+			...params,
+			strategy: "mapping_local_correction",
+			zStartUm: focusCenterZUm - halfRangeUm,
+			zEndUm: focusCenterZUm + halfRangeUm,
+		});
 	}
 	if (typeof params?.zStartUm !== "number" || typeof params.zEndUm !== "number") {
 		return failedActionResult("Fixed-range autofocus requires zStartUm and zEndUm in ProcedureSpec domain.raman.autofocus.params.", {
@@ -513,11 +563,11 @@ function resolveAutofocusActionParams(
 			safeToResume: false,
 		});
 	}
-	return {
+	return withEnvironmentAutofocusDefaults(spec, {
 		...params,
 		zStartUm: params.zStartUm,
 		zEndUm: params.zEndUm,
-	};
+	});
 }
 
 function readAutofocusArtifact(cwd: string, runId: string, path: string): {
@@ -809,14 +859,14 @@ export async function validateRuntimeAnchorState(
 		if (!unit.point) {
 			continue;
 		}
-		const surfaceCorrection = mappingSurfaceCorrection(spec);
+		const mappingLocalHalfRangeUm = mappingLocalAutofocusHalfRangeUm(spec);
 		const zValues =
 			spec.plan.kind === "focus_plane_calibration"
 				? [spec.plan.seedZUm - 100, spec.plan.seedZUm + 100]
-				: surfaceCorrection?.kind === "focus_plane"
+				: usesMappingLocalAutofocus(spec)
 					? [
-							unit.point.zUm! - surfaceCorrection.localAutofocusHalfRangeUm,
-							unit.point.zUm! + surfaceCorrection.localAutofocusHalfRangeUm,
+							unit.point.zUm! - mappingLocalHalfRangeUm,
+							unit.point.zUm! + mappingLocalHalfRangeUm,
 						]
 					: unit.point.zUm === undefined
 						? []
@@ -923,14 +973,13 @@ export async function runLiveRamanUnit(
 			artifactRefs,
 		};
 	}
-	const surfaceCorrection = mappingSurfaceCorrection(spec);
 	const autofocusWindow =
 		unit.focusCalibration !== undefined && spec.plan.kind === "focus_plane_calibration"
 			? [unitPosition.zUm - 100, unitPosition.zUm + 100]
-			: surfaceCorrection?.kind === "focus_plane"
+			: usesMappingLocalAutofocus(spec)
 				? [
-						focusCenterZUm - surfaceCorrection.localAutofocusHalfRangeUm,
-						focusCenterZUm + surfaceCorrection.localAutofocusHalfRangeUm,
+						focusCenterZUm - mappingLocalAutofocusHalfRangeUm(spec),
+						focusCenterZUm + mappingLocalAutofocusHalfRangeUm(spec),
 					]
 				: [];
 	if (autofocusWindow.length > 0) {
@@ -949,6 +998,7 @@ export async function runLiveRamanUnit(
 	const acquisition = options.acquisitionOverride ?? spec.domain.raman.acquisition;
 	const frameProviderResourceId = findResourceId(spec, "frame_provider");
 	const spectrometerResourceId = findResourceId(spec, "spectrometer");
+	const environmentProfile = resolveRamanEnvironmentRuntimeProfile(spec.domain.raman);
 	let autofocusResult: ActionResult | undefined;
 	let spectrumResult: ActionResult | undefined;
 
@@ -966,6 +1016,7 @@ export async function runLiveRamanUnit(
 					zUm: unitPosition.zUm,
 				},
 				timeoutMs: DEFAULT_STAGE_MOVE_TIMEOUT_MS,
+				zMotionProfile: environmentProfile.zMotionProfile,
 			});
 			if (moveResult.status !== "success") {
 				const moveArtifacts = artifactRefs.concat(moveResult.artifacts);
