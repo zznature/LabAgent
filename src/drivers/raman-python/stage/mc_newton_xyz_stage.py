@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import statistics
 import sys
 import time
@@ -14,6 +15,15 @@ from stage.models import StagePosition
 
 
 _T = TypeVar("_T")
+_MotionProfile = tuple[str, str, int, int]
+_Z_ADAPTIVE_MAX_VOLTAGE_V = 50
+_Z_ADAPTIVE_MIN_FREQUENCY_HZ = 500
+_Z_ADAPTIVE_MAX_RESCUES_PER_MOVE = 2
+_Z_ADAPTIVE_ZERO_PULSE_SAMPLES = 2
+_Z_ADAPTIVE_STALL_SAMPLES = 4
+_Z_ADAPTIVE_STALL_MIN_ELAPSED_MS = 1500.0
+_Z_ADAPTIVE_GLOBAL_WINDOW = 10
+_Z_ADAPTIVE_GLOBAL_PROMOTE_SUCCESSES = 2
 
 
 def _ensure_vendor_sdk_importable() -> None:
@@ -114,12 +124,12 @@ class MCNewtonXYZStageController:
         }
         self._stability_tolerance_um = float(stability_tolerance_um)
         self._cap_nf = int(cap_nf)
-        self._axis_motion_profiles: dict[str, tuple[str, str, int, int]] = {
+        self._axis_motion_profiles: dict[str, _MotionProfile] = {
             "x": ("mm", "slide", 50, 750),
             "y": ("mm", "slide", 50, 750),
             "z": ("mm", "step", 50, 1000),
         }
-        self._configured_axis_profiles: dict[str, tuple[str, str, int, int]] = {}
+        self._configured_axis_profiles: dict[str, _MotionProfile] = {}
         self._sdk: MCNewtonLT06 | None = None
         self._connected = False
         self._enabled_channels: set[int] = set()
@@ -127,6 +137,11 @@ class MCNewtonXYZStageController:
         self._last_pulse_axes: set[str] = set()
         self.last_move_commands: list[dict[str, Any]] = []
         self.last_settle_diagnostics: dict[str, Any] = {}
+        self._z_adaptive_base_profile = self._axis_motion_profiles["z"]
+        self._z_adaptive_profile_ladder = self._build_z_adaptive_profile_ladder(self._z_adaptive_base_profile)
+        self._z_adaptive_global_level = 0
+        self._z_adaptive_rescue_success_window: list[bool] = []
+        self._z_pending_target_set_warning: dict[str, Any] | None = None
 
     def __enter__(self) -> "MCNewtonXYZStageController":
         self.connect()
@@ -222,8 +237,8 @@ class MCNewtonXYZStageController:
         z_profile = (units, z_mode, int(z_voltage_v), int(z_frequency_hz))
         self._axis_motion_profiles["x"] = xy_profile
         self._axis_motion_profiles["y"] = xy_profile
-        self._axis_motion_profiles["z"] = z_profile
         self._configured_axis_profiles.clear()
+        self._set_z_adaptive_base_profile(z_profile)
 
     def set_z_motion_profile(
         self,
@@ -245,8 +260,7 @@ class MCNewtonXYZStageController:
         frequency = int(frequency_hz)
         if frequency <= 0 or frequency > 2000:
             raise ValueError("Z motion profile frequency_hz must be between 1 and 2000 Hz.")
-        self._axis_motion_profiles["z"] = (normalized_units, normalized_mode, voltage, frequency)
-        self._configured_axis_profiles.pop("z", None)
+        self._set_z_adaptive_base_profile((normalized_units, normalized_mode, voltage, frequency))
 
     def disconnect(self) -> None:
         if not self._connected or self._sdk is None:
@@ -356,6 +370,12 @@ class MCNewtonXYZStageController:
         t_start = time.monotonic()
         previous = {axis: self.get_axis_position_um(axis, preserve_enabled_channels=True) for axis in target_axes}
         samples: list[dict[str, Any]] = []
+        z_adaptive = self._new_z_adaptive_diagnostics(target_axes, previous)
+        z_rescue_attempts = 0
+        z_current_level = self._z_adaptive_level_for_profile(self._axis_motion_profiles["z"])
+        z_zero_pulse_streak = 0
+        z_stall_streak = 0
+        z_best_residual_um: float | None = None
         diagnostics: dict[str, Any] = {
             "status": "waiting",
             "axes": sorted(target_axes),
@@ -374,6 +394,8 @@ class MCNewtonXYZStageController:
             "moveCommandsAtStart": list(self.last_move_commands),
             "samples": samples,
         }
+        if z_adaptive is not None:
+            diagnostics["zAdaptiveMotion"] = z_adaptive
         self.last_settle_diagnostics = diagnostics
 
         while True:
@@ -406,6 +428,8 @@ class MCNewtonXYZStageController:
                 if axis in target_axes
             )
             if all_pulses_done and all_stable and all_reached:
+                if z_adaptive is not None:
+                    self._finish_z_adaptive_diagnostics(z_adaptive, bool(z_adaptive["rescueAttempts"]))
                 diagnostics.update({
                     "status": "settled",
                     "elapsedMs": elapsed_ms,
@@ -416,9 +440,51 @@ class MCNewtonXYZStageController:
                 })
                 return
 
+            if z_adaptive is not None:
+                (
+                    rescue_reason,
+                    z_zero_pulse_streak,
+                    z_stall_streak,
+                    z_best_residual_um,
+                ) = self._z_adaptive_rescue_reason(
+                    current=current,
+                    previous=previous,
+                    initial_um=float(z_adaptive["initialReadUm"]),
+                    remaining=remaining,
+                    elapsed_ms=elapsed_ms,
+                    zero_pulse_streak=z_zero_pulse_streak,
+                    stall_streak=z_stall_streak,
+                    best_residual_um=z_best_residual_um,
+                )
+                if rescue_reason and z_rescue_attempts < _Z_ADAPTIVE_MAX_RESCUES_PER_MOVE:
+                    next_level = min(z_current_level + 1, len(self._z_adaptive_profile_ladder) - 1)
+                    if next_level > z_current_level:
+                        event = self._resend_z_target_with_adaptive_profile(
+                            target_um=self._last_targets_um["z"],
+                            level=next_level,
+                            reason=rescue_reason,
+                            elapsed_ms=elapsed_ms,
+                            current_um=current["z"],
+                            remaining_pulses=int(remaining["z"]),
+                        )
+                        z_adaptive["rescueAttempts"].append(event)
+                        z_adaptive["status"] = "rescuing"
+                        z_rescue_attempts += 1
+                        z_current_level = next_level
+                        z_zero_pulse_streak = 0
+                        z_stall_streak = 0
+                        z_best_residual_um = None
+                        previous = current
+                        continue
+                    z_adaptive["profileLimitReached"] = True
+
             previous = current
             if elapsed_ms > timeout_ms:
                 verification_reads = self._verification_reads(target_axes, count=3)
+                if z_adaptive is not None:
+                    z_adaptive["status"] = "timeout"
+                    z_adaptive["finalGlobalLevel"] = self._z_adaptive_global_level
+                    z_adaptive["rescueSuccessWindow"] = list(self._z_adaptive_rescue_success_window)
                 diagnostics.update({
                     "status": "timeout",
                     "elapsedMs": elapsed_ms,
@@ -508,11 +574,14 @@ class MCNewtonXYZStageController:
             time.sleep(0.100)
 
     def _move_axis_absolute_um(self, axis: str, target_um: float) -> None:
-        self._select_axis(axis)
-        self._apply_axis_motion_profile(axis)
+        key = axis.lower()
+        self._select_axis(key)
+        if key == "z":
+            self._apply_z_adaptive_profile_level(self._z_adaptive_global_level)
+        self._apply_axis_motion_profile(key)
         target_mm = target_um / 1000.0
-        self._send_move_target_mm(axis, target_mm, target_um)
-        self._last_targets_um[axis.lower()] = target_um
+        self._send_move_target_mm(key, target_mm, target_um)
+        self._last_targets_um[key] = target_um
 
     def _read_stable_axis_position_um(self, axis: str) -> float:
         reads: list[float] = []
@@ -588,28 +657,257 @@ class MCNewtonXYZStageController:
         self._configured_axis_profiles[key] = profile
 
     def _send_move_target_mm(self, axis: str, target_mm: float, target_um: float) -> None:
+        key = axis.lower()
         assert self._sdk is not None
         status, response = self._sdk_call(self._sdk.move_close_target, target_mm)
         tolerated_empty_target_error = (
             status == MFMCNewtonStatus.TargetSetError
             and not response
         )
-        self.last_move_commands.append({
-            "axis": axis.lower(),
+        command = {
+            "axis": key,
             "method": "sdk.move_close_target",
             "target_mm": target_mm,
             "target_um": target_um,
-            "channel": self._channels[axis.lower()],
-            "profile": str(self._axis_motion_profiles[axis.lower()]),
+            "channel": self._channels[key],
+            "profile": str(self._axis_motion_profiles[key]),
             "status": getattr(status, "name", str(status)),
             "response": str(response),
             "tolerated": tolerated_empty_target_error,
-        })
+        }
+        if key == "z":
+            command.update({
+                "adaptiveProfileLevel": self._z_adaptive_level_for_profile(self._axis_motion_profiles["z"]),
+                "adaptiveGlobalLevel": self._z_adaptive_global_level,
+                "adaptiveBaseProfile": self._motion_profile_to_dict(self._z_adaptive_base_profile),
+            })
+            if tolerated_empty_target_error:
+                self._z_pending_target_set_warning = {
+                    "targetUm": float(target_um),
+                    "status": getattr(status, "name", str(status)),
+                    "response": str(response),
+                }
+            else:
+                self._z_pending_target_set_warning = None
+        self.last_move_commands.append(command)
         if status == MFMCNewtonStatus.NoError or tolerated_empty_target_error:
             return
         raise StageCommandError(
             f"move_close_target({axis}) failed with SDK status {status} and response {response!r}"
         )
+
+    def _set_z_adaptive_base_profile(self, profile: _MotionProfile) -> None:
+        if profile != self._z_adaptive_base_profile:
+            self._z_adaptive_global_level = 0
+            self._z_adaptive_rescue_success_window.clear()
+        self._z_adaptive_base_profile = profile
+        self._z_adaptive_profile_ladder = self._build_z_adaptive_profile_ladder(profile)
+        self._apply_z_adaptive_profile_level(self._z_adaptive_global_level)
+
+    def _apply_z_adaptive_profile_level(self, level: int) -> int:
+        bounded_level = max(0, min(int(level), len(self._z_adaptive_profile_ladder) - 1))
+        profile = self._z_adaptive_profile_ladder[bounded_level]
+        if self._axis_motion_profiles["z"] != profile:
+            self._axis_motion_profiles["z"] = profile
+            self._configured_axis_profiles.pop("z", None)
+        return bounded_level
+
+    def _build_z_adaptive_profile_ladder(self, base: _MotionProfile) -> list[_MotionProfile]:
+        units, mode, voltage_v, frequency_hz = base
+        candidates = [
+            (voltage_v, frequency_hz),
+            (min(_Z_ADAPTIVE_MAX_VOLTAGE_V, voltage_v + 5), frequency_hz),
+            (min(_Z_ADAPTIVE_MAX_VOLTAGE_V, voltage_v + 10), min(frequency_hz, 800)),
+            (min(_Z_ADAPTIVE_MAX_VOLTAGE_V, voltage_v + 15), min(frequency_hz, 600)),
+            (_Z_ADAPTIVE_MAX_VOLTAGE_V, min(frequency_hz, _Z_ADAPTIVE_MIN_FREQUENCY_HZ)),
+        ]
+        ladder: list[_MotionProfile] = []
+        seen: set[_MotionProfile] = set()
+        for candidate_voltage, candidate_frequency in candidates:
+            profile = (
+                units,
+                mode,
+                int(max(0, min(_Z_ADAPTIVE_MAX_VOLTAGE_V, candidate_voltage))),
+                int(max(1, candidate_frequency)),
+            )
+            if profile in seen:
+                continue
+            ladder.append(profile)
+            seen.add(profile)
+        return ladder
+
+    def _z_adaptive_level_for_profile(self, profile: _MotionProfile) -> int:
+        try:
+            return self._z_adaptive_profile_ladder.index(profile)
+        except ValueError:
+            return 0
+
+    def _new_z_adaptive_diagnostics(
+        self,
+        target_axes: set[str],
+        initial_reads: dict[str, float],
+    ) -> dict[str, Any] | None:
+        if "z" not in target_axes or "z" not in self._last_targets_um:
+            return None
+        return {
+            "status": "watching",
+            "baseProfile": self._motion_profile_to_dict(self._z_adaptive_base_profile),
+            "profileLadder": [
+                self._motion_profile_to_dict(profile)
+                for profile in self._z_adaptive_profile_ladder
+            ],
+            "startingGlobalLevel": self._z_adaptive_global_level,
+            "startingActiveLevel": self._z_adaptive_level_for_profile(self._axis_motion_profiles["z"]),
+            "maxRescueAttempts": _Z_ADAPTIVE_MAX_RESCUES_PER_MOVE,
+            "promotionRule": {
+                "rescuedMoves": _Z_ADAPTIVE_GLOBAL_PROMOTE_SUCCESSES,
+                "window": _Z_ADAPTIVE_GLOBAL_WINDOW,
+            },
+            "targetSetWarningAtStart": dict(self._z_pending_target_set_warning or {}),
+            "initialReadUm": float(initial_reads["z"]),
+            "targetUm": float(self._last_targets_um["z"]),
+            "rescueAttempts": [],
+            "globalPromotion": None,
+            "profileLimitReached": False,
+        }
+
+    def _z_adaptive_rescue_reason(
+        self,
+        *,
+        current: dict[str, float],
+        previous: dict[str, float],
+        initial_um: float,
+        remaining: dict[str, int],
+        elapsed_ms: float,
+        zero_pulse_streak: int,
+        stall_streak: int,
+        best_residual_um: float | None,
+    ) -> tuple[str | None, int, int, float | None]:
+        target_um = self._last_targets_um["z"]
+        current_um = current["z"]
+        previous_um = previous["z"]
+        if not self._z_feedback_is_rescuable(target_um, current_um, previous_um, initial_um):
+            return None, 0, 0, best_residual_um
+
+        residual_um = abs(current_um - target_um)
+        threshold_um = self._z_adaptive_rescue_residual_threshold_um()
+        if residual_um <= threshold_um:
+            return None, 0, 0, residual_um
+
+        if self._z_pending_target_set_warning_matches(target_um):
+            return "target_set_error", zero_pulse_streak, stall_streak, residual_um
+
+        if int(remaining["z"]) <= 0:
+            zero_pulse_streak += 1
+        else:
+            zero_pulse_streak = 0
+        if zero_pulse_streak >= _Z_ADAPTIVE_ZERO_PULSE_SAMPLES:
+            return "zero_remaining_pulses_outside_tolerance", zero_pulse_streak, stall_streak, residual_um
+
+        improvement_um = 0.5
+        if best_residual_um is None or residual_um < best_residual_um - improvement_um:
+            best_residual_um = residual_um
+            stall_streak = 0
+        elif elapsed_ms >= _Z_ADAPTIVE_STALL_MIN_ELAPSED_MS:
+            stall_streak += 1
+        if stall_streak >= _Z_ADAPTIVE_STALL_SAMPLES:
+            return "residual_not_improving", zero_pulse_streak, stall_streak, best_residual_um
+        return None, zero_pulse_streak, stall_streak, best_residual_um
+
+    def _z_adaptive_rescue_residual_threshold_um(self) -> float:
+        return max(self._target_tolerances_um.get("z", 1.0) * 2.0, 8.0)
+
+    def _z_feedback_is_rescuable(
+        self,
+        target_um: float,
+        current_um: float,
+        previous_um: float,
+        initial_um: float,
+    ) -> bool:
+        values = (target_um, current_um, previous_um, initial_um)
+        if not all(math.isfinite(value) for value in values):
+            return False
+        if target_um < 0 or current_um < 0:
+            return False
+        if target_um > 500.0 and current_um < 10.0 and initial_um > 500.0:
+            return False
+        if abs(current_um - previous_um) > 2000.0:
+            return False
+        return True
+
+    def _z_pending_target_set_warning_matches(self, target_um: float) -> bool:
+        warning = self._z_pending_target_set_warning
+        if warning is None:
+            return False
+        return abs(float(warning.get("targetUm", 0.0)) - float(target_um)) < 1e-6
+
+    def _resend_z_target_with_adaptive_profile(
+        self,
+        *,
+        target_um: float,
+        level: int,
+        reason: str,
+        elapsed_ms: float,
+        current_um: float,
+        remaining_pulses: int,
+    ) -> dict[str, Any]:
+        from_level = self._z_adaptive_level_for_profile(self._axis_motion_profiles["z"])
+        to_level = self._apply_z_adaptive_profile_level(level)
+        self._select_axis("z")
+        self._apply_axis_motion_profile("z")
+        self._send_move_target_mm("z", target_um / 1000.0, target_um)
+        return {
+            "reason": reason,
+            "elapsedMs": elapsed_ms,
+            "fromLevel": from_level,
+            "toLevel": to_level,
+            "fromProfile": self._motion_profile_to_dict(self._z_adaptive_profile_ladder[from_level]),
+            "toProfile": self._motion_profile_to_dict(self._z_adaptive_profile_ladder[to_level]),
+            "currentUm": current_um,
+            "targetUm": target_um,
+            "deltaToTargetUm": current_um - target_um,
+            "remainingPulses": remaining_pulses,
+            "commandIndex": len(self.last_move_commands) - 1,
+        }
+
+    def _finish_z_adaptive_diagnostics(self, diagnostics: dict[str, Any], rescued: bool) -> None:
+        promotion = self._record_z_adaptive_settle_success(rescued=rescued)
+        diagnostics.update({
+            "status": "rescued" if rescued else "not_needed",
+            "finalGlobalLevel": self._z_adaptive_global_level,
+            "globalPromotion": promotion,
+            "rescueSuccessWindow": list(self._z_adaptive_rescue_success_window),
+        })
+
+    def _record_z_adaptive_settle_success(self, *, rescued: bool) -> dict[str, Any] | None:
+        self._z_adaptive_rescue_success_window.append(bool(rescued))
+        if len(self._z_adaptive_rescue_success_window) > _Z_ADAPTIVE_GLOBAL_WINDOW:
+            self._z_adaptive_rescue_success_window.pop(0)
+        if (
+            sum(1 for value in self._z_adaptive_rescue_success_window if value)
+            >= _Z_ADAPTIVE_GLOBAL_PROMOTE_SUCCESSES
+            and self._z_adaptive_global_level < len(self._z_adaptive_profile_ladder) - 1
+        ):
+            from_level = self._z_adaptive_global_level
+            self._z_adaptive_global_level += 1
+            self._z_adaptive_rescue_success_window.clear()
+            return {
+                "fromLevel": from_level,
+                "toLevel": self._z_adaptive_global_level,
+                "fromProfile": self._motion_profile_to_dict(self._z_adaptive_profile_ladder[from_level]),
+                "toProfile": self._motion_profile_to_dict(self._z_adaptive_profile_ladder[self._z_adaptive_global_level]),
+            }
+        return None
+
+    @staticmethod
+    def _motion_profile_to_dict(profile: _MotionProfile) -> dict[str, Any]:
+        units, mode, voltage_v, frequency_hz = profile
+        return {
+            "units": units,
+            "mode": mode,
+            "voltageV": voltage_v,
+            "frequencyHz": frequency_hz,
+        }
 
     def _select_axis(self, axis: str, *, disable_others: bool | None = None) -> None:
         self._ensure_connected()

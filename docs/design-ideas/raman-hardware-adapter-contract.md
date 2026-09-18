@@ -118,6 +118,8 @@ For mapping, `mapping_local_correction` is the default unless `autofocus.params.
 
 未抽真空 / 无光窗实验显式设置 `domain.raman.environment.vacuumState = not_vacuum`；runtime 从该冻结字段派生 `metricName = labspec_no_window_spot_focus` 与 Z motion profile `("mm", "step", 30, 1000)`。该 metric profile 复用 `labspec_spot_compactness`：先按 ROI 的稳健百分位归一化并扣除中位背景，再以信号三次方作为权重，按亮斑核心能量占比与加权 RMS 半径的比值评分；无光窗标定序列中紧凑亮斑因此得到最高分，而宽散光斑回落。`vacuumState` 是被冻结并随 proposal 审查的实验条件选择；runtime 只按该字段解析，不根据硬件现场状态自行猜测。`autofocus.params.metricName` 仍可作为特殊实验的显式覆盖，但普通真空/未抽真空切换应优先使用环境字段。
 
+MC.Newton XYZ driver 在 Z settle 等待中执行同一套自适应 motion rescue，但梯度从当前环境 profile 派生。默认真空梯度为 `50 V / 1000 Hz -> 50 V / 800 Hz -> 50 V / 600 Hz -> 50 V / 500 Hz`；默认未抽真空梯度为 `30 V / 1000 Hz -> 35 V / 1000 Hz -> 40 V / 800 Hz -> 45 V / 600 Hz -> 50 V / 500 Hz`。单次 Z move 最多 rescue 两次：当 `move_close_target` 返回空响应 `TargetSetError`、remaining pulses 已清零但残差仍大于 `max(2 * tolerance, 8 um)`、或残差持续无改善时，driver 用下一档参数重发同一目标。SDK 读数/通讯错误、负 Z、疑似归零或跳变读数不触发 rescue，继续按 stage error/timeout 暴露。若同一 daemon session 内最近 10 次 Z settle 中有 2 次 rescue 后成功，后续 Z move 的全局基准档位上调一级；运行中不自动降档，电压上限固定为 50 V，频率只下调不超过梯度下限。`stageMoveCommands` 记录每次命令使用的 adaptive level/profile，`stageSettleDiagnostics.zAdaptiveMotion` 记录 rescue 触发原因、档位变化和全局升档。
+
 历史 live mapping 记录显示，成功 autofocus 的保存帧最大间隔约 21.3 秒，保存帧等待超时保持 `frameTimeoutMs = 30000`；失败样本集中在 `stageTimeoutMs = 10000`，Z 轴仍在进入 5 µm 容差或稳定性判定阶段，因此 live runtime 会把 autofocus 单次 stage settle timeout 夹紧到至少 `60000`，最高仍不超过 `120000`。完整 autofocus action timeout 使用 `300000`，覆盖最近 18 帧 autofocus 流程约 180 秒的历史上界并保留恢复余量。
 
 ## 6. Tool surface
