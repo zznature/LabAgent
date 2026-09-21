@@ -32,6 +32,26 @@ _Avoid_: plan, spec, intent
 The deterministic execution owner that validates a ProcedureSpec, expands it into execution units, runs those units through the runtime, and maintains RunState.
 _Avoid_: planner, agent, driver
 
+**Lab Environment**:
+The lab-local execution context that combines the Kernel, Lab Configuration, and Instruments to turn approved experiment plans into controlled physical actions and observations.
+_Avoid_: workspace, instrument panel, kernel
+
+**Lab Configuration**:
+The stable lab-local definitions used for planning and execution, including instrument resources, safety policy, controlled terms, operating limits, user preferences, and procedure defaults.
+_Avoid_: kernel checks, live device state, experiment plan
+
+**Run Coordination**:
+The kernel-owned management of approved runs, including scheduling, monitoring, exclusive resource use, and human pause or abort intervention.
+_Avoid_: experiment controller, hardware controller, scheduler
+
+**Reviewed Experiment Procedure**:
+A versioned laboratory procedure accepted for use in approved runs.
+_Avoid_: experiment method, run record, memory entry, arbitrary script
+
+**Experiment Memory**:
+The persistent history of experiment plans and runs, including approvals, logs, artifacts, saved lab settings, and safety records.
+_Avoid_: runtime state, reviewed procedure catalog, automatic knowledge
+
 **ExecutionUnit**:
 The smallest kernel-owned execution block that provides stable progress, pause, resume, and artifact naming boundaries for a run.
 _Avoid_: driver command, Python step
@@ -40,9 +60,13 @@ _Avoid_: driver command, Python step
 The layer that turns semantic execution actions into device-level behavior and returns structured results to the kernel.
 _Avoid_: kernel, planner, hardware script
 
+**Device Interface**:
+The stable instrument-facing contract for discovering capabilities, issuing controlled commands, reading current state, and obtaining measurements.
+_Avoid_: equipment list, device communication protocol, driver
+
 **Driver**:
-The device-specific code that talks to real or simulated hardware under the runtime's control.
-_Avoid_: tool, procedure, experiment action
+A device-specific adapter that implements a Device Interface for real or simulated hardware while hiding transport, communication protocol, and session details.
+_Avoid_: tool, procedure, experiment action, equipment
 
 **Instrument**:
 A physical laboratory resource that can produce observations or accept controlled actions during an experiment.
