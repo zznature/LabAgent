@@ -14,6 +14,8 @@ import {
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import { approveAndFreezeProcedureSpec, RunAdmissionError } from "../kernel/run-admission.ts";
 import { summarizeProcedureProposal } from "../planner/procedure-spec-builder.ts";
+import { describeAutofocusRoi, resolveAutofocusRoiTemplate } from "../planner/autofocus-roi.ts";
+import type { AutofocusRoiSource } from "../store/proposal-store.ts";
 import { getRamanLiveRuntime } from "../runtime/raman/index.ts";
 import {
 	createProcedureProposal,
@@ -226,6 +228,7 @@ export const proposeRunTool = {
 		"Use propose_run to create a bounded run proposal before any execution.",
 		"Do not call approve_and_start_run with a modified spec; the approved spec must match the proposal exactly.",
 		"Quote the returned proposalId and specHash to the operator; never ask the operator to look the specHash up elsewhere.",
+		"Include the returned actual autofocus ROI coordinates and source when presenting the proposal; reuse selected workspace template coordinates unless the user explicitly overrides them.",
 	],
 	parameters: RunProcedureParamsSchema,
 	executionMode: "sequential",
@@ -236,17 +239,20 @@ export const proposeRunTool = {
 				"invalid_procedure_spec",
 			);
 		}
+		let spec = params.spec;
+		let autofocusRoiSource: AutofocusRoiSource | undefined;
 		try {
-			compileProcedureSpec(params.spec);
+			({ spec, source: autofocusRoiSource } = resolveAutofocusRoiTemplate(ctx.cwd, spec, params.templateApplication));
+			compileProcedureSpec(spec);
 		} catch (cause) {
 			return error(
 				`ProcedureSpec failed executable validation: ${cause instanceof Error ? cause.message : String(cause)}`,
 				"invalid_procedure_spec",
 			);
 		}
-		const preview = summarizeProcedureProposal(params.spec);
-		const proposal = createProcedureProposal(ctx.cwd, params.spec);
-		const summary = `Run proposal ${proposal.proposalId} created and awaiting approval. specHash=${proposal.specHash}`;
+		const preview = summarizeProcedureProposal(spec);
+		const proposal = createProcedureProposal(ctx.cwd, spec, undefined, autofocusRoiSource);
+		const summary = `Run proposal ${proposal.proposalId} created and awaiting approval. specHash=${proposal.specHash}\n${describeAutofocusRoi(spec, autofocusRoiSource)}`;
 		return {
 			content: [{ type: "text", text: summary }],
 			details: {
@@ -264,6 +270,8 @@ export const proposeRunTool = {
 					risks: preview.risks,
 					limits: preview.limits,
 					mappingAutofocus: preview.mappingAutofocus,
+					autofocusRoi: { ...spec.domain.raman.autofocus.roi },
+					autofocusRoiSource,
 					supportedExecutionModes: ["simulation", "live-supervised"],
 					templateApplication: params.templateApplication
 						? {
@@ -327,9 +335,17 @@ export const reviseProposalTool = {
 		}
 
 		const preview = summarizeProcedureProposal(revisedSpec);
-		const revised = createProcedureProposal(ctx.cwd, revisedSpec, proposal.proposalId);
+		const roiUnchanged = (["x", "y", "width", "height"] as const).every(
+			(key) => revisedSpec.domain.raman.autofocus.roi[key] === proposal.spec.domain.raman.autofocus.roi[key],
+		);
+		const cameras = revisedSpec.resources.filter((resource) => resource.role === "frame_provider");
+		const autofocusRoiSource =
+			roiUnchanged && cameras.length === 1 && cameras[0]?.resourceId === proposal.autofocusRoiSource?.frameProviderResourceId
+				? proposal.autofocusRoiSource
+				: undefined;
+		const revised = createProcedureProposal(ctx.cwd, revisedSpec, proposal.proposalId, autofocusRoiSource);
 		supersedeProcedureProposal(ctx.cwd, proposal, revised.proposalId);
-		const summary = `Proposal ${proposal.proposalId} superseded by ${revised.proposalId}. specHash=${revised.specHash}. Operator approval does not carry over; the new hash must be acknowledged.`;
+		const summary = `Proposal ${proposal.proposalId} superseded by ${revised.proposalId}. specHash=${revised.specHash}. Operator approval does not carry over; the new hash must be acknowledged.\n${describeAutofocusRoi(revisedSpec, autofocusRoiSource)}`;
 		return {
 			content: [{ type: "text", text: summary }],
 			details: {
@@ -350,6 +366,8 @@ export const reviseProposalTool = {
 					risks: preview.risks,
 					limits: preview.limits,
 					mappingAutofocus: preview.mappingAutofocus,
+					autofocusRoi: { ...revisedSpec.domain.raman.autofocus.roi },
+					autofocusRoiSource,
 					reason: params.reason,
 				},
 			},

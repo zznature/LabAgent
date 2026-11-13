@@ -21,10 +21,10 @@ class TemperatureSnapshot:
     setpoint_k: float
     ramp_k_per_min: float
     heater_power_pct: float
-    heater_current_a: float
-    heater_voltage_v: float
     output_range: OutputRange
     loop_channel: str
+    heater_current_a: float | None = None
+    heater_voltage_v: float | None = None
 
 
 @dataclass(frozen=True)

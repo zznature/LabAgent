@@ -45,7 +45,14 @@ function errorForResult(result: Extract<ManagedUnitResult, { status: "failed" }>
 }
 
 function classifyRuntimeFailure(failure: RuntimeError, artifacts: RunState["artifactRefs"]): ClassifiedFailure | undefined {
-	if (failure.errorCode.includes("timeout")) {
+	const payload = failure.payload;
+	const stageTimeout =
+		failure.errorCode === "stage_move_failed" || failure.errorCode === "autofocus_stage_error"
+			? typeof payload === "object" && payload !== null &&
+				("exceptionType" in payload && payload.exceptionType === "StageTimeoutError" ||
+				 "message" in payload && typeof payload.message === "string" && payload.message.includes("did not settle within"))
+			: false;
+	if (failure.errorCode.includes("timeout") || stageTimeout) {
 		return {
 			failure,
 			failureType: "execution",

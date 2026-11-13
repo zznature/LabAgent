@@ -156,6 +156,105 @@ def _apply_z_motion_profile(stage: Any, profile: Any) -> dict[str, Any] | None:
     raise RuntimeError("Stage driver does not support per-action Z motion profiles.")
 
 
+def _apply_xy_motion_profile(stage: Any, axis: str, profile: Any) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        raise ValueError(f"Missing XY {axis.upper()} motion profile.")
+    resolved = {
+        "units": profile.get("units", "mm"),
+        "mode": profile.get("mode", "slide"),
+        "voltageV": int(profile.get("voltageV", 50)),
+        "frequencyHz": int(profile.get("frequencyHz", 750)),
+    }
+    setter = getattr(stage, "set_axis_motion_profile", None)
+    if not callable(setter):
+        raise RuntimeError("Stage driver does not support per-action XY motion profiles.")
+    setter(
+        axis,
+        units=str(resolved["units"]),
+        mode=str(resolved["mode"]),
+        voltage_v=resolved["voltageV"],
+        frequency_hz=resolved["frequencyHz"],
+    )
+    return resolved
+
+
+def _move_xy_with_strategy(stage: Any, target: dict, timeout_ms: int, strategy: dict) -> dict[str, Any]:
+    """Move X/Y in coarse slide segments, then finish each axis in step mode."""
+    if not strategy.get("enabled", False):
+        stage.move_absolute_and_wait_um(
+            x_um=target.get("xUm"), y_um=target.get("yUm"), z_um=None, timeout_ms=timeout_ms
+        )
+        return {"enabled": False, "segments": []}
+
+    segment_step_um = float(strategy.get("segmentStepUm", 250.0))
+    fine_window_um = float(strategy.get("fineWindowUm", 80.0))
+    approach_offset_um = float(strategy.get("approachOffsetUm", 15.0))
+    segment_timeout_ms = int(strategy.get("segmentTimeoutMs", 30_000))
+    fine_timeout_ms = int(strategy.get("fineTimeoutMs", 40_000))
+    if segment_step_um <= 0 or fine_window_um <= 0 or approach_offset_um < 0:
+        raise ValueError("XY motion strategy distances must be valid positive values.")
+
+    started = time.monotonic()
+    segments: list[dict[str, Any]] = []
+    initial = stage.get_position_um()
+    current = {"x": float(initial.x_um), "y": float(initial.y_um)}
+    diagnostics = {
+        "enabled": True,
+        "initialPosition": {"xUm": initial.x_um, "yUm": initial.y_um},
+        "segmentStepUm": segment_step_um,
+        "fineWindowUm": fine_window_um,
+        "approachOffsetUm": approach_offset_um,
+        "segments": segments,
+    }
+    stage.last_xy_motion_diagnostics = diagnostics
+
+    def move_axis(axis: str, destination: float, profile: Any, phase: str, move_timeout_ms: int) -> None:
+        nonlocal current
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        remaining_ms = timeout_ms - elapsed_ms
+        if remaining_ms <= 0:
+            raise TimeoutError("XY hybrid movement exceeded its total timeout budget.")
+        resolved = _apply_xy_motion_profile(stage, axis, profile)
+        kwargs = {"x_um": None, "y_um": None, "z_um": None, "timeout_ms": min(move_timeout_ms, remaining_ms)}
+        kwargs[f"{axis}_um"] = float(destination)
+        stage.move_absolute_and_wait_um(**kwargs)
+        position = stage.get_position_um()
+        actual = float(position.x_um if axis == "x" else position.y_um)
+        current[axis] = actual
+        segments.append({
+            "axis": axis,
+            "phase": phase,
+            "profile": resolved,
+            "targetUm": float(destination),
+            "finalUm": actual,
+            "residualUm": actual - float(destination),
+            "elapsedMs": int((time.monotonic() - started) * 1000),
+        })
+
+    for axis in ("x", "y"):
+        target_value = target.get(f"{axis}Um")
+        if target_value is None:
+            continue
+        target_value = float(target_value)
+        delta = target_value - current[axis]
+        if abs(delta) > fine_window_um:
+            direction = 1.0 if delta > 0 else -1.0
+            while abs(target_value - current[axis]) > fine_window_um:
+                remaining = abs(target_value - current[axis])
+                distance = min(segment_step_um, max(0.0, remaining - fine_window_um))
+                if distance <= 0:
+                    break
+                move_axis(axis, current[axis] + direction * distance, strategy["coarseProfile"], "coarse_slide", segment_timeout_ms)
+
+        final_target = target_value
+        if (target_value - current[axis]) * delta < 0 and approach_offset_um > 0:
+            final_target = target_value - direction * approach_offset_um
+            move_axis(axis, final_target, strategy["fineProfile"], "approach_step", fine_timeout_ms)
+        move_axis(axis, target_value, strategy["fineProfile"], "fine_step", fine_timeout_ms)
+
+    return diagnostics
+
+
 def _stable_file(path: Path) -> bool:
     try:
         return path.exists() and path.stat().st_size > 0
@@ -396,21 +495,38 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
     stage = session.stage(request["stage"])
     _clear_stage_diagnostics(stage)
     resolved_z_motion_profile = None
+    xy_strategy_diagnostics = None
     try:
         resolved_z_motion_profile = _apply_z_motion_profile(stage, payload.get("zMotionProfile"))
-        stage.move_absolute_and_wait_um(
-            x_um=target.get("xUm"),
-            y_um=target.get("yUm"),
-            z_um=target.get("zUm"),
-            timeout_ms=int(payload["timeoutMs"]),
-        )
+        xy_strategy = payload.get("xyMotionStrategy")
+        if isinstance(xy_strategy, dict) and xy_strategy.get("enabled", False):
+            xy_strategy_diagnostics = _move_xy_with_strategy(stage, target, int(payload["timeoutMs"]), xy_strategy)
+        else:
+            stage.move_absolute_and_wait_um(
+                x_um=target.get("xUm"),
+                y_um=target.get("yUm"),
+                z_um=None,
+                timeout_ms=int(payload["timeoutMs"]),
+            )
+            xy_strategy_diagnostics = {"enabled": False, "segments": []}
+        if target.get("zUm") is not None:
+            stage.move_absolute_and_wait_um(
+                x_um=None,
+                y_um=None,
+                z_um=target.get("zUm"),
+                timeout_ms=int(payload["timeoutMs"]),
+            )
         position = stage.get_position_um()
         session.begin_point(
             Path(request["frameProvider"]["config"]["bridgeDir"]),
             {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um},
         )
     except Exception as exc:
-        error_payload = _stage_error_payload(stage, {"target": target, "exceptionType": type(exc).__name__})
+        error_payload = _stage_error_payload(stage, {
+            "target": target,
+            "exceptionType": type(exc).__name__,
+            "xyMotionStrategy": xy_strategy_diagnostics or getattr(stage, "last_xy_motion_diagnostics", None),
+        })
         _trace("stage_move_error", error_payload)
         session.disable_stage_axes()
         return _fail(
@@ -426,6 +542,7 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
         {
             "finalPosition": {"xUm": position.x_um, "yUm": position.y_um, "zUm": position.z_um},
             "zMotionProfile": resolved_z_motion_profile,
+            "xyMotionStrategy": xy_strategy_diagnostics,
             "stageMoveCommands": _stage_move_commands(stage),
             "stageSettleDiagnostics": _stage_settle_diagnostics(stage),
         },

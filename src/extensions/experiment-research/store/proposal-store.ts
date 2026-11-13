@@ -6,6 +6,12 @@ import { join } from "node:path";
 
 export type ProposalStatus = "proposed" | "approved" | "superseded";
 
+export interface AutofocusRoiSource {
+	templateId: string;
+	templateVersion: string;
+	frameProviderResourceId: string;
+}
+
 export interface ProcedureProposalRecord {
 	proposalId: string;
 	experimentId: string;
@@ -21,6 +27,7 @@ export interface ProcedureProposalRecord {
 	supersededAt?: string;
 	/** Set on a proposal created by revising an earlier one. */
 	revisionOf?: string;
+	autofocusRoiSource?: AutofocusRoiSource;
 }
 
 function stableCanonicalize(value: unknown): string {
@@ -56,6 +63,7 @@ export function createProcedureProposal(
 	cwd: string,
 	spec: ProcedureSpec,
 	revisionOf?: string,
+	autofocusRoiSource?: AutofocusRoiSource,
 ): ProcedureProposalRecord {
 	const proposal: ProcedureProposalRecord = {
 		proposalId: `proposal-${randomUUID().slice(0, 8)}`,
@@ -67,6 +75,7 @@ export function createProcedureProposal(
 		spec,
 		createdAt: now(),
 		revisionOf,
+		autofocusRoiSource,
 	};
 	writeJsonFile(proposalPath(cwd, spec.experimentId, proposal.proposalId), proposal);
 	return proposal;

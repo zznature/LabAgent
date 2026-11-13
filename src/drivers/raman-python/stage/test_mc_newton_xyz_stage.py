@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from stage.exceptions import StageCommandError
+from stage.exceptions import StageCommandError, StageTimeoutError
 from stage.mc_newton_xyz_stage import MCNewtonXYZStageController, MFMCNewtonStatus
 
 
@@ -25,6 +25,8 @@ class FakeNewtonSdk:
         undertravel_profile: tuple[int, int] = (30, 1000),
         target_set_error_on_undertravel: bool = False,
         check_position_status: MFMCNewtonStatus = MFMCNewtonStatus.NoError,
+        residual_um: float = 12.0,
+        never_recovers: bool = False,
     ) -> None:
         self.voltage_v = 50
         self.frequency_hz = 1000
@@ -35,6 +37,8 @@ class FakeNewtonSdk:
         self.undertravel_profile = undertravel_profile
         self.target_set_error_on_undertravel = target_set_error_on_undertravel
         self.check_position_status = check_position_status
+        self.residual_um = residual_um
+        self.never_recovers = never_recovers
 
     def channel_set(self, *_args: object) -> MFMCNewtonStatus:
         return MFMCNewtonStatus.NoError
@@ -62,7 +66,7 @@ class FakeNewtonSdk:
         target_um = float(target_mm) * 1000.0
         profile = (self.voltage_v, self.frequency_hz)
         undertravel = profile == self.undertravel_profile
-        self.z_um = target_um - 12.0 if undertravel else target_um
+        self.z_um = target_um - self.residual_um if undertravel or self.never_recovers else target_um
         self.remaining_pulses = 0
         self.move_commands.append({
             "targetUm": target_um,
@@ -172,6 +176,76 @@ class MCNewtonXYZStageControllerTest(unittest.TestCase):
 
         self.assertEqual(len(sdk.move_commands), 1)
         self.assertEqual(sdk.move_commands[0]["voltageV"], 30)
+
+    def test_z_rescues_recorded_small_residuals_after_persistent_stall(self) -> None:
+        for residual in (5.0001, 7.8425, 8.058833333333, 9.914611111111, 10.0):
+            with self.subTest(residual=residual):
+                sdk = FakeNewtonSdk(residual_um=residual, target_set_error_on_undertravel=True)
+                controller = self.make_controller(sdk)
+                controller.set_z_motion_profile(voltage_v=30, frequency_hz=1000)
+                controller.move_absolute_and_wait_um(z_um=100.0, timeout_ms=5000)
+                attempts = controller.last_settle_diagnostics["zAdaptiveMotion"]["rescueAttempts"]
+                self.assertEqual(len(attempts), 1)
+                self.assertGreaterEqual(attempts[0]["elapsedMs"], 1500)
+
+    def test_z_arrival_includes_configured_tolerance_boundary(self) -> None:
+        for tolerance in (5.0, 8.0):
+            with self.subTest(tolerance=tolerance):
+                sdk = FakeNewtonSdk(residual_um=tolerance)
+                controller = self.make_controller(sdk)
+                controller.set_z_motion_profile(voltage_v=30, frequency_hz=1000)
+                controller.set_axis_target_tolerance_um("z", tolerance)
+                controller.move_absolute_and_wait_um(z_um=100.0, timeout_ms=5000)
+                self.assertEqual(len(sdk.move_commands), 1)
+
+    def test_z_does_not_rescue_while_feedback_is_converging(self) -> None:
+        for warning in (False, True):
+            for pulses in (0, 20):
+                with self.subTest(warning=warning, pulses=pulses):
+                    sdk = FakeNewtonSdk(target_set_error_on_undertravel=warning)
+                    controller = self.make_controller(sdk)
+                    controller.set_z_motion_profile(voltage_v=30, frequency_hz=1000)
+                    started = self.clock.monotonic()
+
+                    def approaching_position() -> tuple[MFMCNewtonStatus, float]:
+                        sdk.z_um = min(100.0, 88.0 + (self.clock.monotonic() - started) * 3)
+                        sdk.remaining_pulses = pulses if sdk.z_um < 100 else 0
+                        return MFMCNewtonStatus.NoError, sdk.z_um / 1000
+
+                    with patch.object(sdk, "check_position", side_effect=approaching_position):
+                        controller.move_absolute_and_wait_um(z_um=100.0, timeout_ms=6000)
+                    self.assertEqual(len(sdk.move_commands), 1)
+
+    def test_small_z_rescues_do_not_promote_following_moves(self) -> None:
+        sdk = FakeNewtonSdk(residual_um=6)
+        controller = self.make_controller(sdk)
+        for target in (100.0, 200.0, 300.0):
+            controller.set_z_motion_profile(voltage_v=30, frequency_hz=1000)
+            controller.move_absolute_and_wait_um(z_um=target, timeout_ms=5000)
+            adaptive = controller.last_settle_diagnostics["zAdaptiveMotion"]
+            self.assertIsNone(adaptive["globalPromotion"])
+            self.assertEqual(adaptive["finalGlobalLevel"], 0)
+        self.assertEqual([command["voltageV"] for command in sdk.move_commands], [30, 35, 30, 35, 30, 35])
+
+    def test_each_z_rescue_waits_and_stays_within_attempt_limit(self) -> None:
+        sdk = FakeNewtonSdk(residual_um=8, never_recovers=True)
+        controller = self.make_controller(sdk)
+        controller.set_z_motion_profile(voltage_v=30, frequency_hz=1000)
+        with self.assertRaises(StageTimeoutError):
+            controller.move_absolute_and_wait_um(z_um=100.0, timeout_ms=5000)
+        attempts = controller.last_settle_diagnostics["zAdaptiveMotion"]["rescueAttempts"]
+        self.assertEqual(len(attempts), 2)
+        self.assertGreaterEqual(attempts[0]["elapsedMs"], 1500)
+        self.assertGreaterEqual(attempts[1]["elapsedMs"] - attempts[0]["elapsedMs"], 1500)
+        self.assertEqual([command["targetUm"] for command in sdk.move_commands], [100.0] * 3)
+
+    def test_z_does_not_resend_after_deadline(self) -> None:
+        sdk = FakeNewtonSdk(target_set_error_on_undertravel=True)
+        controller = self.make_controller(sdk)
+        controller.set_z_motion_profile(voltage_v=30, frequency_hz=1000)
+        with self.assertRaises(StageTimeoutError):
+            controller.move_absolute_and_wait_um(z_um=100.0, timeout_ms=1000)
+        self.assertEqual(len(sdk.move_commands), 1)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import { Type, type Static } from "typebox";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ExperimentIntent, ProcedureId, ProcedureSpec } from "../schemas/index.ts";
 import { ExperimentIntentValidator, ProcedureSpecValidator, formatValidationErrors } from "../schemas/index.ts";
 import {
@@ -8,6 +8,8 @@ import {
 	type FocusPlaneAnchor,
 } from "../planner/focus-plane.ts";
 import { summarizeProcedureProposal, type ProposalRisk } from "../planner/procedure-spec-builder.ts";
+import { describeAutofocusRoi, resolveAutofocusRoiTemplate } from "../planner/autofocus-roi.ts";
+import type { AutofocusRoiSource } from "../store/proposal-store.ts";
 import { compileProcedureSpec } from "../kernel/compile-units.ts";
 import {
 	getRamanLiveRuntime,
@@ -781,7 +783,7 @@ export const findExperimentProcedureTemplateTool = {
 				procedureId: params.procedureId,
 			});
 		}
-		return success(`ExperimentProcedureTemplate ${template.templateId}@${template.templateVersion} matched.`, {
+		const state = {
 			status: result.status,
 			procedureId: params.procedureId,
 			template,
@@ -799,7 +801,8 @@ export const findExperimentProcedureTemplateTool = {
 			},
 			candidateCount: result.candidateCount,
 			invalidTemplates: result.invalidTemplates,
-		});
+		};
+		return success(`ExperimentProcedureTemplate ${template.templateId}@${template.templateVersion} matched.\n${JSON.stringify({ template, templateApplication: state.templateApplication }, null, 2)}`, state);
 	},
 } satisfies ToolDefinition<typeof ExperimentProcedureTemplateMatchParamsSchema, PlannerToolDetails>;
 
@@ -815,7 +818,7 @@ export const getProcedureSpecTemplateTool = {
 	parameters: ProcedureSpecTemplateParamsSchema,
 	executionMode: "sequential",
 	async execute(_toolCallId, params: ProcedureSpecTemplateParams) {
-		return success(`Canonical ProcedureSpec template loaded for ${params.procedureId}.`, {
+		const state = {
 			procedureId: params.procedureId,
 			schemaVersion: "0.1.0",
 			template: templateForProcedure(params.procedureId),
@@ -828,7 +831,8 @@ export const getProcedureSpecTemplateTool = {
 				"Use limits only for maxLaserPowerPercent, minObjectiveClearanceUm, xRangeUm, yRangeUm, and zRangeUm.",
 				"Store the research goal with record_experiment_intent, then reference its intentId here.",
 			],
-		});
+		};
+		return success(`Canonical ProcedureSpec template loaded for ${params.procedureId}. These are example defaults; prefer the selected workspace template for the configured camera.\n${JSON.stringify(state, null, 2)}`, state);
 	},
 } satisfies ToolDefinition<typeof ProcedureSpecTemplateParamsSchema, PlannerToolDetails>;
 
@@ -883,8 +887,8 @@ export const validateProcedureSpecTool = {
 	],
 	parameters: ProcedureSpecParamsSchema,
 	executionMode: "sequential",
-	async execute(_toolCallId, params: ProcedureSpecParams) {
-		const spec = asProcedureSpec(params);
+	async execute(_toolCallId, params: ProcedureSpecParams, _signal?: AbortSignal, _onUpdate?: unknown, ctx?: ExtensionContext) {
+		let spec = asProcedureSpec(params);
 		const validation = validateProcedureSpec(spec);
 		if (!validation.valid) {
 			return error(validationFailureSummary("ProcedureSpec validation failed", validation.issues), "invalid_procedure_spec", {
@@ -893,7 +897,17 @@ export const validateProcedureSpecTool = {
 			});
 		}
 
-		return success("ProcedureSpec is valid for bounded planner proposal flow.", previewState(spec, params.templateApplication));
+		let autofocusRoiSource: AutofocusRoiSource | undefined;
+		try {
+			({ spec, source: autofocusRoiSource } = resolveAutofocusRoiTemplate(ctx?.cwd, spec, params.templateApplication));
+		} catch (cause) {
+			return error(cause instanceof Error ? cause.message : String(cause), "invalid_autofocus_roi_template");
+		}
+		return success(`ProcedureSpec is valid for bounded planner proposal flow.\n${describeAutofocusRoi(spec, autofocusRoiSource)}`, {
+			...previewState(spec, params.templateApplication),
+			autofocusRoi: { ...spec.domain.raman.autofocus.roi },
+			autofocusRoiSource,
+		});
 	},
 } satisfies ToolDefinition<typeof ProcedureSpecParamsSchema, PlannerToolDetails>;
 
@@ -909,7 +923,7 @@ export const runPreflightTool = {
 	parameters: ProcedureSpecParamsSchema,
 	executionMode: "sequential",
 	async execute(_toolCallId, params: ProcedureSpecParams, _signal, _onUpdate, ctx) {
-		const spec = asProcedureSpec(params);
+		let spec = asProcedureSpec(params);
 		const validation = validateProcedureSpec(spec);
 		if (!validation.valid) {
 			return error(
@@ -922,7 +936,15 @@ export const runPreflightTool = {
 			);
 		}
 
+		let autofocusRoiSource: AutofocusRoiSource | undefined;
+		try {
+			({ spec, source: autofocusRoiSource } = resolveAutofocusRoiTemplate(ctx.cwd, spec, params.templateApplication));
+		} catch (cause) {
+			return error(cause instanceof Error ? cause.message : String(cause), "invalid_autofocus_roi_template");
+		}
 		const state = await buildPreflightState(spec, ctx.cwd, params.executionMode ?? "simulation", params.templateApplication);
+		state.autofocusRoi = { ...spec.domain.raman.autofocus.roi };
+		state.autofocusRoiSource = autofocusRoiSource;
 		if (state.requiredRolesPresent !== true) {
 			const declaredRoles = spec.resources.map((resource) => resource.role).join(", ");
 			return error(
@@ -970,7 +992,7 @@ export const runPreflightTool = {
 			);
 		}
 
-		return success("ProcedureSpec preflight is ready for supervised proposal approval.", state);
+		return success(`ProcedureSpec preflight is ready for supervised proposal approval.\n${describeAutofocusRoi(spec, autofocusRoiSource)}`, state);
 	},
 } satisfies ToolDefinition<typeof ProcedureSpecParamsSchema, PlannerToolDetails>;
 

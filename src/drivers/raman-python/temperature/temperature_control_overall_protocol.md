@@ -27,7 +27,7 @@ Kelvinion 的完整命令表和 Python 对照见
 
 ### 2.1 Stirling 制冷机
 
-Stirling 侧负责基础制冷和制冷机自身的运行管理。VI 文件名显示它至少包含两种型号或控制器路径：CT-5221 和 CT-5505。
+Stirling 侧负责基础制冷和制冷机自身的运行管理。当前确认目标设备包含两种型号：CT-5221 和 CT-5505；两者仍必须分别完成原始帧证据和安全验证，不能仅因语义相同就复用同一二进制 parser。
 
 | 能力 | CT-5221 | CT-5505 | VI 证据 |
 | --- | --- | --- | --- |
@@ -166,7 +166,7 @@ Stirling 的电压或启停动作改变基础制冷能力；Kelvinion 的 setpoi
 | --- | --- |
 | Kelvinion Python 驱动 | 已存在，核心命令和控制算法见同目录 Python 文件及协议表 |
 | Kelvinion 离线模拟器 | 已存在，可用于基础稳温逻辑测试 |
-| Stirling Python 驱动 | 尚未发现 |
+| Stirling Python 驱动 | 尚未发现；CT-5221 与 CT-5505 型号已确认，但原始协议尚未冻结 |
 | Stirling 离线模拟器 | 尚未发现 |
 | Kelvinion + Stirling 联合 runtime action | 尚未接入 `experiment-research` runtime |
 | 联合稳定判定和数据记录 | 尚未实现 |
@@ -183,4 +183,4 @@ Stirling 的电压或启停动作改变基础制冷能力；Kelvinion 的 setpoi
 5. 确认 9600、8N1、LF 终止配置是否为实际设备配置。
 6. 先用 fake Stirling runtime 验证联合状态机，再进行显式的现场硬件验证。
 
-在这些任务完成前，不应把推断出的 Stirling 字节帧写入正式 Python driver，也不应让 agent 直接暴露 Stirling 的底层串口操作。
+当前状态：已从 `Capture.nitrace`、`17v.nitrace` 和 `refresh.nitrace` 获得 COM9 的二进制请求/响应证据；`CA 01 34 03 B4 00 13 AC`（18 V）与 `CA 01 34 03 AA 00 1D AC`（17 V）支持电压乘十、小端编码和 `34` 相关命令的候选解释。`refresh.nitrace` 进一步显示字段 `04` 返回 `B4 00`（与面板 18.00 V 对应），字段 `03` 返回 `FC 03`（与面板 102.00 Hz 对应）；但 17 V Trace 没有 VISA Read，`34` 的写入/同步语义、型号身份、其余字段和完整安全 readback 尚未冻结。详细记录见 [stirling-refresh-analysis.md](../../../../docs/design-ideas/stirling-refresh-analysis.md)。在这些证据完成前，不应把未映射的 Stirling 字节帧写入正式 Python driver，也不应让 agent 直接暴露 Stirling 的底层串口操作。

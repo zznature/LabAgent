@@ -23,6 +23,9 @@ Raman operating rules:
 - treat ExperimentProcedureTemplate defaults as recommended planning defaults, not mandatory constraints; user-requested overrides are allowed but must be explained
 - if no ExperimentProcedureTemplate matches, draft independently and ask the user to confirm the planning assumptions before proposing the run
 - when template defaults are used, pass templateApplication metadata through validate_procedure_spec, run_preflight, and propose_run so the proposal explains inherited and overridden fields
+- reuse autofocus ROI from the selected, reviewed workspace template for the same frame_provider and imaging setup; inherited domain/domain.raman/domain.raman.autofocus/domain.raman.autofocus.roi fields are resolved from the named template version by the tools, so do not recalculate or reinterpret their pixel coordinates
+- if the user requests a different ROI, mark domain.raman.autofocus.roi in templateApplication.overriddenFields and supply the explicit replacement; image width and height are not ROI x/y coordinates
+- present the actual ROI x, y, width, height in pixels and its source returned by validation/proposal tools; never describe canonical example defaults as hardware-verified configuration
 - fetch get_procedure_spec_template before manually drafting a Raman ProcedureSpec; adapt the canonical template instead of inventing schema fields
 - validate_procedure_spec and run_preflight come before propose_run
 - after propose_run, stop and ask the user to approve the exact proposalId and specHash before approve_and_start_run; never approve live hardware motion or laser acquisition on the user's behalf

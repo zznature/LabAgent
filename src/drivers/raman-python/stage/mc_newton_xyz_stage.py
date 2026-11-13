@@ -24,6 +24,10 @@ _Z_ADAPTIVE_STALL_SAMPLES = 4
 _Z_ADAPTIVE_STALL_MIN_ELAPSED_MS = 1500.0
 _Z_ADAPTIVE_GLOBAL_WINDOW = 10
 _Z_ADAPTIVE_GLOBAL_PROMOTE_SUCCESSES = 2
+_XY_ADAPTIVE_MAX_RESCUES_PER_MOVE = 2
+_XY_ADAPTIVE_ZERO_PULSE_SAMPLES = 2
+_XY_ADAPTIVE_STALL_SAMPLES = 4
+_XY_ADAPTIVE_STALL_MIN_ELAPSED_MS = 1500.0
 
 
 def _ensure_vendor_sdk_importable() -> None:
@@ -142,6 +146,7 @@ class MCNewtonXYZStageController:
         self._z_adaptive_global_level = 0
         self._z_adaptive_rescue_success_window: list[bool] = []
         self._z_pending_target_set_warning: dict[str, Any] | None = None
+        self._xy_pending_target_set_warnings: dict[str, dict[str, Any]] = {}
 
     def __enter__(self) -> "MCNewtonXYZStageController":
         self.connect()
@@ -262,6 +267,34 @@ class MCNewtonXYZStageController:
             raise ValueError("Z motion profile frequency_hz must be between 1 and 2000 Hz.")
         self._set_z_adaptive_base_profile((normalized_units, normalized_mode, voltage, frequency))
 
+    def set_axis_motion_profile(
+        self,
+        axis: str,
+        *,
+        units: str = "mm",
+        mode: str = "slide",
+        voltage_v: int = 50,
+        frequency_hz: int = 750,
+    ) -> None:
+        """Set the next profile for an XY action without changing target semantics."""
+        key = axis.strip().lower()
+        if key not in {"x", "y"}:
+            raise ValueError("set_axis_motion_profile only supports X and Y.")
+        normalized_units = units.strip().lower()
+        if normalized_units != "mm":
+            raise ValueError("XY motion profile units must be 'mm'.")
+        normalized_mode = mode.strip().lower()
+        if normalized_mode not in {"slide", "step"}:
+            raise ValueError("XY motion profile mode must be 'slide' or 'step'.")
+        voltage = int(voltage_v)
+        if voltage < 0 or voltage > 50:
+            raise ValueError("XY motion profile voltage_v must be between 0 and 50 V.")
+        frequency = int(frequency_hz)
+        if frequency <= 0 or frequency > 2000:
+            raise ValueError("XY motion profile frequency_hz must be between 1 and 2000 Hz.")
+        self._axis_motion_profiles[key] = (normalized_units, normalized_mode, voltage, frequency)
+        self._configured_axis_profiles.pop(key, None)
+
     def disconnect(self) -> None:
         if not self._connected or self._sdk is None:
             return
@@ -371,11 +404,17 @@ class MCNewtonXYZStageController:
         previous = {axis: self.get_axis_position_um(axis, preserve_enabled_channels=True) for axis in target_axes}
         samples: list[dict[str, Any]] = []
         z_adaptive = self._new_z_adaptive_diagnostics(target_axes, previous)
+        xy_adaptive = self._new_xy_adaptive_diagnostics(target_axes, previous)
         z_rescue_attempts = 0
         z_current_level = self._z_adaptive_level_for_profile(self._axis_motion_profiles["z"])
         z_zero_pulse_streak = 0
         z_stall_streak = 0
         z_best_residual_um: float | None = None
+        z_attempt_started_ms = 0.0
+        xy_rescue_attempts = 0
+        xy_zero_pulse_streak = 0
+        xy_stall_streak = 0
+        xy_best_residual_um: float | None = None
         diagnostics: dict[str, Any] = {
             "status": "waiting",
             "axes": sorted(target_axes),
@@ -396,6 +435,8 @@ class MCNewtonXYZStageController:
         }
         if z_adaptive is not None:
             diagnostics["zAdaptiveMotion"] = z_adaptive
+        if xy_adaptive is not None:
+            diagnostics["xyAdaptiveMotion"] = xy_adaptive
         self.last_settle_diagnostics = diagnostics
 
         while True:
@@ -423,13 +464,19 @@ class MCNewtonXYZStageController:
                 for axis in current
             )
             all_reached = all(
-                abs(current[axis] - target) < self._target_tolerances_um.get(axis, 1.0)
+                (
+                    abs(current[axis] - target) <= self._target_tolerances_um.get(axis, 1.0)
+                    if axis == "z"
+                    else abs(current[axis] - target) < self._target_tolerances_um.get(axis, 1.0)
+                )
                 for axis, target in self._last_targets_um.items()
                 if axis in target_axes
             )
             if all_pulses_done and all_stable and all_reached:
                 if z_adaptive is not None:
                     self._finish_z_adaptive_diagnostics(z_adaptive, bool(z_adaptive["rescueAttempts"]))
+                if xy_adaptive is not None:
+                    xy_adaptive["status"] = "rescued" if xy_adaptive["rescueAttempts"] else "not_needed"
                 diagnostics.update({
                     "status": "settled",
                     "elapsedMs": elapsed_ms,
@@ -451,12 +498,12 @@ class MCNewtonXYZStageController:
                     previous=previous,
                     initial_um=float(z_adaptive["initialReadUm"]),
                     remaining=remaining,
-                    elapsed_ms=elapsed_ms,
+                    elapsed_ms=elapsed_ms - z_attempt_started_ms,
                     zero_pulse_streak=z_zero_pulse_streak,
                     stall_streak=z_stall_streak,
                     best_residual_um=z_best_residual_um,
                 )
-                if rescue_reason and z_rescue_attempts < _Z_ADAPTIVE_MAX_RESCUES_PER_MOVE:
+                if rescue_reason and elapsed_ms < timeout_ms and z_rescue_attempts < _Z_ADAPTIVE_MAX_RESCUES_PER_MOVE:
                     next_level = min(z_current_level + 1, len(self._z_adaptive_profile_ladder) - 1)
                     if next_level > z_current_level:
                         event = self._resend_z_target_with_adaptive_profile(
@@ -474,9 +521,50 @@ class MCNewtonXYZStageController:
                         z_zero_pulse_streak = 0
                         z_stall_streak = 0
                         z_best_residual_um = None
+                        z_attempt_started_ms = (time.monotonic() - t_start) * 1000.0
                         previous = current
                         continue
                     z_adaptive["profileLimitReached"] = True
+
+            if xy_adaptive is not None:
+                xy_reason, xy_zero_pulse_streak, xy_stall_streak, xy_best_residual_um = self._xy_adaptive_rescue_reason(
+                    target_axes=target_axes,
+                    current=current,
+                    previous=previous,
+                    initial_reads=previous if not xy_adaptive.get("initialReadUm") else xy_adaptive["initialReadUm"],
+                    remaining=remaining,
+                    elapsed_ms=elapsed_ms,
+                    zero_pulse_streak=xy_zero_pulse_streak,
+                    stall_streak=xy_stall_streak,
+                    best_residual_um=xy_best_residual_um,
+                )
+                if xy_reason and xy_rescue_attempts < _XY_ADAPTIVE_MAX_RESCUES_PER_MOVE:
+                    axis = self._xy_adaptive_axis_for_rescue(target_axes, current, remaining, xy_reason)
+                    if axis is not None:
+                        level = xy_adaptive["activeLevels"][axis]
+                        profile_ladder = xy_adaptive["profileObjects"][axis]
+                        next_level = min(level + 1, len(profile_ladder) - 1)
+                        if next_level > level:
+                            event = self._resend_xy_target_with_adaptive_profile(
+                                axis=axis,
+                                target_um=self._last_targets_um[axis],
+                                level=next_level,
+                                profile_ladder=profile_ladder,
+                                reason=xy_reason,
+                                elapsed_ms=elapsed_ms,
+                                current_um=current[axis],
+                                remaining_pulses=int(remaining[axis]),
+                            )
+                            xy_adaptive["rescueAttempts"].append(event)
+                            xy_adaptive["activeLevels"][axis] = next_level
+                            xy_adaptive["status"] = "rescuing"
+                            xy_rescue_attempts += 1
+                            xy_zero_pulse_streak = 0
+                            xy_stall_streak = 0
+                            xy_best_residual_um = None
+                            previous = current
+                            continue
+                        xy_adaptive["profileLimitReached"] = True
 
             previous = current
             if elapsed_ms > timeout_ms:
@@ -689,6 +777,15 @@ class MCNewtonXYZStageController:
                 }
             else:
                 self._z_pending_target_set_warning = None
+        elif key in {"x", "y"}:
+            if tolerated_empty_target_error:
+                self._xy_pending_target_set_warnings[key] = {
+                    "targetUm": float(target_um),
+                    "status": getattr(status, "name", str(status)),
+                    "response": str(response),
+                }
+            else:
+                self._xy_pending_target_set_warnings.pop(key, None)
         self.last_move_commands.append(command)
         if status == MFMCNewtonStatus.NoError or tolerated_empty_target_error:
             return
@@ -742,6 +839,153 @@ class MCNewtonXYZStageController:
         except ValueError:
             return 0
 
+    def _build_xy_adaptive_profile_ladder(self, profile: _MotionProfile) -> list[_MotionProfile]:
+        units, mode, voltage_v, frequency_hz = profile
+        if mode == "slide":
+            candidates = [
+                (units, "slide", voltage_v, frequency_hz),
+                (units, "step", min(50, voltage_v), 1000),
+                (units, "step", min(50, voltage_v), 800),
+            ]
+        else:
+            candidates = [
+                (units, "step", voltage_v, frequency_hz),
+                (units, "step", voltage_v, min(frequency_hz, 800)),
+                (units, "step", voltage_v, min(frequency_hz, 600)),
+            ]
+        ladder: list[_MotionProfile] = []
+        for candidate in candidates:
+            normalized = (candidate[0], candidate[1], int(candidate[2]), int(max(1, candidate[3])))
+            if normalized not in ladder:
+                ladder.append(normalized)
+        return ladder
+
+    def _new_xy_adaptive_diagnostics(
+        self,
+        target_axes: set[str],
+        initial_reads: dict[str, float],
+    ) -> dict[str, Any] | None:
+        axes = sorted(target_axes.intersection({"x", "y"}).intersection(self._last_targets_um))
+        if not axes:
+            return None
+        ladders = {
+            axis: self._build_xy_adaptive_profile_ladder(self._axis_motion_profiles[axis])
+            for axis in axes
+        }
+        return {
+            "status": "watching",
+            "axes": axes,
+            "profileLadders": {
+                axis: [self._motion_profile_to_dict(profile) for profile in ladder]
+                for axis, ladder in ladders.items()
+            },
+            "profileObjects": ladders,
+            "activeLevels": {
+                axis: self._xy_adaptive_level_for_profile(axis, self._axis_motion_profiles[axis], ladder)
+                for axis, ladder in ladders.items()
+            },
+            "maxRescueAttempts": _XY_ADAPTIVE_MAX_RESCUES_PER_MOVE,
+            "initialReadUm": {axis: float(initial_reads[axis]) for axis in axes},
+            "rescueAttempts": [],
+            "profileLimitReached": False,
+        }
+
+    @staticmethod
+    def _xy_adaptive_level_for_profile(axis: str, profile: _MotionProfile, ladder: list[_MotionProfile]) -> int:
+        _ = axis
+        try:
+            return ladder.index(profile)
+        except ValueError:
+            return 0
+
+    def _xy_adaptive_rescue_reason(
+        self,
+        *,
+        target_axes: set[str],
+        current: dict[str, float],
+        previous: dict[str, float],
+        initial_reads: dict[str, float],
+        remaining: dict[str, int],
+        elapsed_ms: float,
+        zero_pulse_streak: int,
+        stall_streak: int,
+        best_residual_um: float | None,
+    ) -> tuple[str | None, int, int, float | None]:
+        candidates = [axis for axis in ("x", "y") if axis in target_axes and axis in self._last_targets_um]
+        if not candidates:
+            return None, 0, 0, best_residual_um
+        axis = max(candidates, key=lambda key: abs(current[key] - self._last_targets_um[key]))
+        target_um = self._last_targets_um[axis]
+        current_um = current[axis]
+        previous_um = previous[axis]
+        initial_um = initial_reads.get(axis, current_um)
+        values = (target_um, current_um, previous_um, initial_um)
+        if not all(math.isfinite(value) for value in values) or abs(current_um - previous_um) > 2000.0:
+            return None, 0, 0, best_residual_um
+        residual_um = abs(current_um - target_um)
+        if residual_um <= max(self._target_tolerances_um.get(axis, 1.0) * 2.0, 8.0):
+            return None, 0, 0, residual_um
+        if abs(target_um) > 50000 or abs(current_um) > 50000:
+            return None, 0, 0, best_residual_um
+        if remaining.get(axis, 0) <= 0:
+            zero_pulse_streak += 1
+        else:
+            zero_pulse_streak = 0
+        if zero_pulse_streak >= _XY_ADAPTIVE_ZERO_PULSE_SAMPLES:
+            return "zero_remaining_pulses_outside_tolerance", zero_pulse_streak, stall_streak, residual_um
+        if best_residual_um is None or residual_um < best_residual_um - 0.5:
+            best_residual_um = residual_um
+            stall_streak = 0
+        elif elapsed_ms >= _XY_ADAPTIVE_STALL_MIN_ELAPSED_MS:
+            stall_streak += 1
+        if stall_streak >= _XY_ADAPTIVE_STALL_SAMPLES:
+            return "residual_not_improving", zero_pulse_streak, stall_streak, best_residual_um
+        return None, zero_pulse_streak, stall_streak, best_residual_um
+
+    def _xy_adaptive_axis_for_rescue(
+        self, target_axes: set[str], current: dict[str, float], remaining: dict[str, int], reason: str
+    ) -> str | None:
+        _ = (remaining, reason)
+        axes = [axis for axis in ("x", "y") if axis in target_axes and axis in current]
+        return max(axes, key=lambda axis: abs(current[axis] - self._last_targets_um[axis])) if axes else None
+
+    def _resend_xy_target_with_adaptive_profile(
+        self,
+        *,
+        axis: str,
+        target_um: float,
+        level: int,
+        profile_ladder: list[_MotionProfile],
+        reason: str,
+        elapsed_ms: float,
+        current_um: float,
+        remaining_pulses: int,
+    ) -> dict[str, Any]:
+        from_level = 0
+        current_profile = self._axis_motion_profiles[axis]
+        if current_profile in profile_ladder:
+            from_level = profile_ladder.index(current_profile)
+        profile = profile_ladder[level]
+        self._axis_motion_profiles[axis] = profile
+        self._configured_axis_profiles.pop(axis, None)
+        self._select_axis(axis)
+        self._apply_axis_motion_profile(axis)
+        self._send_move_target_mm(axis, target_um / 1000.0, target_um)
+        return {
+            "axis": axis,
+            "reason": reason,
+            "elapsedMs": elapsed_ms,
+            "fromLevel": from_level,
+            "toLevel": level,
+            "fromProfile": self._motion_profile_to_dict(profile_ladder[from_level]),
+            "toProfile": self._motion_profile_to_dict(profile),
+            "currentUm": current_um,
+            "targetUm": target_um,
+            "deltaToTargetUm": current_um - target_um,
+            "remainingPulses": remaining_pulses,
+            "commandIndex": len(self.last_move_commands) - 1,
+        }
+
     def _new_z_adaptive_diagnostics(
         self,
         target_axes: set[str],
@@ -762,6 +1006,7 @@ class MCNewtonXYZStageController:
             "promotionRule": {
                 "rescuedMoves": _Z_ADAPTIVE_GLOBAL_PROMOTE_SUCCESSES,
                 "window": _Z_ADAPTIVE_GLOBAL_WINDOW,
+                "firstRescueResidualMustExceedUm": max(self._target_tolerances_um.get("z", 1.0) * 2.0, 8.0),
             },
             "targetSetWarningAtStart": dict(self._z_pending_target_set_warning or {}),
             "initialReadUm": float(initial_reads["z"]),
@@ -794,28 +1039,28 @@ class MCNewtonXYZStageController:
         if residual_um <= threshold_um:
             return None, 0, 0, residual_um
 
-        if self._z_pending_target_set_warning_matches(target_um):
-            return "target_set_error", zero_pulse_streak, stall_streak, residual_um
-
-        if int(remaining["z"]) <= 0:
+        if int(remaining["z"]) <= 0 and abs(current_um - previous_um) < self._stability_tolerance_um:
             zero_pulse_streak += 1
         else:
             zero_pulse_streak = 0
-        if zero_pulse_streak >= _Z_ADAPTIVE_ZERO_PULSE_SAMPLES:
-            return "zero_remaining_pulses_outside_tolerance", zero_pulse_streak, stall_streak, residual_um
 
-        improvement_um = 0.5
+        improvement_um = max(self._stability_tolerance_um, 0.001)
         if best_residual_um is None or residual_um < best_residual_um - improvement_um:
             best_residual_um = residual_um
             stall_streak = 0
-        elif elapsed_ms >= _Z_ADAPTIVE_STALL_MIN_ELAPSED_MS:
+        else:
             stall_streak += 1
-        if stall_streak >= _Z_ADAPTIVE_STALL_SAMPLES:
-            return "residual_not_improving", zero_pulse_streak, stall_streak, best_residual_um
-        return None, zero_pulse_streak, stall_streak, best_residual_um
+        # A warning or zero pulse count alone does not prove motion has stopped.
+        if elapsed_ms < _Z_ADAPTIVE_STALL_MIN_ELAPSED_MS or stall_streak < _Z_ADAPTIVE_STALL_SAMPLES:
+            return None, zero_pulse_streak, stall_streak, best_residual_um
+        if self._z_pending_target_set_warning_matches(target_um):
+            return "target_set_error", zero_pulse_streak, stall_streak, best_residual_um
+        if zero_pulse_streak >= _Z_ADAPTIVE_ZERO_PULSE_SAMPLES:
+            return "zero_remaining_pulses_outside_tolerance", zero_pulse_streak, stall_streak, best_residual_um
+        return "residual_not_improving", zero_pulse_streak, stall_streak, best_residual_um
 
     def _z_adaptive_rescue_residual_threshold_um(self) -> float:
-        return max(self._target_tolerances_um.get("z", 1.0) * 2.0, 8.0)
+        return self._target_tolerances_um.get("z", 1.0)
 
     def _z_feedback_is_rescuable(
         self,
@@ -871,9 +1116,16 @@ class MCNewtonXYZStageController:
         }
 
     def _finish_z_adaptive_diagnostics(self, diagnostics: dict[str, Any], rescued: bool) -> None:
-        promotion = self._record_z_adaptive_settle_success(rescued=rescued)
+        attempts = diagnostics["rescueAttempts"]
+        # Keep small local corrections out of the global profile promotion rule.
+        promotion_eligible = bool(attempts) and (
+            abs(attempts[0]["deltaToTargetUm"])
+            > diagnostics["promotionRule"]["firstRescueResidualMustExceedUm"]
+        )
+        promotion = self._record_z_adaptive_settle_success(rescued=promotion_eligible)
         diagnostics.update({
             "status": "rescued" if rescued else "not_needed",
+            "promotionEligible": promotion_eligible,
             "finalGlobalLevel": self._z_adaptive_global_level,
             "globalPromotion": promotion,
             "rescueSuccessWindow": list(self._z_adaptive_rescue_success_window),

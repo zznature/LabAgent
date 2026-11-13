@@ -43,6 +43,30 @@ export const ZMotionProfileSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const XYMotionStrategySchema = Type.Object(
+	{
+		enabled: Type.Boolean(),
+		coarseProfile: Type.Object({
+			units: Type.Literal("mm"),
+			mode: Type.Literal("slide"),
+			voltageV: Type.Integer({ minimum: 0, maximum: 50 }),
+			frequencyHz: Type.Integer({ minimum: 1, maximum: 2000 }),
+		}, { additionalProperties: false }),
+		fineProfile: Type.Object({
+			units: Type.Literal("mm"),
+			mode: Type.Literal("step"),
+			voltageV: Type.Integer({ minimum: 0, maximum: 50 }),
+			frequencyHz: Type.Integer({ minimum: 1, maximum: 2000 }),
+		}, { additionalProperties: false }),
+		segmentStepUm: Type.Number({ exclusiveMinimum: 0 }),
+		fineWindowUm: Type.Number({ exclusiveMinimum: 0 }),
+		approachOffsetUm: Type.Number({ minimum: 0 }),
+		segmentTimeoutMs: Type.Integer({ minimum: 1 }),
+		fineTimeoutMs: Type.Integer({ minimum: 1 }),
+	},
+	{ additionalProperties: false },
+);
+
 export const StageMoveAbsoluteAndWaitActionSchema = Type.Object(
 	{
 		action: Type.Literal("stage.move_absolute_and_wait"),
@@ -57,6 +81,7 @@ export const StageMoveAbsoluteAndWaitActionSchema = Type.Object(
 		),
 		timeoutMs: Type.Integer({ minimum: 1 }),
 		zMotionProfile: Type.Optional(ZMotionProfileSchema),
+		xyMotionStrategy: Type.Optional(XYMotionStrategySchema),
 	},
 	{ additionalProperties: false },
 );
@@ -162,6 +187,7 @@ export type ActionResult = Static<typeof ActionResultSchema>;
 export type ZMotionProfile = Static<typeof ZMotionProfileSchema>;
 export type StageGetPositionAction = Static<typeof StageGetPositionActionSchema>;
 export type StageMoveAbsoluteAndWaitAction = Static<typeof StageMoveAbsoluteAndWaitActionSchema>;
+export type XYMotionStrategy = Static<typeof XYMotionStrategySchema>;
 export type AutofocusRunSingleAction = Static<typeof AutofocusRunSingleActionSchema>;
 export type FrameCaptureLatestAction = Static<typeof FrameCaptureLatestActionSchema>;
 export type SpectrometerAcquireSpectrumAction = Static<typeof SpectrometerAcquireSpectrumActionSchema>;

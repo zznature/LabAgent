@@ -1,0 +1,27 @@
+{
+  "source": "refresh.nitrace",
+  "resource": "COM9",
+  "model": "unknown",
+  "operation": "top_level_refresh",
+  "frames": [
+    {"request": "CA 01 23 0E 01 CC AC", "response": "CA 01 03 0E 01 F3 00 F9 AC", "count": 7},
+    {"request": "CA 01 23 0D 01 CD AC", "response": "CA 01 03 0D 01 10 01 DC AC", "count": 7},
+    {"request": "CA 01 23 06 01 D4 AC", "response": "CA 01 03 06 01 6F 03 82 AC", "count": 7},
+    {"request": "CA 01 23 04 01 D6 AC", "response": "CA 01 03 04 01 B4 00 42 AC", "count": 7},
+    {"request": "CA 01 23 03 01 D7 AC", "response": "CA 01 03 03 01 FC 03 F8 AC", "count": 7},
+    {"request": "CA 01 23 02 01 D8 AC", "response": "CA 01 03 02 01 1A 01 DD AC", "count": 7},
+    {"request": "CA 01 23 07 01 D3 AC", "response": "CA 01 03 07 01 80 00 73 AC", "count": 7},
+    {"request": "CA 01 21 DD AC", "response": "CA 01 01 13 00 00 00 00 00 EA AC", "count": 7},
+    {"request": "CA 01 23 01 01 D9 AC", "response": "CA 01 03 01 01 B7 00 42 AC", "count": 6},
+    {"request": "CA 01 23 01 01 D9 AC", "response": "CA 01 03 01 01 B6 00 43 AC", "count": 1},
+    {"request": "CA 01 34 03 B4 00 13 AC", "response": "CA 01 14 03 B4 00 33 AC", "count": 3}
+  ],
+  "set_voltage_samples": [
+    {"voltage_k": null, "voltage_v": 17.0, "request": "CA 01 34 03 AA 00 1D AC", "response": null},
+    {"voltage_k": null, "voltage_v": 18.0, "request": "CA 01 34 03 B4 00 13 AC", "response": "CA 01 14 03 B4 00 33 AC"}
+  ],
+  "known_readbacks": {
+    "04": {"name": "working_voltage_v", "raw_le_u16": 180, "value": 18.0, "unit": "V", "scale": 0.1},
+    "03": {"name": "working_frequency_hz", "raw_le_u16": 1020, "value": 102.0, "unit": "Hz", "scale": 0.1}
+  }
+}

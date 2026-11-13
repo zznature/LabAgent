@@ -36,11 +36,11 @@ test.
 ## Probe commands
 
 ```powershell
-python docs\Raman\temperature\serial_probe.py --port COM5 --channel A
+python src\drivers\raman-python\temperature\serial_probe.py --port COM5 --channel A
 ```
 
 ```powershell
-python docs\Raman\temperature\serial_protocol_scan.py --port COM5
+python src\drivers\raman-python\temperature\serial_protocol_scan.py --port COM5
 ```
 
 ## VI-derived protocol table
@@ -62,19 +62,19 @@ python docs\Raman\temperature\serial_protocol_scan.py --port COM5
 | data bits | 面板标注 `data bits (8)` | `8` | 一致 |
 | parity | 面板提供 `None / Odd / Even / Mark / Space`，并标注 `(0:none)` | `NONE` | 当前配置一致 |
 | stop bits | 面板标注 `stop bits (10: 1 bit)` | `1` | 一致 |
-| read termination | 面板提供 `termination char (0xA = '\\n' = LF)` 与 `Enable Termination Char` | 不依赖终止符；收到 `]` 或短暂无数据即结束 | VI 只证明存在可配置 LF 读终止；默认开关状态仍待核对 |
+| read termination | 面板提供 `termination char (0xA = '\\n' = LF)` 与 `Enable Termination Char` | 不依赖 LF；收到 `]` 或达到 response deadline 时结束 | VI 只证明存在可配置 LF 读终止；默认开关状态仍待核对 |
 | write termination | 命令字符串常量均以 `]` 结束，未发现附加 CR/LF 常量 | 不追加 CR/LF | 静态证据支持“写入不追加终止符” |
-| response framing | 数值格式均以 `[` 开始、部分格式以 `]` 结束 | `_send()` 收到 `]` 即停止，并 `.strip()` | 对已确认的标量/枚举响应基本一致 |
+| response framing | 数值格式均以 `[` 开始、部分格式以 `]` 结束 | `_send()` 收到 `]` 即停止，并 `.strip()`；短暂空读不会截断分片响应 | 对已确认的标量/枚举响应基本一致 |
 
 ### Read commands
 
 | VI | Command template | Response evidence in VI | Python mapping |
 | --- | --- | --- | --- |
 | `read IDN.vi` | `[READ:*IDN?]` | raw identity string | `read_identity()`；一致 |
-| `read kelvin.vi` / root `READ.vi` | `[READ:K:<channel>]`；root VI 固定 A/B | `[%f]` | `read_temperature_k()`；命令一致 |
+| `read kelvin.vi` / root `READ.vi` | `[READ:K:<channel>]`；root VI 固定 A/B | `[%f]` | `read_temperature_k()`；命令一致，并拒绝当前系统包络 `50 K–350 K` 之外的实测值 |
 | `read celsius.vi` | `[READ:C:<channel>]` | raw/未确认 | 未实现 |
-| `read current.vi` | `[READ:I:<channel>]` | raw/未确认 | 当前 snapshot 使用了不同的 `READ:HEATER:I` |
-| `read voltage.vi` | `[READ:V:<channel>]` | raw/未确认 | 当前 snapshot 使用了不同的 `READ:HEATER:V` |
+| `read current.vi` | `[READ:I:<channel>]` | raw/未确认 | 未接入核心 snapshot；诊断字段返回 unavailable |
+| `read voltage.vi` | `[READ:V:<channel>]` | raw/未确认 | 未接入核心 snapshot；诊断字段返回 unavailable |
 | `read sensor.vi` | `[READ:S:<channel>]` | raw/未确认 | 未实现 |
 | `read sensortype.vi` | `[READ:T:<channel>]` | raw/未确认 | 未实现 |
 | `read curve.vi` | `[READ:W:<channel>]` | raw/未确认 | 未实现 |
@@ -130,9 +130,13 @@ python docs\Raman\temperature\serial_protocol_scan.py --port COM5
 
 1. **串口速率**：VI 面板标注 9600，当前台架记录和 Python 默认值为 115200；两者不能同时作为已确认事实。
 2. **Mode**：VI 面板值为 `PID/Manual`，Python 类型为 `A/MA/M`。在修改驱动前需要抓取实际写出的字符串，确认面板显示值是否经过映射。
-3. **Heater 电流/电压**：VI 提供 `[READ:Heater]`、`[READ:I:<channel>]`、`[READ:V:<channel>]`；当前 Python 的 `[READ:HEATER:I]` 和 `[READ:HEATER:V]` 没有在厂家 VI 中出现。
+3. **Heater 电流/电压**：VI 提供 `[READ:Heater]`、`[READ:I:<channel>]`、`[READ:V:<channel>]`；核心 snapshot 已停止发送没有厂家 VI 证据的 `[READ:HEATER:I]` 和 `[READ:HEATER:V]`，对应诊断字段暂为 unavailable。
 4. **大小写**：VI 同时使用 `READ:Power`、`READ:Ramp`、`SET:Range` 等混合大小写，Python 将它们全部大写。设备大小写不敏感尚无静态证明。
 5. **响应类型**：Python 当前标量解析器只接受 `[number]`，枚举解析器只接受 `[letters]`；厂家协议还包含 PID/Zone/Relay 的逗号结构和 raw 字符串，扩展功能时不能复用错误的解析器。
 6. **终止符**：VI 的命令常量没有附加 CR/LF；`Kelvinion_Init.vi` 的 LF 终止配置应理解为 VISA 读侧设置，默认是否启用仍需硬件或 VI 运行时确认。
+
+离线 transcript 回归测试位于 `temperature/test_kelvinion_mini_controller.py`，覆盖核心 snapshot、分片与延迟响应、空响应、噪声、畸形响应、串口 I/O 异常、遗留输入清理和台架已验证命令帧。测试通过注入的 serial adapter 运行，不连接 COM 端口，并由仓库根目录 `./test.sh` 默认执行。
+
+当前 Python driver 还没有把 `50 K–350 K` 解释为允许 target 范围、warning/abort 阈值或 guard band；这些仍需设备资料和实验负责人确认。
 
 本表是静态提取基线，不把尚未在目标 Kelvinion 设备上验证的字段标记为“已支持”。

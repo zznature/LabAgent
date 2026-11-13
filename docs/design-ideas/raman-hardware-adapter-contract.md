@@ -118,7 +118,9 @@ For mapping, `mapping_local_correction` is the default unless `autofocus.params.
 
 未抽真空 / 无光窗实验显式设置 `domain.raman.environment.vacuumState = not_vacuum`；runtime 从该冻结字段派生 `metricName = labspec_no_window_spot_focus` 与 Z motion profile `("mm", "step", 30, 1000)`。该 metric profile 复用 `labspec_spot_compactness`：先按 ROI 的稳健百分位归一化并扣除中位背景，再以信号三次方作为权重，按亮斑核心能量占比与加权 RMS 半径的比值评分；无光窗标定序列中紧凑亮斑因此得到最高分，而宽散光斑回落。`vacuumState` 是被冻结并随 proposal 审查的实验条件选择；runtime 只按该字段解析，不根据硬件现场状态自行猜测。`autofocus.params.metricName` 仍可作为特殊实验的显式覆盖，但普通真空/未抽真空切换应优先使用环境字段。
 
-MC.Newton XYZ driver 在 Z settle 等待中执行同一套自适应 motion rescue，但梯度从当前环境 profile 派生。默认真空梯度为 `50 V / 1000 Hz -> 50 V / 800 Hz -> 50 V / 600 Hz -> 50 V / 500 Hz`；默认未抽真空梯度为 `30 V / 1000 Hz -> 35 V / 1000 Hz -> 40 V / 800 Hz -> 45 V / 600 Hz -> 50 V / 500 Hz`。单次 Z move 最多 rescue 两次：当 `move_close_target` 返回空响应 `TargetSetError`、remaining pulses 已清零但残差仍大于 `max(2 * tolerance, 8 um)`、或残差持续无改善时，driver 用下一档参数重发同一目标。SDK 读数/通讯错误、负 Z、疑似归零或跳变读数不触发 rescue，继续按 stage error/timeout 暴露。若同一 daemon session 内最近 10 次 Z settle 中有 2 次 rescue 后成功，后续 Z move 的全局基准档位上调一级；运行中不自动降档，电压上限固定为 50 V，频率只下调不超过梯度下限。`stageMoveCommands` 记录每次命令使用的 adaptive level/profile，`stageSettleDiagnostics.zAdaptiveMotion` 记录 rescue 触发原因、档位变化和全局升档。
+MC.Newton XYZ driver 在 Z settle 等待中执行同一套自适应 motion rescue，但梯度从当前环境 profile 派生。默认真空梯度为 `50 V / 1000 Hz -> 50 V / 800 Hz -> 50 V / 600 Hz -> 50 V / 500 Hz`；默认未抽真空梯度为 `30 V / 1000 Hz -> 35 V / 1000 Hz -> 40 V / 800 Hz -> 45 V / 600 Hz -> 50 V / 500 Hz`。Z 到位要求残差 `<= tolerance`（默认 5 µm），且脉冲已结束、相邻位置变化小于稳定性容差；补救只适用于残差 `> tolerance`，不再存在 5–10 µm 的空档。每次尝试至少观察 1500 ms，并连续 4 次未比此前最佳残差改善超过 `max(stabilityToleranceUm, 0.001)`，才允许升档重发同一目标；空响应 `TargetSetError` 和零脉冲都不能绕过这个持续性条件。零脉冲原因还要求连续两次位置稳定。每次补救后重新计时，单次 Z move 最多补救两次，不延长原始 timeout，也不在到达期限后重发。SDK 读数/通讯错误、非有限读数、负 Z、疑似归零或相邻跳变超过 2000 µm 不触发补救；这些检查并不证明所有位置反馈都可信。
+
+小残差补救只影响本次动作。只有首次补救前残差大于 `max(2 * tolerance, 8 µm)` 且最终到位的动作，才计入全局升档；同一 daemon session 内最近 10 次成功 Z settle 中有 2 次满足该条件，后续动作的全局基准档位上调一级。运行中不自动降档，电压上限固定为 50 V，频率按既定梯度调整。`stageMoveCommands` 记录每次命令使用的 adaptive level/profile；`stageSettleDiagnostics.zAdaptiveMotion` 记录补救原因、档位变化、`promotionRule.firstRescueResidualMustExceedUm`、`promotionEligible` 和全局升档。
 
 历史 live mapping 记录显示，成功 autofocus 的保存帧最大间隔约 21.3 秒，保存帧等待超时保持 `frameTimeoutMs = 30000`；失败样本集中在 `stageTimeoutMs = 10000`，Z 轴仍在进入 5 µm 容差或稳定性判定阶段，因此 live runtime 会把 autofocus 单次 stage settle timeout 夹紧到至少 `60000`，最高仍不超过 `120000`。完整 autofocus action timeout 使用 `300000`，覆盖最近 18 帧 autofocus 流程约 180 秒的历史上界并保留恢复余量。
 
@@ -149,6 +151,12 @@ abort_run
 ```
 
 `run_procedure` 仍注册为 deprecated blocked entrypoint，只返回 `approval_required`；正式执行必须走 proposal/approval。
+
+工作区 `lab-config/templates` 中的 `ExperimentProcedureTemplate` 可复用已审查的相机 ROI。`find_experiment_procedure_template` 将模板实际内容及 `templateApplication` 放进 tool 的文本回复；canonical template 也返回完整示例内容，但不声称示例参数经过当前硬件验证。原来仅在 `details` 中保存模板、文本只说“已加载”的方式不能保证 planner 获得具体数值。
+
+`validate_procedure_spec`、`run_preflight` 和 `propose_run` 使用同一 ROI 解析：当 `templateApplication.inheritedFields` 包含 `domain`、`domain.raman`、`domain.raman.autofocus` 或 `domain.raman.autofocus.roi`，且 `overriddenFields` 未覆盖 ROI 或其父/子路径时，程序直接读取指定模板版本的 ROI。模板必须通过 schema 校验、procedure 匹配，并与 spec 使用同一个唯一 `frame_provider` resource ID；缺失、版本不符或相机不匹配时明确失败。其他模板参数继续遵循已有 planner 行为。显式 ROI 覆盖优先，必须在 `overriddenFields` 声明并提供替换坐标。
+
+验证、preflight 成功回复、新提案和修改后的提案均显示最终 ROI 的左上角 `x/y`、`width/height`（单位 pixel）及来源；结构化结果包含 `autofocusRoi` 与可选 `autofocusRoiSource`。继承在生成 spec hash 之前完成，实际坐标写入 proposal.spec，模板 ID/版本/相机 ID 写入 proposal 的来源信息。提案修改复用已保存坐标，模板后续变化不会改变既有提案；ROI 或相机变化会清除旧来源标记。该机制不自动采集图像或验证分辨率，复用前仍需确保模板针对当前成像设置；无模板时显示 spec 的显式坐标，不从历史目录猜测配置。
 
 ### 6.2 Operator maintenance
 

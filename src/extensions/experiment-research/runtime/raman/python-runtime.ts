@@ -648,6 +648,7 @@ export function createRamanPythonRuntime(cwd: string, config: RamanPythonRuntime
 							target: action.target,
 							timeoutMs: action.timeoutMs,
 							zMotionProfile: action.zMotionProfile,
+							xyMotionStrategy: action.xyMotionStrategy,
 						},
 						action.timeoutMs + 10_000,
 					),

@@ -1017,6 +1017,7 @@ export async function runLiveRamanUnit(
 				},
 				timeoutMs: DEFAULT_STAGE_MOVE_TIMEOUT_MS,
 				zMotionProfile: environmentProfile.zMotionProfile,
+				xyMotionStrategy: environmentProfile.xyMotionStrategy,
 			});
 			if (moveResult.status !== "success") {
 				const moveArtifacts = artifactRefs.concat(moveResult.artifacts);

@@ -46,6 +46,16 @@ function createTempCwd(): string {
 }
 
 const tempRoots: string[] = [];
+const expectedXyMotionStrategy = {
+	enabled: true,
+	coarseProfile: { units: "mm", mode: "slide", voltageV: 50, frequencyHz: 750 },
+	fineProfile: { units: "mm", mode: "step", voltageV: 50, frequencyHz: 1000 },
+	segmentStepUm: 250,
+	fineWindowUm: 80,
+	approachOffsetUm: 15,
+	segmentTimeoutMs: 30_000,
+	fineTimeoutMs: 40_000,
+};
 
 afterEach(() => {
 	while (tempRoots.length > 0) {
@@ -167,6 +177,7 @@ describe("experiment research planner proposal flow", () => {
 			vacuumState: "not_vacuum",
 			defaultAutofocusMetricName: "labspec_no_window_spot_focus",
 			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
+			xyMotionStrategy: expectedXyMotionStrategy,
 		});
 		expect(parameterSearch.spec.domain.raman.parameterSearch?.maxAttempts).toBe(3);
 		expect(singlePoint.preview.requiresConfirmation).toBe(true);
@@ -237,6 +248,7 @@ describe("experiment research planner proposal flow", () => {
 			vacuumState: "not_vacuum",
 			defaultAutofocusMetricName: "labspec_no_window_spot_focus",
 			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
+			xyMotionStrategy: expectedXyMotionStrategy,
 		});
 		expect(validateState.savePath).toEqual(expect.stringContaining(proposal.spec.procedureSpecId));
 
@@ -256,6 +268,7 @@ describe("experiment research planner proposal flow", () => {
 			vacuumState: "not_vacuum",
 			defaultAutofocusMetricName: "labspec_no_window_spot_focus",
 			zMotionProfile: { units: "mm", mode: "step", voltageV: 30, frequencyHz: 1000 },
+			xyMotionStrategy: expectedXyMotionStrategy,
 		});
 		expect(preflightState.canProposeRun).toBe(true);
 	});
