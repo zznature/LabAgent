@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import copy
+import math
 import statistics
 import time
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
 from autofocus.models import FixedRangeAutofocusParams, Frame, FrameProvider, FocusStrategy, ROI, ScoredZPoint, ZStage
+from autofocus.bounds import Z_READBACK_MARGIN_UM, require_z_in_range
+from stage.exceptions import StageError
 
 
 ProgressCallback = Callable[[ScoredZPoint], None]
@@ -23,11 +28,16 @@ class FixedRangeScanner:
         frames: FrameProvider,
         strategy: FocusStrategy,
         params: FixedRangeAutofocusParams,
+        *,
+        position_samples: list[dict[str, Any]] | None = None,
     ) -> None:
         self.stage = stage
         self.frames = frames
         self.strategy = strategy
         self.params = params
+        self.z_min_um = min(params.z_start_um, params.z_end_um)
+        self.z_max_um = max(params.z_start_um, params.z_end_um)
+        self.position_samples = position_samples if position_samples is not None else []
 
     def scan(
         self,
@@ -51,47 +61,122 @@ class FixedRangeScanner:
         tolerance_um: float | None = None,
         sample_role: str = "scan",
     ) -> ScoredZPoint:
-        self._set_stage_tolerance(
-            self.params.target_tolerance_um if tolerance_um is None else tolerance_um
-        )
-        self.stage.move_absolute_um(target_z_um)
-        self.stage.wait_settled(self.params.stage_timeout_ms)
-        actual_z_um = self.stage.get_position_um()
-        if self.params.settle_ms > 0:
-            time.sleep(self.params.settle_ms / 1000.0)
+        tolerance = self.params.target_tolerance_um if tolerance_um is None else tolerance_um
+        stability_tolerance = float(getattr(self.stage, "position_stability_tolerance_um", 0.2))
+        diagnostics: dict[str, Any] = {
+            "targetZUm": float(target_z_um), "sampleRole": sample_role,
+            "targetToleranceUm": tolerance, "stabilityToleranceUm": stability_tolerance,
+            "startedMonotonic": time.monotonic(), "status": "pending",
+            "allowedZRangeUm": [self.z_min_um, self.z_max_um],
+            "readbackRangeToleranceUm": Z_READBACK_MARGIN_UM,
+        }
+        self.position_samples.append(diagnostics)
+        try:
+            require_z_in_range(target_z_um, self.z_min_um, self.z_max_um, f"{sample_role} target")
+            self._set_stage_tolerance(tolerance)
+            self.stage.move_absolute_um(target_z_um)
+            self.stage.wait_settled(self.params.stage_timeout_ms)
+            if self.params.settle_ms > 0:
+                time.sleep(self.params.settle_ms / 1000.0)
+            actual_z_um = self._read_verified_position(target_z_um, tolerance, "beforeCapture", diagnostics)
 
-        after_ts = time.monotonic()
-        effective_frames_per_z = self.params.frames_per_z if frames_per_z is None else frames_per_z
-        captured = self._capture_frames(
-            count=self.params.warmup_frames_per_z + effective_frames_per_z,
-            after_ts=after_ts,
-        )
-        scoring_frames = captured[self.params.warmup_frames_per_z :]
-        scored_frames: list[tuple[Frame, float]] = []
-        for frame in scoring_frames:
-            frame_roi = self._fit_roi_to_image(roi, frame.image.shape[:2])
-            scored_frames.append((frame, self.strategy.score(frame.image, frame_roi)))
-        scores = [score for _, score in scored_frames]
-        score = float(statistics.median(scores))
-        frame_records = self._frame_records(captured, scored_frames, sample_role)
-        self._discard_non_representative_frames(captured, scored_frames, score)
-
-        return ScoredZPoint(
-            target_z_um=float(target_z_um),
-            actual_z_um=float(actual_z_um),
-            score=score,
-            frames=frame_records,
-        )
+            after_ts = time.monotonic()
+            effective_frames_per_z = self.params.frames_per_z if frames_per_z is None else frames_per_z
+            captured = self._capture_frames(
+                count=self.params.warmup_frames_per_z + effective_frames_per_z,
+                after_ts=after_ts,
+            )
+            # Retain frame identities even if the post-capture read rejects the sample.
+            diagnostics["frames"] = self._frame_records(captured, [], sample_role)
+            after_z_um = self._read_verified_position(target_z_um, tolerance, "afterCapture", diagnostics)
+            diagnostics["captureDisplacementUm"] = after_z_um - actual_z_um
+            if abs(after_z_um - actual_z_um) > stability_tolerance:
+                raise StageError(
+                    f"Z changed during capture from {actual_z_um:.6f} to {after_z_um:.6f} um "
+                    f"(stability tolerance {stability_tolerance:g} um)."
+                )
+            scoring_frames = captured[self.params.warmup_frames_per_z :]
+            scored_frames: list[tuple[Frame, float]] = []
+            for frame in scoring_frames:
+                frame_roi = self._fit_roi_to_image(roi, frame.image.shape[:2])
+                scored_frames.append((frame, self.strategy.score(frame.image, frame_roi)))
+            scores = [score for _, score in scored_frames]
+            score = float(statistics.median(scores))
+            frame_records = self._frame_records(captured, scored_frames, sample_role)
+            diagnostics.update({"status": "accepted", "score": score, "frames": frame_records})
+            self._discard_non_representative_frames(captured, scored_frames, score)
+            return ScoredZPoint(
+                target_z_um=float(target_z_um), actual_z_um=float(actual_z_um),
+                score=score, frames=frame_records,
+            )
+        except Exception as exc:
+            diagnostics.update({"status": "rejected", "error": str(exc), "exceptionType": type(exc).__name__})
+            raise
+        finally:
+            diagnostics["finishedMonotonic"] = time.monotonic()
+            read_diagnostics = getattr(self.stage, "get_position_read_diagnostics", None)
+            if callable(read_diagnostics):
+                diagnostics["lastPositionRead"] = copy.deepcopy(read_diagnostics())
 
     def move_to_z(self, z_um: float) -> float:
+        try:
+            require_z_in_range(z_um, self.z_min_um, self.z_max_um, "Final return target")
+        except Exception as exc:
+            self.position_samples.append({
+                "targetZUm": z_um, "sampleRole": "final_return", "status": "rejected",
+                "allowedZRangeUm": [self.z_min_um, self.z_max_um],
+                "error": str(exc), "exceptionType": type(exc).__name__,
+            })
+            raise
         self._set_stage_tolerance(self.params.final_tolerance_um)
-        pre_z_um = z_um + self.params.final_approach_offset_um
-        if pre_z_um > z_um:
-            self.stage.move_absolute_um(pre_z_um)
-            self.stage.wait_settled(self.params.stage_timeout_ms)
-        self.stage.move_absolute_um(z_um)
-        self.stage.wait_settled(self.params.stage_timeout_ms)
-        return float(self.stage.get_position_um())
+        pre_z_um = min(z_um + self.params.final_approach_offset_um, self.z_max_um)
+        targets = [(pre_z_um, "final_approach"), (z_um, "final_return")] if pre_z_um > z_um else [(z_um, "final_return")]
+        for target, role in targets:
+            diagnostics: dict[str, Any] = {
+                "targetZUm": target, "sampleRole": role, "status": "pending",
+                "allowedZRangeUm": [self.z_min_um, self.z_max_um],
+                "readbackRangeToleranceUm": Z_READBACK_MARGIN_UM,
+            }
+            if role == "final_approach":
+                diagnostics["requestedApproachZUm"] = z_um + self.params.final_approach_offset_um
+            self.position_samples.append(diagnostics)
+            try:
+                require_z_in_range(target, self.z_min_um, self.z_max_um, f"{role} target")
+                self.stage.move_absolute_um(target)
+                self.stage.wait_settled(self.params.stage_timeout_ms)
+                position = self._read_verified_position(target, self.params.final_tolerance_um, "afterMove", diagnostics)
+                diagnostics["status"] = "accepted"
+            except Exception as exc:
+                diagnostics.update({"status": "rejected", "error": str(exc), "exceptionType": type(exc).__name__})
+                read_diagnostics = getattr(self.stage, "get_position_read_diagnostics", None)
+                if callable(read_diagnostics):
+                    diagnostics["lastPositionRead"] = copy.deepcopy(read_diagnostics())
+                raise
+        return position
+
+    def _read_verified_position(
+        self, target_z_um: float, tolerance_um: float, phase: str, diagnostics: dict[str, Any],
+    ) -> float:
+        read: dict[str, Any] = {"startedMonotonic": time.monotonic()}
+        diagnostics[phase] = read
+        try:
+            actual = float(self.stage.get_position_um())
+            read.update({"zUm": actual, "errorUm": actual - target_z_um})
+            require_z_in_range(
+                actual, self.z_min_um, self.z_max_um, f"{phase} readback for target {target_z_um:.6f}",
+                tolerance_um=Z_READBACK_MARGIN_UM,
+            )
+            if not math.isfinite(actual) or abs(actual - target_z_um) > tolerance_um:
+                raise StageError(
+                    f"Invalid Z readback {actual:.6f} um for target {target_z_um:.6f} um "
+                    f"during {phase} (tolerance {tolerance_um:g} um)."
+                )
+            return actual
+        finally:
+            read["finishedMonotonic"] = time.monotonic()
+            read_diagnostics = getattr(self.stage, "get_position_read_diagnostics", None)
+            if callable(read_diagnostics):
+                read["rawRead"] = copy.deepcopy(read_diagnostics())
 
     def _grid(self) -> list[float]:
         z_hi = max(float(self.params.z_start_um), float(self.params.z_end_um))

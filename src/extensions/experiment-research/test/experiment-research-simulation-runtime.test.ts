@@ -511,7 +511,8 @@ describe("experiment research simulation runtime", () => {
 			?.execute("lab-state", {}, undefined, undefined, context);
 		const labDetails = labState?.details as Record<string, unknown>;
 		const labStateAfter = labDetails.stateAfter as Record<string, unknown>;
-		expect(labStateAfter.focusCenterPolicy).toBe("previous_successful_then_current_point");
+		expect(labStateAfter.focusCenterPolicy).toBe("previous_successful_then_initial_position");
+		expect(labStateAfter.focusCenterPolicyWithSurfaceCorrection).toBe("previous_successful_then_current_point");
 	});
 
 	it("publishes one immutable focus-plane artifact after a separate calibration run", async () => {

@@ -14,9 +14,11 @@ import type {
 	SurfaceCorrection,
 } from "../../schemas/index.ts";
 import { DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM } from "../../schemas/index.ts";
+import { INITIAL_POSITION_FOCUS_CENTER_POLICY } from "../../schemas/run-state.ts";
+import { usesInitialPositionFocus } from "../../raman-focus-policy.ts";
 import { appendArtifactRecord } from "../../store/artifact-store.ts";
 import { readArtifactRecords } from "../../store/artifact-store.ts";
-import { readRunStateSnapshot } from "../../store/run-store.ts";
+import { readRunStateSnapshot, writeRunStateSnapshot } from "../../store/run-store.ts";
 import { runRoot } from "../../store/layout.ts";
 import { compileProcedureSpec } from "../../kernel/compile-units.ts";
 import { evaluateRamanGoodEnough } from "../../planner/evaluate-good-enough.ts";
@@ -184,13 +186,14 @@ function stagePositionFromActionResult(result: ActionResult): StagePosition | un
 	const xUm = readNumber(record, "xUm");
 	const yUm = readNumber(record, "yUm");
 	const zUm = readNumber(record, "zUm");
-	if (xUm === undefined || yUm === undefined || zUm === undefined) {
+	if (xUm === undefined || yUm === undefined || zUm === undefined ||
+		![xUm, yUm, zUm].every(Number.isFinite)) {
 		return undefined;
 	}
 	return { xUm, yUm, zUm };
 }
 
-async function resolveUnitPosition(unit: ExecutionUnit, runtime: RamanLiveRuntime, stageResourceId: string): Promise<ActionResult | StagePosition> {
+async function resolveUnitPosition(unit: ExecutionUnit, runtime: RamanLiveRuntime, stageResourceId: string, focusCenterZUm?: number): Promise<ActionResult | StagePosition> {
 	if (unit.positionRef === "current") {
 		const positionResult = await runtime.stage.getPosition({
 			action: "stage.get_position",
@@ -222,7 +225,8 @@ async function resolveUnitPosition(unit: ExecutionUnit, runtime: RamanLiveRuntim
 			safeToResume: false,
 		});
 	}
-	if (unit.point.zUm === undefined) {
+	const zUm = focusCenterZUm ?? unit.point.zUm;
+	if (zUm === undefined) {
 		return failedActionResult("Single-point live execution requires a Z coordinate.", {
 			errorCode: "missing_z_coordinate",
 			message: "Live Raman motion requires xUm, yUm, and zUm.",
@@ -231,7 +235,7 @@ async function resolveUnitPosition(unit: ExecutionUnit, runtime: RamanLiveRuntim
 			safeToResume: false,
 		});
 	}
-	return { xUm: unit.point.xUm, yUm: unit.point.yUm, zUm: unit.point.zUm };
+	return { xUm: unit.point.xUm, yUm: unit.point.yUm, zUm };
 }
 
 function enforceMotionHardLimits(spec: ProcedureSpec, position: StagePosition, runtime: RamanLiveRuntime): ActionResult | undefined {
@@ -239,8 +243,8 @@ function enforceMotionHardLimits(spec: ProcedureSpec, position: StagePosition, r
 	const xResult =
 		ensureRange(
 			position.xUm,
-			spec.limits.xRangeUm?.minUm ?? stageLimits.xRangeUm[0],
-			spec.limits.xRangeUm?.maxUm ?? stageLimits.xRangeUm[1],
+			Math.max(spec.limits.xRangeUm?.minUm ?? -Infinity, stageLimits.xRangeUm[0]),
+			Math.min(spec.limits.xRangeUm?.maxUm ?? Infinity, stageLimits.xRangeUm[1]),
 			"motion_out_of_bounds",
 			`Requested X position ${position.xUm} um is outside the allowed motion range.`,
 		);
@@ -251,8 +255,8 @@ function enforceMotionHardLimits(spec: ProcedureSpec, position: StagePosition, r
 	const yResult =
 		ensureRange(
 			position.yUm,
-			spec.limits.yRangeUm?.minUm ?? stageLimits.yRangeUm[0],
-			spec.limits.yRangeUm?.maxUm ?? stageLimits.yRangeUm[1],
+			Math.max(spec.limits.yRangeUm?.minUm ?? -Infinity, stageLimits.yRangeUm[0]),
+			Math.min(spec.limits.yRangeUm?.maxUm ?? Infinity, stageLimits.yRangeUm[1]),
 			"motion_out_of_bounds",
 			`Requested Y position ${position.yUm} um is outside the allowed motion range.`,
 		);
@@ -263,8 +267,8 @@ function enforceMotionHardLimits(spec: ProcedureSpec, position: StagePosition, r
 	const zResult =
 		ensureRange(
 			position.zUm,
-			spec.limits.zRangeUm?.minUm ?? stageLimits.zRangeUm[0],
-			spec.limits.zRangeUm?.maxUm ?? stageLimits.zRangeUm[1],
+			Math.max(spec.limits.zRangeUm?.minUm ?? -Infinity, stageLimits.zRangeUm[0]),
+			Math.min(spec.limits.zRangeUm?.maxUm ?? Infinity, stageLimits.zRangeUm[1]),
 			"motion_out_of_bounds",
 			`Requested Z position ${position.zUm} um is outside the allowed motion range.`,
 		);
@@ -378,7 +382,13 @@ function persistAutofocusArtifact(
 	unit: ExecutionUnit,
 	autofocusResult: ActionResult,
 ): ArtifactRef {
-	const relativePath = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}-autofocus.json`;
+	const prefix = `${unit.artifactScope.artifactPathPrefix.replace(/^records\//u, "")}-autofocus`;
+	let attemptNumber = 1;
+	let relativePath = `${prefix}.json`;
+	while (existsSync(join(runRoot(cwd, runId), relativePath))) {
+		attemptNumber += 1;
+		relativePath = `${prefix}-attempt-${attemptNumber}.json`;
+	}
 	const absolutePath = join(runRoot(cwd, runId), relativePath);
 	mkdirSync(dirname(absolutePath), { recursive: true });
 	writeFileSync(
@@ -386,6 +396,7 @@ function persistAutofocusArtifact(
 		`${JSON.stringify(
 			{
 				unitId: unit.unitId,
+				autofocusAttemptNumber: attemptNumber,
 				status: autofocusResult.status,
 				summary: autofocusResult.summary,
 				errorCode: autofocusResult.errorCode,
@@ -394,14 +405,15 @@ function persistAutofocusArtifact(
 			null,
 			2,
 		)}\n`,
-		"utf-8",
+		{ encoding: "utf-8", flag: "wx" },
 	);
 	return {
-		artifactId: `${runId}-autofocus-${unit.index}`,
+		artifactId: `${runId}-autofocus-${unit.index}${attemptNumber === 1 ? "" : `-attempt-${attemptNumber}`}`,
 		kind: "raman-autofocus",
 		path: relativePath.replace(/\\/gu, "/"),
 		label: "Raman autofocus result",
 		metadata: {
+			autofocusAttemptNumber: attemptNumber,
 			status: autofocusResult.status,
 			confidence: autofocusResult.payload?.confidence,
 			zBestUm: autofocusResult.payload?.zBestUm,
@@ -604,7 +616,7 @@ function previousAcceptedFocusZ(cwd: string, runId: string): number | undefined 
 		}
 		const autofocus = readAutofocusArtifact(cwd, runId, record.artifact.path);
 		const zBestUm = autofocus?.payload.zBestUm;
-		if (autofocus?.status === "success" && typeof zBestUm === "number") {
+		if (autofocus?.status === "success" && typeof zBestUm === "number" && Number.isFinite(zBestUm)) {
 			return zBestUm;
 		}
 	}
@@ -830,14 +842,19 @@ export async function validateRuntimeAnchorState(
 		};
 	}
 
-	const range = autofocusRange(spec);
-	const zAnchorUm = zAnchorFromSpec(spec);
+	const useInitialPosition = usesInitialPositionFocus(spec);
+	const range = useInitialPosition ? undefined : autofocusRange(spec);
+	const zAnchorUm = useInitialPosition ? undefined : zAnchorFromSpec(spec);
 	const allowedDriftUm = 5;
 	const details: Record<string, unknown> = {
 		stagePosition: position,
 		autofocusRange: range,
 		zAnchorUm,
 		allowedDriftUm,
+		...(useInitialPosition ? {
+			initialFocusZUm: position.zUm,
+			focusCenterPolicy: INITIAL_POSITION_FOCUS_CENTER_POLICY,
+		} : {}),
 	};
 	if (
 		spec.plan.kind === "focus_plane_calibration" &&
@@ -865,8 +882,8 @@ export async function validateRuntimeAnchorState(
 				? [spec.plan.seedZUm - 100, spec.plan.seedZUm + 100]
 				: usesMappingLocalAutofocus(spec)
 					? [
-							unit.point.zUm! - mappingLocalHalfRangeUm,
-							unit.point.zUm! + mappingLocalHalfRangeUm,
+							(useInitialPosition ? position.zUm : unit.point.zUm!) - mappingLocalHalfRangeUm,
+							(useInitialPosition ? position.zUm : unit.point.zUm!) + mappingLocalHalfRangeUm,
 						]
 					: unit.point.zUm === undefined
 						? []
@@ -952,7 +969,62 @@ export async function runLiveRamanUnit(
 		};
 	}
 	const stageResourceId = findResourceId(spec, "stage");
-	const resolvedUnitPosition = await resolveUnitPosition(unit, runtime, stageResourceId);
+	const previousFocusZUm = previousAcceptedFocusZ(cwd, runId);
+	const currentState = readRunStateSnapshot(cwd, runId) ?? _currentState;
+	let initialFocusZUm = currentState.initialFocusZUm;
+	let savedWindow: NonNullable<RunState["mappingFocusWindows"]>[string] | undefined;
+	if (usesInitialPositionFocus(spec)) {
+		savedWindow = currentState.mappingFocusWindows?.[unit.unitId];
+		if (!savedWindow) {
+			if (initialFocusZUm === undefined) {
+				if (unit.index !== 0 || (currentState.pointAttempts?.length ?? 0) > 0 ||
+					(currentState.resumedFromUnitIndexes?.length ?? 0) > 0) {
+					return { status: "failed", artifactRefs, error: {
+						errorCode: "autofocus_initial_position_missing",
+						message: "This run has no saved initial focus Z. Refusing to recenter on a position left by an earlier attempt.",
+						retrySafe: false, needsOperator: true, safeToResume: false, scope: "run",
+					} };
+				}
+				const positionResult = await runtime.stage.getPosition({
+					action: "stage.get_position", resourceId: stageResourceId, timeoutMs: 10_000,
+				});
+				if (positionResult.status !== "success") {
+					return { status: "failed", artifactRefs, error: {
+						errorCode: "autofocus_initial_position_read_failed",
+						message: `Cannot establish the initial focus center: ${positionResult.summary}`,
+						retrySafe: false, needsOperator: true, safeToResume: false, scope: "run",
+						payload: { sourceErrorCode: positionResult.errorCode, ...positionResult.payload },
+					} };
+				}
+				const position = stagePositionFromActionResult(positionResult);
+				if (!position) {
+					return { status: "failed", artifactRefs, error: {
+						errorCode: "invalid_stage_position_result",
+						message: "Initial focus Z requires a finite XYZ position read before the first move.",
+						retrySafe: false, needsOperator: true, safeToResume: false, scope: "run",
+					} };
+				}
+				initialFocusZUm = position.zUm;
+			}
+			const center = previousFocusZUm ?? initialFocusZUm!;
+			const halfRange = mappingLocalAutofocusHalfRangeUm(spec);
+			savedWindow = {
+				centerZUm: center, zStartUm: center - halfRange, zEndUm: center + halfRange,
+				source: previousFocusZUm === undefined ? "initial_position" : "previous_accepted_focus",
+			};
+		}
+		const halfRange = mappingLocalAutofocusHalfRangeUm(spec);
+		if (![savedWindow.centerZUm, savedWindow.zStartUm, savedWindow.zEndUm].every(Number.isFinite) ||
+			savedWindow.zStartUm !== savedWindow.centerZUm - halfRange ||
+			savedWindow.zEndUm !== savedWindow.centerZUm + halfRange) {
+			return { status: "failed", artifactRefs, error: {
+				errorCode: "autofocus_window_state_invalid",
+				message: "Saved focus window does not match the approved local scan width.",
+				retrySafe: false, needsOperator: true, safeToResume: false, scope: "run",
+			} };
+		}
+	}
+	const resolvedUnitPosition = await resolveUnitPosition(unit, runtime, stageResourceId, savedWindow?.centerZUm);
 	if ("status" in resolvedUnitPosition) {
 		return {
 			status: "failed",
@@ -961,9 +1033,9 @@ export async function runLiveRamanUnit(
 		};
 	}
 	const unitPosition = unit.focusCalibration
-		? { ...resolvedUnitPosition, zUm: previousAcceptedFocusZ(cwd, runId) ?? resolvedUnitPosition.zUm }
+		? { ...resolvedUnitPosition, zUm: previousFocusZUm ?? resolvedUnitPosition.zUm }
 		: resolvedUnitPosition;
-	const focusCenterZUm = previousAcceptedFocusZ(cwd, runId) ?? unitPosition.zUm;
+	const focusCenterZUm = savedWindow?.centerZUm ?? previousFocusZUm ?? unitPosition.zUm;
 
 	const preMoveFailure = enforceMotionHardLimits(spec, unitPosition, runtime);
 	if (preMoveFailure) {
@@ -993,6 +1065,17 @@ export async function runLiveRamanUnit(
 				};
 			}
 		}
+	}
+	if (savedWindow) {
+		// Persist before motion so timeouts, pause/resume and final retries all
+		// reuse the original range instead of the latest physical position.
+		const latestState = readRunStateSnapshot(cwd, runId) ?? currentState;
+		writeRunStateSnapshot(cwd, {
+			...latestState, initialFocusZUm,
+			focusCenterPolicy: INITIAL_POSITION_FOCUS_CENTER_POLICY,
+			mappingFocusWindows: { ...latestState.mappingFocusWindows, [unit.unitId]: savedWindow },
+			updatedAt: new Date().toISOString(),
+		});
 	}
 
 	const acquisition = options.acquisitionOverride ?? spec.domain.raman.acquisition;

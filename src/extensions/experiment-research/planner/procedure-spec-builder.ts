@@ -26,6 +26,7 @@ import {
 	type StoppingRules,
 } from "../schemas/index.ts";
 import { resolveRamanEnvironmentRuntimeProfile, type RamanEnvironmentRuntimeProfile } from "../raman-environment-profile.ts";
+import { DEFAULT_MAPPING_SURFACE_CORRECTION, usesInitialPositionFocus } from "../raman-focus-policy.ts";
 
 interface MappingAutofocusPreview {
 	localHalfRangeUm: number;
@@ -265,13 +266,8 @@ function toDomain(input: ProcedureSpecBuilderInput): ProcedureDomain {
 
 function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 	if (input.procedureId === "raman_grid_mapping") {
-		if (!input.focusPlane && input.focusPlaneDecision !== "user_declined") {
-			throw new Error(
-				"Mapping requires focus-plane calibration by default. Supply focusPlane or record an explicit user_declined decision.",
-			);
-		}
-		if (input.focusPlaneDecision === "user_declined" && input.grid.origin.zUm === undefined) {
-			throw new Error("Uncorrected mapping requires an explicit fixed grid origin zUm.");
+		if (!input.focusPlane && input.autofocus.params?.strategy === "fixed_absolute" && input.grid.origin.zUm === undefined) {
+			throw new Error("Fixed-absolute mapping requires an explicit fixed grid origin zUm.");
 		}
 		if (input.focusPlane?.source === "manual_xyz_points" && input.focusPlane.anchors?.length !== 3) {
 			throw new Error("Manual focus-plane mapping requires exactly three XYZ anchors.");
@@ -317,7 +313,9 @@ function createPlan(input: ProcedureSpecBuilderInput): ProcedureSpec["plan"] {
 							validRegion: validateFocusPlaneArtifactRegion(input.focusPlane.validRegion),
 							localAutofocusHalfRangeUm,
 						}
-				: { kind: "disabled", reason: "user_declined" },
+				: input.focusPlaneDecision === "user_declined"
+					? { kind: "disabled", reason: "user_declined" }
+					: { ...DEFAULT_MAPPING_SURFACE_CORRECTION },
 			perPoint: defaultActions(),
 			interPointDelayMs: input.interPointDelayMs,
 		};
@@ -458,6 +456,7 @@ function classifyMotionRangeRisks(spec: ProcedureSpec): ProposalRisk[] {
 
 	for (const point of points) {
 		if (
+			!usesInitialPositionFocus(spec) &&
 			point.zUm !== undefined &&
 			spec.limits.zRangeUm &&
 			(point.zUm < spec.limits.zRangeUm.minUm || point.zUm > spec.limits.zRangeUm.maxUm)
@@ -516,11 +515,14 @@ export function summarizeProcedureProposal(spec: ProcedureSpec): ProcedurePropos
 			code: "multi_point_mapping",
 			message: "This mapping run will execute repeated motion and Raman acquisition across the approved points.",
 		});
-		if (spec.plan.surfaceCorrection?.kind === "disabled") {
+		if (spec.plan.surfaceCorrection?.kind !== "focus_plane") {
+			const userDeclined = spec.plan.surfaceCorrection?.reason === "user_declined";
 			risks.push({
-				level: "confirm_required",
-				code: "focus_plane_correction_declined",
-				message: "The user explicitly declined focus-plane correction; this mapping run will use the planned fixed Z values.",
+				level: "notice",
+				code: userDeclined ? "focus_plane_correction_declined" : "focus_plane_correction_disabled_by_default",
+				message: usesInitialPositionFocus(spec)
+					? "Focus-plane correction is disabled. The first focus center is the measured Z before the first move; subsequent points use the last accepted focus Z. Each point keeps its original window for retries and resume."
+					: "Focus-plane correction is disabled; explicit fixed_absolute mapping uses the planned Z and declared absolute autofocus range.",
 			});
 		}
 		if (mappingAutofocus) {

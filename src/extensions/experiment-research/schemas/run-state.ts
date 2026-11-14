@@ -23,7 +23,17 @@ export const RunProgressSchema = Type.Object(
 );
 
 export const FOCUS_CENTER_POLICY = "previous_successful_then_current_point" as const;
-export const FocusCenterPolicySchema = Type.Literal(FOCUS_CENTER_POLICY);
+export const INITIAL_POSITION_FOCUS_CENTER_POLICY = "previous_successful_then_initial_position" as const;
+export const FocusCenterPolicySchema = Type.Union([
+	Type.Literal(FOCUS_CENTER_POLICY), Type.Literal(INITIAL_POSITION_FOCUS_CENTER_POLICY),
+]);
+
+export const MappingFocusWindowSchema = Type.Object({
+	centerZUm: Type.Number(),
+	zStartUm: Type.Number(),
+	zEndUm: Type.Number(),
+	source: Type.Union([Type.Literal("initial_position"), Type.Literal("previous_accepted_focus")]),
+}, { additionalProperties: false });
 
 export const CurrentUnitRefSchema = Type.Object(
 	{
@@ -82,6 +92,8 @@ export const RunStateSchema = Type.Object(
 		errorState: Type.Optional(RuntimeErrorSchema),
 		qualityState: Type.Optional(Type.String({ minLength: 1 })),
 		lastAcceptedFocusZUm: Type.Optional(Type.Number()),
+		initialFocusZUm: Type.Optional(Type.Number()),
+		mappingFocusWindows: Type.Optional(Type.Record(Type.String(), MappingFocusWindowSchema)),
 		focusCenterPolicy: Type.Optional(FocusCenterPolicySchema),
 		pointAttempts: Type.Optional(Type.Array(PointAttemptRecordSchema)),
 		artifactRefs: Type.Array(ArtifactRefSchema),

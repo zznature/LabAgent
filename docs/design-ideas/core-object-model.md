@@ -105,8 +105,8 @@ mapping 的可配置 `retryPolicy` 固定为 `immediate_then_final`：
 2. `focus_plane` + `manual_xyz_points`
    三个非共线 XYZ 点直接产生模型和三角形有效区域；这是一次性纯计算，不创建 run 或 artifact。
 
-3. `disabled / user_declined`
-   用户明确拒绝校正；每个 mapping 点必须有固定 Z。
+3. `disabled / default_disabled` 或 `disabled / user_declined`
+   新 mapping 默认关闭校正，用户明确拒绝时记录后者。省略字段也表示默认关闭，新 proposal 在计算批准哈希前显式补齐默认值。local mapping 可以只给 XY，首次移动前实测 Z 和最近成功焦点决定实际中心，窗口按点保存供重测/恢复使用；显式 `fixed_absolute` 仍要求计划 Z。
 
 由 operator 注册并持久化的三点模型走第一种 artifact-reference 路径，但 artifact 必须标记 `operator_supplied_xyz`，不能伪装成 runtime autofocus evidence。
 

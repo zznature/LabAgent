@@ -72,6 +72,7 @@ class MCNewtonXYZStageController:
         position_read_interval_ms: float = 80.0,
         position_read_samples: int = 5,
         position_read_discard_initial: int = 1,
+        position_read_timeout_ms: float = 3000.0,
         disable_on_disconnect: bool = True,
         exclusive_channel: bool = True,
         x_target_tolerance_um: float = 5.0,
@@ -117,8 +118,11 @@ class MCNewtonXYZStageController:
         }
         self._channel_switch_wait_ms = float(channel_switch_wait_ms)
         self._position_read_interval_ms = float(position_read_interval_ms)
-        self._position_read_samples = max(1, int(position_read_samples))
+        self._position_read_samples = max(2, int(position_read_samples))
         self._position_read_discard_initial = max(0, int(position_read_discard_initial))
+        self._position_read_timeout_ms = float(position_read_timeout_ms)
+        if not math.isfinite(self._position_read_timeout_ms) or self._position_read_timeout_ms <= 0:
+            raise ValueError("position_read_timeout_ms must be finite and positive.")
         self._disable_on_disconnect = bool(disable_on_disconnect)
         self._exclusive_channel = bool(exclusive_channel)
         self._target_tolerances_um = {
@@ -141,6 +145,7 @@ class MCNewtonXYZStageController:
         self._last_pulse_axes: set[str] = set()
         self.last_move_commands: list[dict[str, Any]] = []
         self.last_settle_diagnostics: dict[str, Any] = {}
+        self.last_position_read_diagnostics: dict[str, dict[str, Any]] = {}
         self._z_adaptive_base_profile = self._axis_motion_profiles["z"]
         self._z_adaptive_profile_ladder = self._build_z_adaptive_profile_ladder(self._z_adaptive_base_profile)
         self._z_adaptive_global_level = 0
@@ -323,10 +328,16 @@ class MCNewtonXYZStageController:
             self._require_status(self._sdk_call(self._sdk.channel_set, channel, ChannelSwitch.OFF), "channel_set")
         self._enabled_channels.clear()
 
-    def get_axis_position_um(self, axis: str, *, preserve_enabled_channels: bool = False) -> float:
+    @property
+    def position_stability_tolerance_um(self) -> float:
+        return self._stability_tolerance_um
+
+    def get_axis_position_um(
+        self, axis: str, *, preserve_enabled_channels: bool = False, require_stable: bool = True,
+    ) -> float:
         _ = preserve_enabled_channels
         self._select_axis(axis, disable_others=True)
-        return self._read_stable_axis_position_um(axis)
+        return self._read_stable_axis_position_um(axis, require_stable=require_stable)
 
     def set_axis_target_tolerance_um(self, axis: str, tolerance_um: float) -> None:
         key = axis.lower()
@@ -401,7 +412,9 @@ class MCNewtonXYZStageController:
 
         target_axes = self._normalize_wait_axes(axes)
         t_start = time.monotonic()
-        previous = {axis: self.get_axis_position_um(axis, preserve_enabled_channels=True) for axis in target_axes}
+        # Moving feedback is needed for convergence/rescue observation. It is
+        # never treated as settled unless its latest raw window is stable too.
+        previous = {axis: self.get_axis_position_um(axis, require_stable=False) for axis in target_axes}
         samples: list[dict[str, Any]] = []
         z_adaptive = self._new_z_adaptive_diagnostics(target_axes, previous)
         xy_adaptive = self._new_xy_adaptive_diagnostics(target_axes, previous)
@@ -442,13 +455,15 @@ class MCNewtonXYZStageController:
         while True:
             time.sleep(0.100)
             remaining = {axis: self.read_remaining_pulses(axis) for axis in target_axes}
-            current = {axis: self.get_axis_position_um(axis, preserve_enabled_channels=True) for axis in target_axes}
+            current = {axis: self.get_axis_position_um(axis, require_stable=False) for axis in target_axes}
+            read_stable = {axis: self.last_position_read_diagnostics[axis]["stable"] for axis in target_axes}
             elapsed_ms = (time.monotonic() - t_start) * 1000.0
             sample = {
                 "elapsedMs": elapsed_ms,
                 "currentUm": dict(current),
                 "previousUm": dict(previous),
                 "remainingPulses": dict(remaining),
+                "positionReadStable": read_stable,
                 "deltaToTargetUm": {
                     axis: current[axis] - target
                     for axis, target in self._last_targets_um.items()
@@ -460,7 +475,7 @@ class MCNewtonXYZStageController:
                 samples.pop(0)
             all_pulses_done = all(value <= 0 for value in remaining.values())
             all_stable = all(
-                abs(current[axis] - previous[axis]) < self._stability_tolerance_um
+                read_stable[axis] and abs(current[axis] - previous[axis]) < self._stability_tolerance_um
                 for axis in current
             )
             all_reached = all(
@@ -487,7 +502,7 @@ class MCNewtonXYZStageController:
                 })
                 return
 
-            if z_adaptive is not None:
+            if z_adaptive is not None and read_stable.get("z", False):
                 (
                     rescue_reason,
                     z_zero_pulse_streak,
@@ -526,7 +541,7 @@ class MCNewtonXYZStageController:
                         continue
                     z_adaptive["profileLimitReached"] = True
 
-            if xy_adaptive is not None:
+            if xy_adaptive is not None and all(read_stable[axis] for axis in target_axes.intersection({"x", "y"})):
                 xy_reason, xy_zero_pulse_streak, xy_stall_streak, xy_best_residual_um = self._xy_adaptive_rescue_reason(
                     target_axes=target_axes,
                     current=current,
@@ -671,27 +686,55 @@ class MCNewtonXYZStageController:
         self._send_move_target_mm(key, target_mm, target_um)
         self._last_targets_um[key] = target_um
 
-    def _read_stable_axis_position_um(self, axis: str) -> float:
+    def _read_stable_axis_position_um(self, axis: str, *, require_stable: bool = True) -> float:
         reads: list[float] = []
         total_reads = self._position_read_discard_initial + self._position_read_samples
-        for index in range(total_reads):
-            if index > 0 and self._position_read_interval_ms > 0:
-                time.sleep(self._position_read_interval_ms / 1000.0)
-            reads.append(self._read_axis_position_once_um(axis))
-
-        usable = reads[self._position_read_discard_initial :]
-        if not usable:
-            usable = reads
-        if len(usable) == 1:
-            return usable[0]
-
+        started = time.monotonic()
+        timestamps: list[float] = []
+        window_size = min(3, self._position_read_samples)
         tolerance = max(self._stability_tolerance_um, 0.001)
-        for end in range(2, len(usable) + 1):
-            window = usable[end - 2 : end]
-            if abs(window[-1] - window[-2]) <= tolerance:
-                return float(statistics.median(window))
-        tail = usable[-min(3, len(usable)) :]
-        return float(statistics.median(tail))
+        diagnostics: dict[str, Any] = {
+            "axis": axis, "status": "reading", "stable": False,
+            "startedMonotonic": started, "readsUm": reads,
+            "readTimestampsMonotonic": timestamps,
+            "discardInitial": self._position_read_discard_initial,
+            "windowSize": window_size, "stabilityToleranceUm": tolerance,
+            "timeoutMs": self._position_read_timeout_ms,
+        }
+        self.last_position_read_diagnostics[axis] = diagnostics
+        try:
+            while True:
+                if reads:
+                    interval = self._position_read_interval_ms
+                    if len(reads) >= total_reads:
+                        interval = max(interval, 1.0)
+                    time.sleep(max(0.0, interval) / 1000.0)
+                value = self._read_axis_position_once_um(axis)
+                reads.append(value)
+                timestamps.append(time.monotonic())
+                elapsed_ms = (timestamps[-1] - started) * 1000.0
+                diagnostics["elapsedMs"] = elapsed_ms
+                if not math.isfinite(value):
+                    raise StageCommandError(f"Non-finite {axis.upper()} position feedback: {value}.")
+                if elapsed_ms >= self._position_read_timeout_ms:
+                    diagnostics["status"] = "timeout"
+                    raise StageTimeoutError(
+                        f"{axis.upper()} position feedback did not stabilize within "
+                        f"{self._position_read_timeout_ms:g} ms (latest reads {reads[-window_size:]})."
+                    )
+                if len(reads) >= total_reads:
+                    window = reads[-window_size:]
+                    stable = max(window) - min(window) <= tolerance
+                    diagnostics["stable"] = stable
+                    if stable or not require_stable:
+                        position = float(statistics.median(window))
+                        diagnostics.update({"status": "stable" if stable else "moving", "valueUm": position})
+                        return position
+        except Exception as exc:
+            if diagnostics["status"] != "timeout":
+                diagnostics["status"] = "error"
+            diagnostics["error"] = str(exc)
+            raise
 
     def _read_axis_position_once_um(self, axis: str) -> float:
         assert self._sdk is not None

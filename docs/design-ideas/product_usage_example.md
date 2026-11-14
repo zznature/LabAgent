@@ -68,7 +68,7 @@ proposal 展示：
 
 ## 5. Focus-plane correction 的选择
 
-mapping 前有三种路径。
+新 mapping 默认关闭焦平面校正，无需先标定或要求用户明确拒绝。需要校正时可选择以下可选路径。
 
 ### 5.1 用户已有三个 focused XYZ
 
@@ -87,27 +87,25 @@ agent 提出独立 `raman_focus_plane_calibration`：
 
 用户批准 calibration 只授权该 run，不授权后续 mapping。
 
-### 5.3 用户拒绝 correction
+### 5.3 默认关闭或用户拒绝 correction
 
-agent 明确记录 `surfaceCorrection = disabled / user_declined`，并为所有 mapping points 冻结 fixed Z。
+默认记录 `surfaceCorrection = disabled / default_disabled`；用户明确拒绝时记录 `disabled / user_declined`。首点使用首次移动前的实测 Z，后续点继承最近成功焦点，每点窗口保存供重测和恢复使用。local mapping 可仅指定 XY，不必填写固定 Z。
 
 ## 6. Mapping
 
-agent 根据用户给出的 geometry 提出第二个 `raman_grid_mapping` proposal：
+agent 根据用户给出的 geometry 提出 `raman_grid_mapping` proposal：
 
 - grid 或 point-list/line generator
 - acquisition parameters
-- artifact/manual surface correction
-- valid region
+- 默认关闭焦平面；用户要求校正时才附带 artifact/manual surface correction 和有效区域
 - per-point `move -> autofocus -> acquire`
 - stopping/retry rules
 - expected points、duration 和 output root
 
-compiler 把 predicted Z 写入每个 point unit，并在批准前拒绝：
+显式启用校正时，compiler 把 predicted Z 写入每个 point unit。默认关闭不会阻止批准前校验；以下问题仍会阻止执行：
 
-- correction 缺失且用户未明确拒绝
-- artifact identity/checksum/coefficients/region 不一致
-- 点位超出 calibrated region
+- 显式启用校正但 artifact identity/checksum/coefficients/region 不一致
+- 已校正方案的点位超出 calibrated region
 - motion、autofocus window 或 power 超出 limits
 
 用户确认新的 proposal ID/hash 后才启动 mapping。运行中 kernel 维护 progress、attempts、artifacts 和失败点，不修改 grid 或参数。

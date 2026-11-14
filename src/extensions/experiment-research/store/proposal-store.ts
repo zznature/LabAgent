@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ProcedureSpec } from "../schemas/procedure-spec.ts";
+import { withMappingFocusDefaults } from "../raman-focus-policy.ts";
 import { experimentRoot, experimentsRoot } from "./layout.ts";
 import { listDirectories, listJsonFiles, readJsonFile, writeJsonFile } from "./storage.ts";
 import { join } from "node:path";
@@ -65,6 +66,7 @@ export function createProcedureProposal(
 	revisionOf?: string,
 	autofocusRoiSource?: AutofocusRoiSource,
 ): ProcedureProposalRecord {
+	spec = withMappingFocusDefaults(spec);
 	const proposal: ProcedureProposalRecord = {
 		proposalId: `proposal-${randomUUID().slice(0, 8)}`,
 		experimentId: spec.experimentId,

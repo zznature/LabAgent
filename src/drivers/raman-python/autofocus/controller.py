@@ -19,6 +19,7 @@ from autofocus.scanner import ZScanner
 from autofocus.metrics import MetricStrategy
 from autofocus.peak_locator import PeakLocator
 from autofocus.range_scanner import FixedRangeScanner
+from autofocus.bounds import Z_READBACK_MARGIN_UM, require_z_in_range
 from stage.exceptions import StageError
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,8 @@ log = logging.getLogger(__name__)
 LOW_SCORE_REFINEMENT_THRESHOLD = 0.75
 LOW_SCORE_REFINEMENT_HALF_RANGE_UM = 8.0
 LOW_SCORE_REFINEMENT_POINT_COUNT = 5
+FINAL_SCORE_MIN_PEAK_RATIO = 0.70
+FIXED_RANGE_MIN_CONFIDENCE = 0.20
 
 
 class LowScoreRefinementError(RuntimeError):
@@ -33,8 +36,12 @@ class LowScoreRefinementError(RuntimeError):
     pass
 
 
-def low_score_refinement_targets(center_um: float) -> list[float]:
-    return [float(z) for z in np.linspace(center_um - LOW_SCORE_REFINEMENT_HALF_RANGE_UM, center_um + LOW_SCORE_REFINEMENT_HALF_RANGE_UM, LOW_SCORE_REFINEMENT_POINT_COUNT)]
+def low_score_refinement_targets(center_um: float, minimum_um: float, maximum_um: float) -> list[float]:
+    require_z_in_range(center_um, minimum_um, maximum_um, "Refinement center",
+                       tolerance_um=Z_READBACK_MARGIN_UM)
+    lower = max(minimum_um, center_um - LOW_SCORE_REFINEMENT_HALF_RANGE_UM)
+    upper = min(maximum_um, center_um + LOW_SCORE_REFINEMENT_HALF_RANGE_UM)
+    return [float(z) for z in np.linspace(lower, upper, LOW_SCORE_REFINEMENT_POINT_COUNT)]
 
 
 def refine_low_score_focus(
@@ -181,18 +188,26 @@ class AutofocusController:
             z_best = fine.best().z_um
 
         # 9. Final positioning: approach the best Z from above, then move down to target.
-        pre_z = min(z_best + params.backlash_um, params.z_max_um)
         scanner._set_stage_tolerance(params.final_stage_tolerance_um)
         try:
+            require_z_in_range(z_best, params.z_min_um, params.z_max_um, "Selected peak readback",
+                               tolerance_um=Z_READBACK_MARGIN_UM)
+            z_best = float(np.clip(z_best, params.z_min_um, params.z_max_um))
+            pre_z = min(z_best + params.backlash_um, params.z_max_um)
             if pre_z > z_best:
+                require_z_in_range(pre_z, params.z_min_um, params.z_max_um, "Final approach target")
                 self.stage.move_absolute_um(pre_z)
                 self.stage.wait_settled(params.stage_timeout_ms)
+                require_z_in_range(self.stage.get_position_um(), params.z_min_um, params.z_max_um,
+                                   "Final approach readback", tolerance_um=Z_READBACK_MARGIN_UM)
             self.stage.move_absolute_um(z_best)
             self.stage.wait_settled(params.stage_timeout_ms)
         except (StageTimeoutError, StageError) as e:
             return self._result_error(
                 FocusStatus.STAGE_ERROR, f"Final move: {e}", coarse=coarse, fine=fine
             )
+        except OutOfRangeError as e:
+            return self._result_error(FocusStatus.OUT_OF_RANGE, f"Final move: {e}", coarse=coarse, fine=fine)
 
         # 10. Final verification sample.
         try:
@@ -201,6 +216,8 @@ class AutofocusController:
             return self._result_error(
                 FocusStatus.FRAME_ERROR, f"Final verification: {e}", coarse=coarse, fine=fine
             )
+        except OutOfRangeError as e:
+            return self._result_error(FocusStatus.OUT_OF_RANGE, f"Final verification: {e}", coarse=coarse, fine=fine)
         except (StageTimeoutError, StageError) as e:
             return self._result_error(
                 FocusStatus.STAGE_ERROR, f"Final verification: {e}", coarse=coarse, fine=fine
@@ -213,11 +230,14 @@ class AutofocusController:
                     return point.z_um, point.score
 
                 refined_z_um, _ = refine_low_score_focus(
-                    low_score_refinement_targets(final_point.z_um),
+                    low_score_refinement_targets(final_point.z_um, params.z_min_um, params.z_max_um),
                     final_point.score,
                     sample_refinement_point,
                 )
-                final_point = scanner.sample_score(refined_z_um, roi, tolerance_um=params.final_stage_tolerance_um)
+                final_point = scanner.sample_score(
+                    float(np.clip(refined_z_um, params.z_min_um, params.z_max_um)),
+                    roi, tolerance_um=params.final_stage_tolerance_um,
+                )
             except LowScoreRefinementError as e:
                 return self._result_error(
                     FocusStatus.LOW_CONFIDENCE,
@@ -225,6 +245,8 @@ class AutofocusController:
                     coarse=coarse,
                     fine=fine,
                 )
+            except OutOfRangeError as e:
+                return self._result_error(FocusStatus.OUT_OF_RANGE, f"Refinement: {e}", coarse=coarse, fine=fine)
 
         fine_best_score = fine.best().score
         if final_point.score < 0.7 * fine_best_score:
@@ -277,21 +299,34 @@ class AutofocusController:
             self._strategy,
             metric_name=params.metric_name,
         )
+        failure: FocusResult | None = None
         try:
             result = controller.run(roi, params, on_progress=on_progress)
         except FrameTimeoutError as e:
-            return self._result_error(FocusStatus.FRAME_ERROR, f"Fixed-range scan: {e}")
+            failure = self._result_error(FocusStatus.FRAME_ERROR, f"Fixed-range scan: {e}")
+        except OutOfRangeError as e:
+            failure = self._result_error(FocusStatus.OUT_OF_RANGE, f"Fixed-range scan: {e}")
         except (StageTimeoutError, StageError) as e:
-            return self._result_error(FocusStatus.STAGE_ERROR, f"Fixed-range scan: {e}")
+            failure = self._result_error(FocusStatus.STAGE_ERROR, f"Fixed-range scan: {e}")
         except LowScoreRefinementError as e:
-            return self._result_error(FocusStatus.LOW_CONFIDENCE, f"Fixed-range scan: {e}")
+            failure = self._result_error(FocusStatus.LOW_CONFIDENCE, f"Fixed-range scan: {e}")
         except Exception as e:
-            return self._result_error(FocusStatus.NO_PEAK, f"Fixed-range scan: {e}")
+            failure = self._result_error(FocusStatus.NO_PEAK, f"Fixed-range scan: {e}")
+        if failure is not None:
+            failure.diagnostics = {
+                "positionSamples": controller.position_samples,
+                "qualityChecks": controller.quality_checks,
+            }
+            if failure.status == FocusStatus.LOW_CONFIDENCE:
+                failure.recommendation = "retry"
+            return failure
 
         confidence, diagnostics = self._fixed_range_confidence(result, params.confidence_method)
+        diagnostics["positionSamples"] = controller.position_samples
+        diagnostics["qualityChecks"] = controller.quality_checks
         quality = self._quality_from_confidence(confidence)
         recommendation = self._recommendation_from_diagnostics(diagnostics)
-        status = FocusStatus.OK if confidence >= 0.2 else FocusStatus.LOW_CONFIDENCE
+        status = FocusStatus.OK if confidence >= FIXED_RANGE_MIN_CONFIDENCE else FocusStatus.LOW_CONFIDENCE
         message = "" if status == FocusStatus.OK else f"Fixed-range focus quality is {quality} (confidence {confidence:.2f})."
         curve = ScanCurve(
             phase="coarse",
@@ -449,7 +484,7 @@ class AutofocusController:
         selected = result.selected or result.best
         final_reproducibility = max(
             0.0,
-            min(1.0, result.final_verification.score / max(selected.score, 1e-9)),
+            min(1.0, result.final_verification.score / max(best_score, prediction_verification_score, selected.score, 1e-9)),
         )
 
         confidence = max(
@@ -615,6 +650,8 @@ class FixedRangeAutofocusController:
         self.frames = frames
         self.strategy = strategy or MetricStrategy(metric_name)
         self.peak_locator = PeakLocator()
+        self.position_samples: list[dict] = []
+        self.quality_checks: list[dict] = []
 
     def run(
         self,
@@ -622,12 +659,15 @@ class FixedRangeAutofocusController:
         params: FixedRangeAutofocusParams,
         on_progress: Optional[Callable[[ScoredZPoint], None]] = None,
     ) -> FixedRangeAutofocusResult:
-        scanner = FixedRangeScanner(self.stage, self.frames, self.strategy, params)
+        self.position_samples = []
+        self.quality_checks = []
+        scanner = FixedRangeScanner(self.stage, self.frames, self.strategy, params, position_samples=self.position_samples)
         points = scanner.scan(roi, on_progress=on_progress)
         if not points:
             raise RuntimeError("fixed-range autofocus produced no scan points.")
         peak = self.peak_locator.locate(points, interpolate=params.interpolate_peak)
         selected = peak.sampled_best
+        observations = list(points)
         prediction_verification: ScoredZPoint | None = None
         selection_source = "sampled"
         if peak.source == "parabolic":
@@ -638,14 +678,15 @@ class FixedRangeAutofocusController:
                 tolerance_um=params.final_tolerance_um,
                 sample_role="prediction_verification",
             )
+            observations.append(prediction_verification)
             if prediction_verification.score > peak.sampled_best.score:
                 selected = prediction_verification
                 selection_source = "parabolic_verified"
             else:
                 selection_source = "sampled_after_prediction_check"
 
-        final_target_um = selected.actual_z_um
-        final_z_um = scanner.move_to_z(final_target_um)
+        final_target_um = float(np.clip(selected.actual_z_um, scanner.z_min_um, scanner.z_max_um))
+        scanner.move_to_z(final_target_um)
         final_verification = scanner.sample(
             final_target_um,
             roi,
@@ -653,8 +694,23 @@ class FixedRangeAutofocusController:
             tolerance_um=params.final_tolerance_um,
             sample_role="final_verification",
         )
+        observations.append(final_verification)
         refinement_points: list[ScoredZPoint] = []
-        if final_verification.score < LOW_SCORE_REFINEMENT_THRESHOLD:
+
+        def current_result() -> FixedRangeAutofocusResult:
+            return FixedRangeAutofocusResult(
+                best=peak.sampled_best, peak=peak,
+                final_z_um=final_verification.actual_z_um,
+                final_verification=final_verification,
+                final_error_um=float(final_verification.actual_z_um - final_target_um),
+                points=points + refinement_points, selected=selected,
+                prediction_verification=prediction_verification,
+                selection_source=selection_source,
+            )
+
+        result = current_result()
+        if not self._passes_quality(result, observations, params.confidence_method, "final_verification"):
+            refinement_center = max(observations, key=lambda point: point.score)
             refinement_points = [
                 scanner.sample(
                     target_z_um,
@@ -663,16 +719,15 @@ class FixedRangeAutofocusController:
                     tolerance_um=params.final_tolerance_um,
                     sample_role="low_score_refinement",
                 )
-                for target_z_um in low_score_refinement_targets(selected.actual_z_um)
+                for target_z_um in low_score_refinement_targets(refinement_center.actual_z_um, scanner.z_min_um, scanner.z_max_um)
             ]
-            refined_best = max(refinement_points, key=lambda point: point.score)
-            if refined_best.score <= final_verification.score:
-                raise LowScoreRefinementError(
-                    f"Low-score autofocus refinement around z={selected.actual_z_um:.3f} um did not improve the score above {final_verification.score:.4f}."
-                )
-            selected = refined_best
-            final_target_um = selected.actual_z_um
-            final_z_um = scanner.move_to_z(final_target_um)
+            observations.extend(refinement_points)
+            # Keep the strongest measured candidate across the whole attempt.
+            # An improvement over a degraded verification is not a new peak.
+            selected = max(observations, key=lambda point: point.score)
+            selection_source = "best_measured_after_refinement"
+            final_target_um = float(np.clip(selected.actual_z_um, scanner.z_min_um, scanner.z_max_um))
+            scanner.move_to_z(final_target_um)
             final_verification = scanner.sample(
                 final_target_um,
                 roi,
@@ -680,17 +735,44 @@ class FixedRangeAutofocusController:
                 tolerance_um=params.final_tolerance_um,
                 sample_role="refinement_verification",
             )
-        return FixedRangeAutofocusResult(
-            best=peak.sampled_best,
-            peak=peak,
-            final_z_um=final_z_um,
-            final_verification=final_verification,
-            final_error_um=float(final_z_um - final_target_um),
-            points=points + refinement_points,
-            selected=selected,
-            prediction_verification=prediction_verification,
-            selection_source=selection_source,
-        )
+            observations.append(final_verification)
+            result = current_result()
+            if not self._passes_quality(result, observations, params.confidence_method, "refinement_verification"):
+                check = self.quality_checks[-1]
+                raise LowScoreRefinementError(
+                    "Low-score autofocus refinement failed acceptance: "
+                    f"final score {check['finalScore']:.4f}, best measured {check['bestMeasuredScore']:.4f}, "
+                    f"peak ratio {check['finalToPeakRatio']:.4f}, confidence {check['confidence']:.4f}; "
+                    f"failed checks: {', '.join(check['failedChecks'])}. Request a point retry within the original range."
+                )
+        return result
+
+    def _passes_quality(
+        self, result: FixedRangeAutofocusResult, observations: list[ScoredZPoint],
+        confidence_method: str, phase: str,
+    ) -> bool:
+        best = max(observations, key=lambda point: point.score)
+        score = result.final_verification.score
+        confidence, _ = AutofocusController._fixed_range_confidence(result, confidence_method)
+        ratio = score / best.score if math.isfinite(best.score) and best.score > 0 else 0.0
+        checks = {
+            "finiteScores": all(math.isfinite(point.score) for point in observations),
+            "minimumScore": math.isfinite(score) and score >= LOW_SCORE_REFINEMENT_THRESHOLD,
+            "peakReproduction": math.isfinite(ratio) and ratio >= FINAL_SCORE_MIN_PEAK_RATIO,
+            "confidence": math.isfinite(confidence) and confidence >= FIXED_RANGE_MIN_CONFIDENCE,
+        }
+        passed = all(checks.values())
+        self.quality_checks.append({
+            "phase": phase, "passed": passed,
+            "finalScore": score, "finalZUm": result.final_z_um,
+            "bestMeasuredScore": best.score, "bestMeasuredZUm": best.actual_z_um,
+            "finalToPeakRatio": ratio, "confidence": confidence,
+            "minimumScore": LOW_SCORE_REFINEMENT_THRESHOLD,
+            "minimumPeakRatio": FINAL_SCORE_MIN_PEAK_RATIO,
+            "minimumConfidence": FIXED_RANGE_MIN_CONFIDENCE,
+            "failedChecks": [name for name, accepted in checks.items() if not accepted],
+        })
+        return passed
 
     def _sample_local_refinement(
         self,

@@ -171,7 +171,7 @@ describe("focus-plane calibration and mapping", () => {
 		});
 	});
 
-	it("requires a calibration model unless the user explicitly declines correction", () => {
+	it("defaults new mapping to disabled correction and preserves an explicit refusal", () => {
 		const input = {
 			procedureId: "raman_grid_mapping" as const,
 			intent,
@@ -180,14 +180,19 @@ describe("focus-plane calibration and mapping", () => {
 			autofocus,
 			acquisition,
 			grid: {
-				origin: { xUm: 0, yUm: 0, zUm: 1_000 },
+				origin: { xUm: 0, yUm: 0 },
 				rows: 1,
 				cols: 1,
 				pitchXUm: 10,
 				pitchYUm: 10,
 			},
 		};
-		expect(() => buildProcedureSpec(input)).toThrow(/requires focus-plane calibration by default/u);
+		const defaultSpec = buildProcedureSpec(input);
+		expect(defaultSpec.plan.kind === "grid_scan" ? defaultSpec.plan.surfaceCorrection : undefined).toEqual({
+			kind: "disabled", reason: "default_disabled",
+		});
+		expect(ProcedureSpecValidator.Check(defaultSpec)).toBe(true);
+		expect(compileProcedureSpec(defaultSpec)).toHaveLength(1);
 		const declined = buildProcedureSpec({ ...input, focusPlaneDecision: "user_declined" });
 		expect(declined.plan.kind === "grid_scan" ? declined.plan.surfaceCorrection : undefined).toEqual({
 			kind: "disabled",
@@ -195,7 +200,7 @@ describe("focus-plane calibration and mapping", () => {
 		});
 	});
 
-	it("rejects raw point-list mapping that bypasses the focus-plane decision", () => {
+	it("accepts raw point-list mapping without a focus-plane decision", () => {
 		const spec: ProcedureSpec = {
 			procedureSpecId: "raw-point-list-mapping",
 			experimentId: intent.experimentId,
@@ -219,10 +224,10 @@ describe("focus-plane calibration and mapping", () => {
 		};
 
 		expect(ProcedureSpecValidator.Check(spec)).toBe(true);
-		expect(() => compileProcedureSpec(spec)).toThrow(/Mapping requires focus-plane calibration by default/u);
+		expect(compileProcedureSpec(spec)).toHaveLength(1);
 	});
 
-	it("requires fixed Z for every point-list mapping point when correction is explicitly declined", () => {
+	it("allows XY-only local mapping but still requires planned Z for explicit fixed_absolute", () => {
 		const spec: ProcedureSpec = {
 			procedureSpecId: "declined-point-list-mapping",
 			experimentId: intent.experimentId,
@@ -247,6 +252,8 @@ describe("focus-plane calibration and mapping", () => {
 		};
 
 		expect(ProcedureSpecValidator.Check(spec)).toBe(true);
+		expect(compileProcedureSpec(spec)[0]?.point?.zUm).toBeUndefined();
+		spec.domain.raman.autofocus = { ...autofocus, params: { strategy: "fixed_absolute" } };
 		expect(() => compileProcedureSpec(spec)).toThrow(/every point_list point to include an explicit fixed zUm/u);
 	});
 

@@ -38,6 +38,9 @@ _DAEMON_ROOT = Path(__file__).resolve().parent
 if str(_DAEMON_ROOT) not in sys.path:
     sys.path.insert(0, str(_DAEMON_ROOT))
 
+from autofocus.bounds import require_z_in_range
+from autofocus.exceptions import OutOfRangeError
+
 
 def _trace(message: str, payload: dict | None = None) -> None:
     try:
@@ -431,20 +434,32 @@ class HardwareSession:
 class _ZOnlyStageAdapter:
     """Expose the XYZ stage session through the autofocus ZStage protocol."""
 
-    def __init__(self, stage: Any) -> None:
+    def __init__(self, stage: Any, z_min_um: float, z_max_um: float) -> None:
         self._stage = stage
+        if not (math.isfinite(z_min_um) and math.isfinite(z_max_um) and z_min_um < z_max_um):
+            raise ValueError("Autofocus adapter requires a finite, non-empty Z range.")
+        self._z_min_um = z_min_um
+        self._z_max_um = z_max_um
 
     def get_position_um(self) -> float:
-        return float(self._stage.get_position_um().z_um)
+        return float(self._stage.get_axis_position_um("z"))
+
+    @property
+    def position_stability_tolerance_um(self) -> float:
+        return float(self._stage.position_stability_tolerance_um)
+
+    def get_position_read_diagnostics(self) -> dict:
+        return self._stage.last_position_read_diagnostics.get("z", {})
 
     def move_absolute_um(self, z_um: float) -> None:
+        require_z_in_range(z_um, self._z_min_um, self._z_max_um, "Autofocus move target")
         self._stage.move_absolute_um(z_um=float(z_um))
 
     def set_target_tolerance_um(self, tolerance_um: float) -> None:
         self._stage.set_axis_target_tolerance_um("z", float(tolerance_um))
 
     def move_relative_um(self, dz_um: float) -> None:
-        self._stage.move_relative_um(dz_um=float(dz_um))
+        self.move_absolute_um(self.get_position_um() + float(dz_um))
 
     def wait_settled(self, timeout_ms: int) -> None:
         wait_settled = getattr(self._stage, "wait_settled")
@@ -593,9 +608,25 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     stage_cfg = request["stage"]
     params = payload.get("params") or {}
     timeout_ms = int(payload["timeoutMs"])
+    try:
+        z_start_um, z_end_um = float(params["zStartUm"]), float(params["zEndUm"])
+        if not (math.isfinite(z_start_um) and math.isfinite(z_end_um)) or z_start_um == z_end_um:
+            raise ValueError("Autofocus requires finite, distinct zStartUm and zEndUm.")
+    except (KeyError, TypeError, ValueError) as exc:
+        return _fail("autofocus_invalid_params", f"Invalid autofocus Z range: {exc}")
+    z_min_um, z_max_um = sorted((z_start_um, z_end_um))
+    resource_range = stage_cfg.get("limits", {}).get("zRangeUm")
+    if resource_range is not None:
+        try:
+            require_z_in_range(z_min_um, resource_range[0], resource_range[1], "Autofocus lower endpoint")
+            require_z_in_range(z_max_um, resource_range[0], resource_range[1], "Autofocus upper endpoint")
+        except OutOfRangeError as exc:
+            return _fail("autofocus_out_of_range", str(exc), payload={
+                "requestedZRangeUm": [z_min_um, z_max_um], "resourceZRangeUm": resource_range,
+            })
     xyz_stage = session.stage(stage_cfg)
     _clear_stage_diagnostics(xyz_stage)
-    stage = _ZOnlyStageAdapter(xyz_stage)
+    stage = _ZOnlyStageAdapter(xyz_stage, z_min_um, z_max_um)
     provider = session.frame(request["frameProvider"], timeout_ms)
     point_dir = session.current_point_dir()
     previous_artifact_dir = getattr(provider, "artifact_dir", None)
@@ -606,13 +637,6 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     try:
         resolved_z_motion_profile = _apply_z_motion_profile(xyz_stage, params.get("zMotionProfile"))
         roi = ROI(**payload["roi"])
-        if "zStartUm" not in params or "zEndUm" not in params:
-            return _fail(
-                "autofocus_invalid_params",
-                "Fixed-range autofocus requires zStartUm and zEndUm.",
-                retry_safe=False,
-                safe_to_resume=True,
-            )
         requested_stage_timeout_ms = int(params.get("stageTimeoutMs", _AUTOFOCUS_STAGE_TIMEOUT_DEFAULT_MS))
         requested_frame_timeout_ms = int(params.get("frameTimeoutMs", _AUTOFOCUS_FRAME_TIMEOUT_DEFAULT_MS))
         strategy = params.get("strategy", "fixed_absolute")
@@ -708,19 +732,10 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         "message": result.message,
         "roi": {"x": roi.x, "y": roi.y, "width": roi.width, "height": roi.height},
         "params": resolved_params,
+        "allowedZRangeUm": [z_min_um, z_max_um],
         "stageMoveCommands": _stage_move_commands(xyz_stage),
         "stageSettleDiagnostics": _stage_settle_diagnostics(xyz_stage),
     }
-    if point_dir is not None:
-        response_payload["pointArtifactDir"] = str(point_dir)
-        response_payload["autofocusResultPath"] = str(point_dir / "autofocus_result_0001.json")
-        try:
-            (point_dir / "autofocus_result_0001.json").write_text(
-                json.dumps(_json_safe(response_payload), indent=2, ensure_ascii=False, allow_nan=False),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
     if result.coarse is not None:
         response_payload["scanPoints"] = [
             {
@@ -732,6 +747,16 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
             }
             for point in result.coarse.points
         ]
+    if point_dir is not None:
+        response_payload["pointArtifactDir"] = str(point_dir)
+        response_payload["autofocusResultPath"] = str(point_dir / "autofocus_result_0001.json")
+        try:
+            (point_dir / "autofocus_result_0001.json").write_text(
+                json.dumps(_json_safe(response_payload), indent=2, ensure_ascii=False, allow_nan=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
     if str(result.status.value) == "ok":
         return _success("Autofocus completed.", response_payload)
     if str(result.status.value) == "stage_error":
@@ -739,8 +764,9 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     return _fail(
         f"autofocus_{result.status.value}",
         result.message or str(result.status.value),
-        retry_safe=True,
-        safe_to_resume=True,
+        retry_safe=str(result.status.value) != "out_of_range",
+        needs_operator=str(result.status.value) != "low_confidence",
+        safe_to_resume=str(result.status.value) != "out_of_range",
         payload=response_payload,
     )
 

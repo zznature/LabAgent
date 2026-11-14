@@ -24,6 +24,8 @@ import {
 	saveExperimentIntent,
 } from "../store/index.ts";
 import { DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM, FOCUS_CENTER_POLICY } from "../schemas/index.ts";
+import { INITIAL_POSITION_FOCUS_CENTER_POLICY } from "../schemas/run-state.ts";
+import { DEFAULT_MAPPING_SURFACE_CORRECTION } from "../raman-focus-policy.ts";
 import { DEFAULT_RAMAN_ENVIRONMENT_RUNTIME_PROFILE } from "../raman-environment-profile.ts";
 import {
 	ProcedureSpecParamsSchema,
@@ -208,18 +210,6 @@ function validateProcedureSpec(spec: ProcedureSpec): { valid: boolean; issues: s
 		return {
 			valid: false,
 			issues: formatValidationErrors(ProcedureSpecValidator, spec),
-		};
-	}
-	if (
-		spec.procedureId === "raman_grid_mapping" &&
-		(spec.plan.kind === "grid_scan" || spec.plan.kind === "point_list") &&
-		spec.plan.surfaceCorrection === undefined
-	) {
-		return {
-			valid: false,
-			issues: [
-				"Mapping requires focus-plane correction by default; attach a calibration artifact or record surfaceCorrection.kind=disabled after the user explicitly declines.",
-			],
 		};
 	}
 	const metricName = spec.domain.raman.autofocus.params?.metricName;
@@ -500,20 +490,7 @@ function templateForProcedure(procedureId: ProcedureId): Record<string, unknown>
 				pitchYUm: 10,
 				order: "snake",
 			},
-			surfaceCorrection: {
-				kind: "focus_plane",
-				calibrationRunId: "replace-with-calibration-run-id",
-				artifactId: "replace-with-focus-plane-artifact-id",
-				checksum: "replace-with-focus-plane-sha256",
-				coefficients: { a: 0, b: 0, c: 1_500 },
-				validRegion: [
-					{ anchorId: "corner_1", xUm: 2_000, yUm: 1_000 },
-					{ anchorId: "corner_2", xUm: 3_000, yUm: 1_000 },
-					{ anchorId: "corner_3", xUm: 3_000, yUm: 2_000 },
-					{ anchorId: "corner_4", xUm: 2_000, yUm: 2_000 },
-				],
-				localAutofocusHalfRangeUm: DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM,
-			},
+			surfaceCorrection: { ...DEFAULT_MAPPING_SURFACE_CORRECTION },
 			perPoint: [
 				{ kind: "move_to_point" },
 				{ kind: "capture_frame", laserOff: true },
@@ -824,7 +801,8 @@ export const getProcedureSpecTemplateTool = {
 			template: templateForProcedure(params.procedureId),
 			notes: [
 				"ProcedureSpec supports plan.kind values current_position, point_list, focus_plane_calibration, and grid_scan.",
-				"Approve focus_plane_calibration and grid_scan as two separate bounded runs.",
+				"Mapping defaults to disabled focus-plane correction and needs no calibration artifact or explicit refusal. The first center is measured before motion; subsequent points use the last accepted focus.",
+				"Enable focus-plane correction only when requested. If hardware calibration is needed, approve calibration and mapping as separate bounded runs.",
 				"If calibration corners are not supplied, use a 1000 um square centered on the current XY position.",
 				"Line scans should use point_list when one axis is fixed and pitchYUm would be zero.",
 				"Use plan.interPointDelayMs on point_list or grid_scan when repeated points need a fixed wait between completed units.",
@@ -870,7 +848,9 @@ export const getLabStateTool = {
 			goodEnoughDecisionMode: "explicit_rules",
 			ramanRuntimeContractDefined: true,
 			defaultRamanEnvironment: DEFAULT_RAMAN_ENVIRONMENT_RUNTIME_PROFILE,
-			focusCenterPolicy: FOCUS_CENTER_POLICY,
+			focusCenterPolicy: INITIAL_POSITION_FOCUS_CENTER_POLICY,
+			mappingSurfaceCorrectionDefault: { ...DEFAULT_MAPPING_SURFACE_CORRECTION },
+			focusCenterPolicyWithSurfaceCorrection: FOCUS_CENTER_POLICY,
 			nextMilestone: "verification and operator-facing refinement",
 		});
 	},

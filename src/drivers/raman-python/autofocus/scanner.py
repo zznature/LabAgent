@@ -8,7 +8,7 @@ from autofocus.models import (
     ROI, Frame, FrameProvider, ZStage, FocusStrategy,
     AutofocusParams, FocusPoint, ScanCurve,
 )
-from autofocus.exceptions import OutOfRangeError
+from autofocus.bounds import Z_READBACK_MARGIN_UM, require_z_in_range
 from autofocus.roi import saturation_ratio, crop, to_grayscale
 
 
@@ -51,10 +51,7 @@ class ZScanner:
 
     def sample_score(self, z_um: float, roi: ROI, tolerance_um: float | None = None) -> FocusPoint:
         """Move to z_um, acquire frames_per_z frames, and return the median sharpness and saturation."""
-        if not (self.params.z_min_um <= z_um <= self.params.z_max_um):
-            raise OutOfRangeError(
-                f"z={z_um} outside [{self.params.z_min_um}, {self.params.z_max_um}]"
-            )
+        require_z_in_range(z_um, self.params.z_min_um, self.params.z_max_um, "Scan target")
         if tolerance_um is not None:
             self._set_stage_tolerance(tolerance_um)
         self.stage.move_absolute_um(z_um)
@@ -64,16 +61,23 @@ class ZScanner:
     def score_current_position(self, roi: ROI) -> FocusPoint:
         """Acquire frames at the current stage position and return the median score."""
         actual_z_um = self.stage.get_position_um()
+        require_z_in_range(actual_z_um, self.params.z_min_um, self.params.z_max_um,
+                           "Before capture readback", tolerance_um=Z_READBACK_MARGIN_UM)
         if self.params.settle_ms > 0:
             time.sleep(self.params.settle_ms / 1000.0)
         t_after = time.monotonic()
         scores_list: list[float] = []
         sat_list: list[float] = []
+        captured: list[Frame] = []
         for _ in range(self.params.frames_per_z):
             frame = self.frames.wait_for_next(
                 after_ts=t_after, timeout_ms=self.params.frame_timeout_ms
             )
             t_after = frame.timestamp
+            captured.append(frame)
+        require_z_in_range(self.stage.get_position_um(), self.params.z_min_um, self.params.z_max_um,
+                           "After capture readback", tolerance_um=Z_READBACK_MARGIN_UM)
+        for frame in captured:
             scores_list.append(self.strategy.score(frame.image, roi))
             sat_patch = to_grayscale(crop(frame.image, roi))
             sat_list.append(saturation_ratio(sat_patch))
@@ -106,8 +110,11 @@ class ZScanner:
         if current <= z_hi:
             pre_z = min(z_hi + self.params.backlash_um, self.params.z_max_um)
             if pre_z > current:
+                require_z_in_range(pre_z, self.params.z_min_um, self.params.z_max_um, "Scan approach target")
                 self.stage.move_absolute_um(pre_z)
                 self.stage.wait_settled(self.params.stage_timeout_ms)
+                require_z_in_range(self.stage.get_position_um(), self.params.z_min_um, self.params.z_max_um,
+                                   "Scan approach readback", tolerance_um=Z_READBACK_MARGIN_UM)
         points: list[FocusPoint] = []
         for z in grid:
             point = self.sample_score(z, roi, tolerance_um=tolerance_um)

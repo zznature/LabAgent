@@ -42,8 +42,9 @@ frozen ProcedureSpec
 - actions 停留在 `move_to_point / autofocus / capture_frame / acquire_spectrum` 语义层。
 - spec limits 被带入每个 unit；runtime/driver 仍承担最终硬防线。
 - focus-corrected mapping 点位于冻结有效区域内，并写入 predicted Z。
-- 未校正 mapping 的每个点有显式固定 Z。
-- autofocus 完整窗口位于 approved Z limits 内。
+- 新 mapping 默认不启用焦平面，省略校正字段不再阻止编译或批准前校验；新 proposal 在哈希计算前显式保存 `disabled/default_disabled`。
+- 禁用焦平面的 local mapping 可仅编译 XY，在 runtime 使用首次移动前实测 Z / 最近成功焦点作为实际移动与聚焦中心；显式 `fixed_absolute` 仍要求计划 Z。
+- 已知中心的 autofocus 完整窗口位于 approved Z limits 内；禁用焦平面的 local mapping 在编译时检查宽度可容纳，preflight/runtime 再检查实测中心对应的完整窗口。
 - calibration 不能被 `maxUnits` 截断到无法发布模型。
 - 编译结果通过 `ExecutionUnit` schema 校验。
 
@@ -129,6 +130,10 @@ mapping 使用 point-level attempt history：
 当前可重试分类只有 timeout 和 low focus confidence。最终失败可按 `stopOnError` 立即结束，或记录失败点继续；连续失败达到 `maxConsecutiveFailures` 时 run failed。
 
 已完成点、失败点和每次 attempt 都写入状态/事件，成功 retry 不覆盖先前失败证据。
+
+固定范围聚焦内部执行 10 点扫描、必要时一次 5 点细化及最终质量验收；验收不通过时，runtime 在采谱前返回可重试的 `autofocus_low_confidence`。kernel 复用上述 immediate/final retry 策略，不与 Python 内部整点重扫叠加。立即重测一次、无结束后补测对应 `maxImmediateRetriesPerPoint = 1`、`maxFinalRetriesPerPoint = 0`；未声明策略时的默认值仍为立即一次加结束后一次，显式冻结策略优先。
+
+低质量失败不更新 accepted focus Z。禁用焦平面的 local mapping 在首次移动前保存 `initialFocusZUm`，每点移动前保存 `mappingFocusWindows[unitId]`；立即重测、结束后补测与暂停恢复复用该点原窗口，不能从失败后当前位置或后来点的成功焦点重新定中心。workspace 为每次聚焦保存独立 artifact 文件与 ID，`pointAttempts[].artifactIds` 可追溯失败和重测证据。具体文件名、质量门槛与中心策略见硬件适配契约 5.4–5.5。agent 配置策略，确定性 kernel 在执行热路径触发重测；不需要 agent 收到每次失败后再发起调用。
 
 ## 7. 点间等待与控制请求
 

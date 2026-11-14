@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -53,6 +54,32 @@ class MeanStrategy:
 
 
 class LowScoreRefinementTest(unittest.TestCase):
+    def test_final_position_is_from_the_same_verification_as_final_score(self) -> None:
+        stage = FakeStage()
+        frames = ScoreByStagePositionFrames(stage, {96: 1, 100: 3, 104: 1})
+        controller = FixedRangeAutofocusController(stage, frames, MeanStrategy())
+        params = FixedRangeAutofocusParams(
+            z_start_um=96, z_end_um=104, point_count=3, interpolate_peak=False,
+            settle_ms=0, warmup_frames_per_z=0, final_approach_offset_um=0,
+        )
+        with patch("autofocus.controller.FixedRangeScanner.move_to_z", return_value=102.0):
+            result = controller.run(ROI(0, 0, 4, 4), params)
+        self.assertEqual(result.final_z_um, result.final_verification.actual_z_um)
+        self.assertEqual(result.final_z_um, 100)
+        self.assertEqual(result.final_error_um, 0)
+
+    def test_position_failure_keeps_evidence_in_focus_result(self) -> None:
+        stage = FakeStage()
+        controller = AutofocusController(stage, ScoreByStagePositionFrames(stage, {}), MeanStrategy())
+        with patch.object(stage, "get_position_um", return_value=2346.009):
+            result = controller.run_fixed_range(ROI(0, 0, 4, 4), FixedRangeAutofocusParams(
+                z_start_um=2275.491, z_end_um=2315.491, settle_ms=0,
+            ))
+        self.assertEqual(result.status, FocusStatus.OUT_OF_RANGE)
+        self.assertIsNone(result.z_best_um)
+        self.assertEqual(result.diagnostics["positionSamples"][0]["status"], "rejected")
+        self.assertEqual(result.diagnostics["positionSamples"][0]["beforeCapture"]["zUm"], 2346.009)
+
     def test_fixed_range_controller_refines_a_low_score_focus_with_five_points(self) -> None:
         stage = FakeStage()
         frames = ScoreByStagePositionFrames(
@@ -69,8 +96,8 @@ class LowScoreRefinementTest(unittest.TestCase):
         )
         controller = FixedRangeAutofocusController(stage, frames, MeanStrategy())
         params = FixedRangeAutofocusParams(
-            z_start_um=96.0,
-            z_end_um=104.0,
+            z_start_um=90.0,
+            z_end_um=110.0,
             point_count=5,
             stage_timeout_ms=1,
             frame_timeout_ms=1,

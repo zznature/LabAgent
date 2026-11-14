@@ -2,6 +2,7 @@
 Pure dataclasses and Protocol interfaces for the autofocus module.
 """
 
+import math
 import numpy as np
 from dataclasses import dataclass
 from typing import Any, Protocol, Literal, Optional
@@ -137,7 +138,7 @@ class AutofocusParams:
     metric_name: str = "labspec_center_spot_focus"
 
     def __post_init__(self) -> None:
-        if not (self.z_min_um < self.z_max_um):
+        if not (math.isfinite(self.z_min_um) and math.isfinite(self.z_max_um) and self.z_min_um < self.z_max_um):
             raise ValueError(f"z_min_um ({self.z_min_um}) must be less than z_max_um ({self.z_max_um})")
         for name, val in [
             ("coarse_range_um", self.coarse_range_um),
@@ -173,6 +174,8 @@ class FixedRangeAutofocusParams:
     confidence_method: Literal["curve_quality", "legacy_min_gate"] = "curve_quality"
 
     def __post_init__(self) -> None:
+        if not math.isfinite(self.z_start_um) or not math.isfinite(self.z_end_um):
+            raise ValueError("Autofocus Z range endpoints must be finite.")
         if self.z_start_um == self.z_end_um:
             raise ValueError("z_start_um and z_end_um must be different.")
         if self.point_count < 3:
@@ -191,8 +194,8 @@ class FixedRangeAutofocusParams:
             raise ValueError("target_tolerance_um must be positive.")
         if self.final_tolerance_um <= 0:
             raise ValueError("final_tolerance_um must be positive.")
-        if self.final_approach_offset_um < 0:
-            raise ValueError("final_approach_offset_um must be non-negative.")
+        if not math.isfinite(self.final_approach_offset_um) or self.final_approach_offset_um < 0:
+            raise ValueError("final_approach_offset_um must be finite and non-negative.")
         if self.final_verification_frames_per_z <= 0:
             raise ValueError("final_verification_frames_per_z must be positive.")
 

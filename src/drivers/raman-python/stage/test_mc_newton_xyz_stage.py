@@ -247,6 +247,53 @@ class MCNewtonXYZStageControllerTest(unittest.TestCase):
             controller.move_absolute_and_wait_um(z_um=100.0, timeout_ms=1000)
         self.assertEqual(len(sdk.move_commands), 1)
 
+    def test_read_uses_latest_stable_window_instead_of_an_earlier_pair(self) -> None:
+        controller = self.make_controller(FakeNewtonSdk())
+        controller._position_read_samples = 5
+        values = iter([2290, 2290.1, 2320, 2350, 2380, 2380.05, 2380.1])
+        with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda axis: next(values)):
+            actual = controller.get_axis_position_um("z")
+        self.assertAlmostEqual(actual, 2380.05)
+        self.assertEqual(controller.last_position_read_diagnostics["z"]["readsUm"],
+                         [2290, 2290.1, 2320, 2350, 2380, 2380.05, 2380.1])
+
+    def test_unstable_reads_timeout_instead_of_returning_a_median(self) -> None:
+        controller = self.make_controller(FakeNewtonSdk())
+        controller._position_read_timeout_ms = 10
+        counter = iter(range(1000))
+        with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda axis: 2300 + next(counter) * 20):
+            with self.assertRaises(StageTimeoutError):
+                controller.get_axis_position_um("z")
+        self.assertEqual(controller.last_position_read_diagnostics["z"]["status"], "timeout")
+
+    def test_nonfinite_feedback_is_rejected_and_recorded(self) -> None:
+        for value in (float("nan"), float("inf")):
+            controller = self.make_controller(FakeNewtonSdk())
+            with patch.object(controller, "_read_axis_position_once_um", return_value=value):
+                with self.assertRaises(StageCommandError):
+                    controller.get_axis_position_um("z")
+            self.assertEqual(controller.last_position_read_diagnostics["z"]["status"], "error")
+
+    def test_stable_read_after_the_read_deadline_is_not_accepted(self) -> None:
+        controller = self.make_controller(FakeNewtonSdk())
+        controller._position_read_interval_ms = 20
+        controller._position_read_timeout_ms = 10
+        with self.assertRaises(StageTimeoutError):
+            controller.get_axis_position_um("z")
+        self.assertEqual(controller.last_position_read_diagnostics["z"]["status"], "timeout")
+
+    def test_settle_rejects_an_unstable_window_even_when_its_median_matches_target(self) -> None:
+        controller = self.make_controller(FakeNewtonSdk())
+        controller._position_read_samples = 3
+        controller._last_targets_um = {"z": 100}
+        values = iter([90.0, 100.0, 110.0] * 200)
+        with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda axis: next(values)):
+            with self.assertRaises(StageTimeoutError):
+                controller.wait_settled(500, axes={"z"})
+        self.assertEqual(controller.last_settle_diagnostics["status"], "timeout")
+        self.assertTrue(all(not sample["positionReadStable"]["z"]
+                            for sample in controller.last_settle_diagnostics["samples"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -295,7 +295,7 @@ export const SurfaceCorrectionSchema = Type.Union([
 	Type.Object(
 		{
 			kind: Type.Literal("disabled"),
-			reason: Type.Literal("user_declined"),
+			reason: Type.Union([Type.Literal("user_declined"), Type.Literal("default_disabled")]),
 		},
 		{ additionalProperties: false },
 	),

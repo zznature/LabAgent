@@ -21,6 +21,7 @@ import type {
 } from "../schemas/procedure-spec.ts";
 import { DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM } from "../schemas/procedure-spec.ts";
 import { formatValidationErrors } from "../schemas/validation.ts";
+import { DEFAULT_MAPPING_SURFACE_CORRECTION, usesInitialPositionFocus } from "../raman-focus-policy.ts";
 
 function formatUnitIndex(index: number): string {
 	return String(index).padStart(4, "0");
@@ -65,21 +66,9 @@ function assertFocusPlaneMappingActions(plan: GridScanPlan | PointListPlan): voi
 	}
 }
 
-function requireMappingSurfaceCorrection(spec: ProcedureSpec, plan: GridScanPlan | PointListPlan): SurfaceCorrection {
-	if (spec.procedureId !== "raman_grid_mapping") {
-		return plan.surfaceCorrection ?? { kind: "disabled", reason: "user_declined" };
-	}
-	if (!plan.surfaceCorrection) {
-		throw new Error(
-			"Mapping requires focus-plane calibration by default. Attach a focus-plane artifact or record surfaceCorrection.kind=disabled with reason=user_declined.",
-		);
-	}
-	return plan.surfaceCorrection;
-}
-
-function applyPointListSurfaceCorrection(point: Point, correction: SurfaceCorrection): Point {
+function applyPointListSurfaceCorrection(point: Point, correction: SurfaceCorrection, useInitialPosition: boolean): Point {
 	if (correction.kind === "disabled") {
-		if (point.zUm === undefined) {
+		if (!useInitialPosition && point.zUm === undefined) {
 			throw new Error("Uncorrected mapping requires every point_list point to include an explicit fixed zUm.");
 		}
 		return point;
@@ -139,14 +128,14 @@ function pointListPoints(plan: PointListPlan): Point[] {
 }
 
 function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): ExecutionUnit[] {
-	const correction = requireMappingSurfaceCorrection(spec, plan);
+	const correction = plan.surfaceCorrection ?? DEFAULT_MAPPING_SURFACE_CORRECTION;
 	if (spec.procedureId === "raman_grid_mapping" && correction.kind === "focus_plane") {
 		assertFocusPlaneMappingActions(plan);
 	}
 	const declaredPoints = pointListPoints(plan);
 	const points =
 		spec.procedureId === "raman_grid_mapping"
-			? declaredPoints.map((point) => applyPointListSurfaceCorrection(point, correction))
+			? declaredPoints.map((point) => applyPointListSurfaceCorrection(point, correction, usesInitialPositionFocus(spec)))
 			: declaredPoints;
 	return points.map((point, index) => ({
 		unitId: createUnitId(spec.procedureSpecId, index),
@@ -165,9 +154,6 @@ function buildPointListUnits(spec: ProcedureSpec, plan: PointListPlan): Executio
 }
 
 function buildGridPoints(plan: GridScanPlan): ExecutionUnitPoint[] {
-	if (plan.surfaceCorrection?.kind === "disabled" && plan.grid.origin.zUm === undefined) {
-		throw new Error("Uncorrected mapping requires an explicit fixed grid origin zUm.");
-	}
 	const points: ExecutionUnitPoint[] = [];
 	for (let row = 0; row < plan.grid.rows; row++) {
 		const columns = Array.from({ length: plan.grid.cols }, (_, column) => column);
@@ -273,7 +259,10 @@ function buildFocusPlaneCalibrationUnits(spec: ProcedureSpec, plan: FocusPlaneCa
 }
 
 function buildGridScanUnits(spec: ProcedureSpec, plan: GridScanPlan): ExecutionUnit[] {
-	requireMappingSurfaceCorrection(spec, plan);
+	if (spec.procedureId === "raman_grid_mapping" && !usesInitialPositionFocus(spec) &&
+		plan.surfaceCorrection?.kind !== "focus_plane" && plan.grid.origin.zUm === undefined) {
+		throw new Error("Fixed-absolute mapping requires an explicit fixed grid origin zUm.");
+	}
 	if (plan.surfaceCorrection?.kind === "focus_plane") {
 		assertFocusPlaneMappingActions(plan);
 	}
@@ -344,6 +333,14 @@ function assertAutofocusWindowsWithinSpecLimits(spec: ProcedureSpec, units: Exec
 		(fixedRange !== undefined && fixedRange > 0 ? fixedRange : DEFAULT_MAPPING_LOCAL_AUTOFOCUS_HALF_RANGE_UM);
 	const usesMappingLocalAutofocus =
 		spec.procedureId === "raman_grid_mapping" && spec.domain.raman.autofocus.params?.strategy !== "fixed_absolute";
+	if (usesInitialPositionFocus(spec)) {
+		// The center is measured before the first move; preflight and runtime
+		// check the actual window. Planned Z cannot locate this dynamic window.
+		if (2 * mappingHalfRangeUm > zRange.maxUm - zRange.minUm) {
+			throw new Error("Mapping autofocus window width exceeds the approved Z range.");
+		}
+		return;
+	}
 	const windows =
 		spec.plan.kind === "focus_plane_calibration"
 			? [{ unitId: units[0]?.unitId ?? spec.procedureSpecId, minimum: spec.plan.seedZUm - 100, maximum: spec.plan.seedZUm + 100 }]

@@ -92,7 +92,7 @@ validRegion
 localAutofocusHalfRangeUm
 ```
 
-`localAutofocusHalfRangeUm` defaults to 40 um when omitted by planner helpers. Corrected mapping stores it on `surfaceCorrection.localAutofocusHalfRangeUm`; mapping with `surfaceCorrection = disabled/user_declined` stores it on `domain.raman.autofocus.params.localAutofocusHalfRangeUm`. Once present in a mapping ProcedureSpec it is the approved local autofocus half-range and must not be inferred from `domain.raman.autofocus.params.fineHalfRangeUm`.
+New mapping defaults to `surfaceCorrection = disabled/default_disabled`; an explicit refusal remains `disabled/user_declined`. Missing correction is made explicit when a new proposal is stored, before hashing. Only explicitly enabled planes use the cross-run reference checks below. `localAutofocusHalfRangeUm` defaults to 40 um when omitted by planner helpers. Corrected mapping stores it on `surfaceCorrection.localAutofocusHalfRangeUm`; disabled mapping stores it on `domain.raman.autofocus.params.localAutofocusHalfRangeUm`. Once present in a mapping ProcedureSpec it is the approved local autofocus half-range and must not be inferred from `domain.raman.autofocus.params.fineHalfRangeUm`.
 
 preflight、simulation 和 live runtime 重新验证：
 
