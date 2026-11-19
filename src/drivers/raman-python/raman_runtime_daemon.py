@@ -97,6 +97,11 @@ _AUTOFOCUS_STAGE_TIMEOUT_DEFAULT_MS = 60000
 _AUTOFOCUS_STAGE_TIMEOUT_MIN_MS = 60000
 _AUTOFOCUS_FRAME_TIMEOUT_DEFAULT_MS = 30000
 _AUTOFOCUS_FRAME_TIMEOUT_MIN_MS = 30000
+_POSITION_FEEDBACK_FAILURE_REASONS = {
+    "StagePositionReadTimeoutError": "read_timeout",
+    "StageTargetMismatchError": "target_mismatch",
+    "StageCaptureDriftError": "capture_displacement",
+}
 
 
 def _stage_move_commands(stage: Any | None) -> list[dict[str, Any]]:
@@ -544,10 +549,14 @@ def _handle_stage_move(session: HardwareSession, request: dict, payload: dict) -
         })
         _trace("stage_move_error", error_payload)
         session.disable_stage_axes()
+        position_failure_reason = _POSITION_FEEDBACK_FAILURE_REASONS.get(type(exc).__name__)
+        if position_failure_reason:
+            error_payload["positionFailureReason"] = position_failure_reason
         return _fail(
-            "stage_move_failed",
+            "stage_position_feedback" if position_failure_reason else "stage_move_failed",
             str(exc),
             retry_safe=True,
+            needs_operator=not bool(position_failure_reason),
             safe_to_resume=True,
             payload=error_payload,
         )
@@ -736,6 +745,18 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
         "stageMoveCommands": _stage_move_commands(xyz_stage),
         "stageSettleDiagnostics": _stage_settle_diagnostics(xyz_stage),
     }
+    # The scanner records the rejected sample before unwinding. Preserve its
+    # typed cause so the kernel can remeasure the XY point without parsing text.
+    position_failure_reason = None
+    position_samples = response_payload["confidenceDiagnostics"].get("positionSamples", [])
+    if str(result.status.value) == "stage_error" and position_samples:
+        rejected = position_samples[-1]
+        if rejected.get("status") == "rejected":
+            response_payload["exceptionType"] = rejected.get("exceptionType")
+            position_failure_reason = _POSITION_FEEDBACK_FAILURE_REASONS.get(rejected.get("exceptionType"))
+    if position_failure_reason:
+        response_payload["positionFailureReason"] = position_failure_reason
+        response_payload["recommendation"] = "retry"
     if result.coarse is not None:
         response_payload["scanPoints"] = [
             {
@@ -762,10 +783,10 @@ def _handle_autofocus(session: HardwareSession, request: dict, payload: dict) ->
     if str(result.status.value) == "stage_error":
         _trace("autofocus_stage_error", response_payload)
     return _fail(
-        f"autofocus_{result.status.value}",
+        "autofocus_position_feedback" if position_failure_reason else f"autofocus_{result.status.value}",
         result.message or str(result.status.value),
         retry_safe=str(result.status.value) != "out_of_range",
-        needs_operator=str(result.status.value) != "low_confidence",
+        needs_operator=not position_failure_reason and str(result.status.value) != "low_confidence",
         safe_to_resume=str(result.status.value) != "out_of_range",
         payload=response_payload,
     )

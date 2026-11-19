@@ -127,9 +127,15 @@ mapping 使用 point-level attempt history：
 2. policy 允许时的 immediate retry
 3. 主扫描结束后的 final retry queue
 
-当前可重试分类只有 timeout 和 low focus confidence。最终失败可按 `stopOnError` 立即结束，或记录失败点继续；连续失败达到 `maxConsecutiveFailures` 时 run failed。
+当前可重试分类为 timeout、position feedback 和 low focus confidence。`autofocus_position_feedback` / `stage_position_feedback` 且 `retrySafe = true` 归为 `execution / position_feedback`：读数 10 秒未稳定、聚焦重新读取距目标超过 10 µm、采图前后差值超过 5 µm 时，重做该 XY 点的整轮聚焦，复用其原窗口与现有 immediate/final 次数，不在 Python 内增加 Z 样本重试。新默认 execution reasons 包含 `position_feedback`；既有只列出 `timeout` 的冻结策略也沿用其恢复次数，显式 0 次仍禁止重试。超出扫描边界容差与一般 SDK 错误不会因此获得重试。最终失败可按 `stopOnError` 立即结束，或记录失败点继续；连续失败达到 `maxConsecutiveFailures` 时 run failed。
 
 已完成点、失败点和每次 attempt 都写入状态/事件，成功 retry 不覆盖先前失败证据。
+
+重试额度按每点的失败阶段独立计算：`stage_*` / `move_timeout` 属于 `move`，`autofocus_*` / `low_focus_confidence` 属于 `autofocus`，其余既有可重试错误共用 `other` 额度。每组各自应用冻结策略的 `maxImmediateRetriesPerPoint` 和 `maxFinalRetriesPerPoint`，切换错误类型或阶段不会刷新已经使用的次数。聚焦中的 Z 移动、反馈和质量失败均使用同一聚焦额度，不按 execution/quality 另分。结束后补测阶段只使用 final 额度，不重新开放 immediate 额度。
+
+例如立即重试上限为 1、final 为 0：移动失败 → 移动重试成功但聚焦失败 → 仍可再重做该点整轮聚焦；若这次移动再次失败，移动额度已耗尽，不能借用聚焦额度无限重试。实际仍按整个 XY 点重新执行，不把 Python 内的补发次数计入 kernel 的整点重测。
+
+每次准许重试时，先在失败记录中保存 `pointAttempts[].scheduledRetry = { stage, phase }`，再执行或排队，次数从持久化记录统计。`attemptIndex` 是整点尝试的全局递增编号，不再充当某阶段的重试计数。暂停恢复沿用原额度、原窗口、下一 attempt 编号，并恢复此前排队的 final retries。旧快照没有该字段时，根据其失败记录、旧全点编号与冻结策略恢复原先已准许的重试，不能从零开始计数。
 
 固定范围聚焦内部执行 10 点扫描、必要时一次 5 点细化及最终质量验收；验收不通过时，runtime 在采谱前返回可重试的 `autofocus_low_confidence`。kernel 复用上述 immediate/final retry 策略，不与 Python 内部整点重扫叠加。立即重测一次、无结束后补测对应 `maxImmediateRetriesPerPoint = 1`、`maxFinalRetriesPerPoint = 0`；未声明策略时的默认值仍为立即一次加结束后一次，显式冻结策略优先。
 

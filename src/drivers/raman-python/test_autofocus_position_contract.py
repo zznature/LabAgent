@@ -5,9 +5,9 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from stage.exceptions import StageTimeoutError
+from stage.exceptions import StagePositionReadTimeoutError, StageTimeoutError
 from stage.mc_newton_xyz_stage import ChannelSwitch, MCNewtonXYZStageController, MFMCNewtonStatus
 from stage.test_mc_newton_xyz_stage import FakeClock, FakeNewtonSdk
 from autofocus.test_range_scanner import FakeFrames, MeanStrategy
@@ -117,6 +117,55 @@ class AutofocusPositionContractTest(unittest.TestCase):
                 with self.assertRaises(StageTimeoutError):
                     stage.move_absolute_and_wait_um(x_um=100, y_um=200, z_um=2300, timeout_ms=500)
                 self.assertEqual(sdk.positions[3], 0)
+
+    def test_three_position_failures_request_point_retry_and_preserve_evidence(self):
+        for reason, readings, exception_type in (
+            ("read_timeout", [StagePositionReadTimeoutError("Z feedback did not stabilize within 10000 ms")],
+             "StagePositionReadTimeoutError"),
+            ("target_mismatch", [89], "StageTargetMismatchError"),
+            ("capture_displacement", [100, 94.9], "StageCaptureDriftError"),
+        ):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as directory:
+                stage = MCNewtonXYZStageController("COM-FAKE", channel_switch_wait_ms=0, position_read_interval_ms=0)
+                stage._sdk, stage._connected = FakeXYZSdk(), True
+                frames, strategy = FakeFrames(), MeanStrategy()
+                session = SimpleNamespace(stage=lambda config: stage, frame=lambda config, timeout: frames,
+                                          current_point_dir=lambda: Path(directory), disable_stage_axes=stage.disable_all_axes)
+                with patch.object(daemon._ZOnlyStageAdapter, "get_position_um", side_effect=readings), \
+                     patch("autofocus.controller.MetricStrategy", return_value=strategy), \
+                     patch.object(strategy, "score", wraps=strategy.score) as score, patch.object(daemon, "_trace"):
+                    response = daemon._handle_autofocus(session, {"stage": {}, "frameProvider": {}}, {
+                        "timeoutMs": 30000, "roi": {"x": 0, "y": 0, "width": 8, "height": 8},
+                        "params": {"zStartUm": 0, "zEndUm": 100, "settleMs": 0},
+                    })
+                self.assertEqual(response["errorCode"], "autofocus_position_feedback")
+                self.assertTrue(response["retrySafe"])
+                self.assertTrue(response["safeToResume"])
+                self.assertFalse(response["needsOperator"])
+                payload = response["payload"]
+                self.assertEqual(payload["positionFailureReason"], reason)
+                self.assertEqual(payload["exceptionType"], exception_type)
+                self.assertEqual(payload["recommendation"], "retry")
+                self.assertEqual(len(payload["confidenceDiagnostics"]["positionSamples"]), 1)
+                score.assert_not_called()
+                self.assertEqual(frames.discarded, [])
+                saved = json.loads((Path(directory) / "autofocus_result_0001.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved, payload)
+
+    def test_point_move_read_timeout_is_also_retryable(self):
+        stage = Mock()
+        stage.get_position_um.side_effect = StagePositionReadTimeoutError("Z feedback did not stabilize within 10000 ms")
+        session = Mock()
+        session.stage.return_value = stage
+        with patch.object(daemon, "_trace"):
+            response = daemon._handle_stage_move(session, {"stage": {}}, {
+                "target": {"xUm": 0, "yUm": 0, "zUm": 50}, "timeoutMs": 120000,
+            })
+        self.assertEqual(response["errorCode"], "stage_position_feedback")
+        self.assertTrue(response["retrySafe"])
+        self.assertFalse(response["needsOperator"])
+        self.assertEqual(response["payload"]["positionFailureReason"], "read_timeout")
+        session.begin_point.assert_not_called()
 
     def test_autofocus_artifact_preserves_successful_and_rejected_position_evidence(self):
         for bad_position in (False, True):

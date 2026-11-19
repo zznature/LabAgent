@@ -6,7 +6,7 @@ import numpy as np
 from autofocus.models import FixedRangeAutofocusParams, Frame, ROI
 from autofocus.range_scanner import FixedRangeScanner
 from autofocus.exceptions import OutOfRangeError
-from stage.exceptions import StageError
+from stage.exceptions import StageCaptureDriftError, StageError, StageTargetMismatchError
 
 
 class FakeStage:
@@ -61,7 +61,7 @@ class RangeScannerTest(unittest.TestCase):
         self.assertEqual(scanner.position_samples[0]["beforeCapture"]["zUm"], 2346.009)
 
     def test_position_changes_during_capture_do_not_produce_a_scored_point(self) -> None:
-        for after in (6.0, 12.0, float("nan"), float("inf")):
+        for after in (10.001, 12.0, float("nan"), float("inf")):
             with self.subTest(after=after):
                 stage = FakeStage()
                 stage.get_position_um = Mock(side_effect=[5.0, after])
@@ -76,6 +76,55 @@ class RangeScannerTest(unittest.TestCase):
                 self.assertEqual(frames.discarded, [])
                 self.assertEqual(scanner.position_samples[0]["status"], "rejected")
                 self.assertEqual(scanner.position_samples[0]["frames"][1]["path"], "frame-2.tif")
+
+    def test_readback_accepts_ten_microns_and_retains_motion_tolerance(self) -> None:
+        for offset in (-10, -5.087, 5.062, 10):
+            with self.subTest(offset=offset):
+                stage = FakeStage()
+                stage.get_position_um = Mock(return_value=50 + offset)
+                stage.set_target_tolerance_um = Mock()
+                scanner = FixedRangeScanner(stage, FakeFrames(), MeanStrategy(), FixedRangeAutofocusParams(
+                    0, 100, settle_ms=0, final_approach_offset_um=0,
+                ))
+                point = scanner.sample(50, ROI(0, 0, 8, 8))
+                self.assertEqual(point.actual_z_um, 50 + offset)
+                stage.set_target_tolerance_um.assert_called_with(5.0)
+                self.assertEqual(scanner.move_to_z(50), 50 + offset)
+                self.assertEqual(scanner.position_samples[-1]["readbackTargetToleranceUm"], 10)
+
+    def test_readback_beyond_ten_microns_rejects_before_scoring(self) -> None:
+        for offset in (-10.001, 10.001):
+            for phase in ("beforeCapture", "afterCapture", "afterMove"):
+                with self.subTest(offset=offset, phase=phase):
+                    stage, frames, strategy = FakeStage(), FakeFrames(), Mock()
+                    stage.get_position_um = Mock(side_effect=[50, 50 + offset] if phase == "afterCapture" else [50 + offset])
+                    scanner = FixedRangeScanner(stage, frames, strategy, FixedRangeAutofocusParams(
+                        0, 100, settle_ms=0, final_approach_offset_um=0,
+                    ))
+                    with self.assertRaises(StageTargetMismatchError):
+                        if phase == "afterMove":
+                            scanner.move_to_z(50)
+                        else:
+                            scanner.sample(50, ROI(0, 0, 8, 8))
+                    strategy.score.assert_not_called()
+                    self.assertEqual(scanner.position_samples[-1]["exceptionType"], "StageTargetMismatchError")
+
+    def test_capture_displacement_has_its_own_five_micron_inclusive_limit(self) -> None:
+        for delta in (-5.001, -5, -2.5, 2.5, 5, 5.001):
+            with self.subTest(delta=delta):
+                stage = FakeStage()
+                stage.position_stability_tolerance_um = 1.0
+                stage.get_position_um = Mock(side_effect=[50, 50 + delta])
+                frames = FakeFrames()
+                scanner = FixedRangeScanner(stage, frames, MeanStrategy(), FixedRangeAutofocusParams(0, 100, settle_ms=0))
+                if abs(delta) > 5:
+                    with self.assertRaises(StageCaptureDriftError):
+                        scanner.sample(50, ROI(0, 0, 8, 8))
+                    self.assertEqual(frames.discarded, [])
+                    self.assertTrue(all(not f["usedForPointScore"] for f in scanner.position_samples[-1]["frames"]))
+                else:
+                    self.assertEqual(scanner.sample(50, ROI(0, 0, 8, 8)).score, 1)
+                self.assertEqual(scanner.position_samples[-1]["captureDisplacementToleranceUm"], 5)
 
     def test_success_keeps_independent_before_and_after_raw_read_evidence(self) -> None:
         stage = FakeStage()

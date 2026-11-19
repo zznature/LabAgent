@@ -49,13 +49,13 @@ export const XYMotionStrategySchema = Type.Object(
 		coarseProfile: Type.Object({
 			units: Type.Literal("mm"),
 			mode: Type.Literal("slide"),
-			voltageV: Type.Integer({ minimum: 0, maximum: 50 }),
+			voltageV: Type.Integer({ minimum: 0, maximum: 60 }),
 			frequencyHz: Type.Integer({ minimum: 1, maximum: 2000 }),
 		}, { additionalProperties: false }),
 		fineProfile: Type.Object({
 			units: Type.Literal("mm"),
 			mode: Type.Literal("step"),
-			voltageV: Type.Integer({ minimum: 0, maximum: 50 }),
+			voltageV: Type.Integer({ minimum: 0, maximum: 60 }),
 			frequencyHz: Type.Integer({ minimum: 1, maximum: 2000 }),
 		}, { additionalProperties: false }),
 		segmentStepUm: Type.Number({ exclusiveMinimum: 0 }),

@@ -27,7 +27,11 @@ afterEach(() => {
 	}
 });
 
-function setup(failures: number, options: { points?: number; immediate?: number; final?: number; unsafe?: boolean } = {}) {
+function setup(failures: number, options: {
+	points?: number; immediate?: number; final?: number; unsafe?: boolean;
+	errorCode?: string; positionFailureReason?: string;
+	moveFailures?: number[];
+} = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "autofocus-retry-"));
 	roots.push(cwd);
 	const pointCount = options.points ?? 1;
@@ -64,6 +68,12 @@ function setup(failures: number, options: { points?: number; immediate?: number;
 			moveAbsoluteAndWait: action => {
 				motionX.push(action.target.xUm!);
 				motionZ.push(action.target.zUm!);
+				if (options.moveFailures?.includes(motionX.length)) {
+					return failedActionResult("Stage did not settle within 40000 ms", {
+						errorCode: "stage_move_failed", message: "Stage did not settle within 40000 ms",
+						retrySafe: true, needsOperator: true, safeToResume: true,
+					}, { exceptionType: "StageTimeoutError" });
+				}
 				return successActionResult("fake move");
 			},
 		},
@@ -71,10 +81,10 @@ function setup(failures: number, options: { points?: number; immediate?: number;
 			actions.push(action);
 			if (actions.length <= failures) {
 				return failedActionResult("Focus did not pass acceptance", {
-					errorCode: options.unsafe ? "autofocus_out_of_range" : "autofocus_low_confidence",
+					errorCode: options.errorCode ?? (options.unsafe ? "autofocus_out_of_range" : "autofocus_low_confidence"),
 					message: "Focus did not pass acceptance", retrySafe: !options.unsafe,
 					needsOperator: Boolean(options.unsafe), safeToResume: !options.unsafe,
-				}, { zBestUm: null, confidence: 0, recommendation: "retry",
+				}, { zBestUm: null, confidence: 0, recommendation: "retry", positionFailureReason: options.positionFailureReason,
 					confidenceDiagnostics: { qualityChecks: [{ passed: false, finalScore: 0.20488,
 						bestMeasuredScore: 16.668, minimumPeakRatio: 0.7 }] } });
 			}
@@ -358,5 +368,169 @@ describe("autofocus quality failure uses the existing mapping retry policy", () 
 		expect(state.status).toBe("completed");
 		expect(state.pointAttempts?.map(a => a.phase)).toEqual(["initial", "final_retry"]);
 		expect(run.actions).toHaveLength(2);
+	});
+
+	it.each(["read_timeout", "target_mismatch", "capture_displacement"])(
+		"remeasures the whole XY point for %s with its original window and legacy retry budget", async positionFailureReason => {
+			const run = setup(1, { points: 2, errorCode: "autofocus_position_feedback", positionFailureReason });
+			run.spec.retryPolicy!.retryableFailureReasons = { execution: ["timeout"], quality: ["low_focus_confidence"] };
+			const initial = startLiveRamanRun(run.cwd, run.spec);
+			const state = await finish(run.cwd, initial.runId);
+			expect(state.status).toBe("completed");
+			expect(run.motionX).toEqual([0, 0, 1]);
+			expect(run.motionZ).toEqual([2300, 2300, 2301]);
+			expect(run.actions.map(a => [a.params?.zStartUm, a.params?.zEndUm])).toEqual([
+				[2280, 2320], [2280, 2320], [2281, 2321],
+			]);
+			expect(run.spectrumCalls()).toBe(2);
+			expect(state.pointAttempts?.map(a => [a.phase, a.status])).toEqual([
+				["initial", "failed"], ["immediate_retry", "succeeded"], ["initial", "succeeded"],
+			]);
+			expect(state.pointAttempts?.[0]).toMatchObject({
+				failureType: "execution", failureReason: "position_feedback", errorCode: "autofocus_position_feedback",
+			});
+			expect(RunStateValidator.Check(state)).toBe(true);
+			const records = readArtifactRecords(run.cwd, initial.runId).filter(r => r.artifact.kind === "raman-autofocus");
+			expect(new Set(records.map(r => r.artifact.path)).size).toBe(3);
+			const failed = JSON.parse(readFileSync(join(runRoot(run.cwd, initial.runId), records[0]!.artifact.path), "utf8"));
+			expect(failed.payload.positionFailureReason).toBe(positionFailureReason);
+		},
+	);
+
+	it.each([
+		{ label: "stops when retries are exhausted", immediate: 1, unsafe: false, errorCode: "autofocus_position_feedback", calls: 2 },
+		{ label: "honors zero retries", immediate: 0, unsafe: false, errorCode: "autofocus_position_feedback", calls: 1 },
+		{ label: "does not retry unsafe position failures", immediate: 1, unsafe: true, errorCode: "autofocus_position_feedback", calls: 1 },
+		{ label: "does not classify generic stage errors as position failures", immediate: 1, unsafe: false, errorCode: "autofocus_stage_error", calls: 1 },
+	])("position remeasurement $label", async ({ immediate, unsafe, errorCode, calls }) => {
+		const run = setup(10, { immediate, unsafe, errorCode, positionFailureReason: "target_mismatch" });
+		const initial = startLiveRamanRun(run.cwd, run.spec);
+		const state = await finish(run.cwd, initial.runId);
+		expect(state.status).toBe("failed");
+		expect(run.actions).toHaveLength(calls);
+		expect(run.spectrumCalls()).toBe(0);
+		expect(state.lastAcceptedFocusZUm).toBeUndefined();
+	});
+
+	it("keeps the failed position's original window for a configured final retry", async () => {
+		const run = setup(1, { points: 2, immediate: 0, final: 1,
+			errorCode: "autofocus_position_feedback", positionFailureReason: "capture_displacement" });
+		const initial = startLiveRamanRun(run.cwd, run.spec);
+		const state = await finish(run.cwd, initial.runId);
+		expect(state.status).toBe("completed");
+		expect(run.motionX).toEqual([0, 1, 0]);
+		expect(run.motionZ).toEqual([2300, 2300, 2300]);
+		expect(run.actions.map(a => [a.params?.zStartUm, a.params?.zEndUm])).toEqual([
+			[2280, 2320], [2280, 2320], [2280, 2320],
+		]);
+		expect(state.pointAttempts?.map(a => a.phase)).toEqual(["initial", "initial", "final_retry"]);
+	});
+
+	it("retries a position read timeout during placement before starting the point's autofocus", async () => {
+		const run = setup(0);
+		const move = run.runtime.stage.moveAbsoluteAndWait;
+		let calls = 0;
+		run.runtime.stage.moveAbsoluteAndWait = action => ++calls === 1 ? failedActionResult("position read timeout", {
+			errorCode: "stage_position_feedback", message: "position read timeout", retrySafe: true,
+			needsOperator: false, safeToResume: true,
+		}, { exceptionType: "StagePositionReadTimeoutError", positionFailureReason: "read_timeout" }) : move(action);
+		const initial = startLiveRamanRun(run.cwd, run.spec);
+		const state = await finish(run.cwd, initial.runId);
+		expect(state.status).toBe("completed");
+		expect(calls).toBe(2);
+		expect(run.actions).toHaveLength(1);
+		expect(state.pointAttempts?.map(a => a.phase)).toEqual(["initial", "immediate_retry"]);
+		expect(run.spectrumCalls()).toBe(1);
+	});
+
+	it.each([
+		{ label: "movement failure then focus failure", moveFailures: [1], focusFailures: 1, immediate: 1, final: 0,
+			status: "completed", moves: 3, focuses: 2, stages: ["move", "autofocus"] },
+		{ label: "focus failure then movement failure", moveFailures: [2], focusFailures: 1, immediate: 1, final: 0,
+			status: "completed", moves: 3, focuses: 2, stages: ["autofocus", "move"] },
+		{ label: "movement quota stays spent after a focus failure", moveFailures: [1, 3], focusFailures: 1, immediate: 1, final: 0,
+			status: "failed", moves: 3, focuses: 1, stages: ["move", "autofocus"] },
+		{ label: "focus quota stays bounded after a movement failure", moveFailures: [1], focusFailures: 2, immediate: 1, final: 0,
+			status: "failed", moves: 3, focuses: 2, stages: ["move", "autofocus"] },
+		{ label: "unused focus quota cannot extend repeated movement failures", moveFailures: [1, 2], focusFailures: 0, immediate: 1, final: 0,
+			status: "failed", moves: 2, focuses: 0, stages: ["move"] },
+		{ label: "explicit zero disables movement retries too", moveFailures: [1], focusFailures: 1, immediate: 0, final: 0,
+			status: "failed", moves: 1, focuses: 0, stages: [] },
+		{ label: "configured final retries are independent too", moveFailures: [1], focusFailures: 1, immediate: 0, final: 1,
+			status: "completed", moves: 3, focuses: 2, stages: ["move", "autofocus"] },
+		{ label: "final movement quota cannot reset after focus failure", moveFailures: [1, 3], focusFailures: 1, immediate: 0, final: 1,
+			status: "failed", moves: 3, focuses: 1, stages: ["move", "autofocus"] },
+		{ label: "configured two retries apply to each stage", moveFailures: [1, 2], focusFailures: 2, immediate: 2, final: 0,
+			status: "completed", moves: 5, focuses: 3, stages: ["move", "move", "autofocus", "autofocus"] },
+	])("keeps separate budgets: $label", async options => {
+		const run = setup(options.focusFailures, options);
+		const initial = startLiveRamanRun(run.cwd, run.spec);
+		const state = await finish(run.cwd, initial.runId);
+		expect(state.status).toBe(options.status);
+		expect(run.motionX).toHaveLength(options.moves);
+		expect(run.actions).toHaveLength(options.focuses);
+		expect(run.spectrumCalls()).toBe(options.status === "completed" ? 1 : 0);
+		expect(state.pointAttempts?.flatMap(a => a.scheduledRetry ? [a.scheduledRetry.stage] : [])).toEqual(options.stages);
+		expect(state.pointAttempts?.map(a => a.attemptIndex)).toEqual(Array.from({ length: options.moves }, (_, i) => i));
+		expect(state.pointAttempts?.filter(a => a.finalForPoint)).toHaveLength(1);
+		expect(run.actions.every(a => a.params?.zStartUm === 2280 && a.params?.zEndUm === 2320)).toBe(true);
+		expect(RunStateValidator.Check(state)).toBe(true);
+	});
+
+	it("counts autofocus feedback and quality failures against the same autofocus budget", async () => {
+		const options = { errorCode: "autofocus_position_feedback" };
+		const run = setup(2, options);
+		const focus = run.runtime.autofocus.runSingle;
+		run.runtime.autofocus.runSingle = action => {
+			if (run.actions.length === 1) options.errorCode = "autofocus_low_confidence";
+			return focus(action);
+		};
+		const initial = startLiveRamanRun(run.cwd, run.spec);
+		const state = await finish(run.cwd, initial.runId);
+		expect(state.status).toBe("failed");
+		expect(run.actions).toHaveLength(2);
+		expect(state.pointAttempts?.map(a => a.errorCode)).toEqual(["autofocus_position_feedback", "autofocus_low_confidence"]);
+	});
+
+	it.each([false, true])("preserves spent budgets and unique attempt IDs across pause/resume (legacy=%s)", async legacy => {
+		const run = setup(1, { moveFailures: [1, 3] });
+		saveFrozenProcedureSpec(run.cwd, run.spec);
+		const move = run.runtime.stage.moveAbsoluteAndWait;
+		let calls = 0;
+		run.runtime.stage.moveAbsoluteAndWait = action => ++calls === 3 ? pausedActionResult("pause before retry") : move(action);
+		const initial = startLiveRamanRun(run.cwd, run.spec);
+		const paused = await finish(run.cwd, initial.runId);
+		expect(paused.status).toBe("paused");
+		expect(paused.pointAttempts?.map(a => a.scheduledRetry?.stage)).toEqual(["move", "autofocus"]);
+		if (legacy) {
+			// Legacy snapshots can contain the first scheduled movement retry only;
+			// the second record already needs the new independent-budget semantics.
+			delete paused.pointAttempts![0]!.scheduledRetry;
+			writeRunStateSnapshot(run.cwd, paused);
+		}
+		resumeRun(run.cwd, initial.runId);
+		const state = await finish(run.cwd, initial.runId);
+		expect(state.status).toBe("failed");
+		expect(calls).toBe(4);
+		expect(state.pointAttempts?.map(a => a.attemptIndex)).toEqual([0, 1, 2]);
+		expect(new Set(state.pointAttempts?.map(a => a.attemptId)).size).toBe(3);
+		expect(state.pointAttempts?.at(-1)?.errorCode).toBe("stage_move_failed");
+		expect(run.spectrumCalls()).toBe(0);
+	});
+
+	it("restores an earlier point's queued final retry after a later point pauses", async () => {
+		const run = setup(1, { points: 2, immediate: 0, final: 1 });
+		saveFrozenProcedureSpec(run.cwd, run.spec);
+		const move = run.runtime.stage.moveAbsoluteAndWait;
+		let calls = 0;
+		run.runtime.stage.moveAbsoluteAndWait = action => ++calls === 2 ? pausedActionResult("pause next point") : move(action);
+		const initial = startLiveRamanRun(run.cwd, run.spec);
+		expect((await finish(run.cwd, initial.runId)).status).toBe("paused");
+		resumeRun(run.cwd, initial.runId);
+		const state = await finish(run.cwd, initial.runId);
+		expect(state.status).toBe("completed");
+		expect(state.progress.completedUnits).toBe(2);
+		expect(run.motionX).toEqual([0, 1, 0]);
+		expect(state.pointAttempts?.map(a => a.phase)).toEqual(["initial", "initial", "final_retry"]);
 	});
 });

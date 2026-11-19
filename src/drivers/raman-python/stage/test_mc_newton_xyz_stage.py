@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from stage.exceptions import StageCommandError, StageTimeoutError
+from stage.exceptions import StageCommandError, StagePositionReadTimeoutError, StageTimeoutError
 from stage.mc_newton_xyz_stage import MCNewtonXYZStageController, MFMCNewtonStatus
 
 
@@ -30,6 +30,7 @@ class FakeNewtonSdk:
     ) -> None:
         self.voltage_v = 50
         self.frequency_hz = 1000
+        self.mode = "step"
         self.z_um = 0.0
         self.remaining_pulses = 0
         self.move_commands: list[dict[str, object]] = []
@@ -50,6 +51,11 @@ class FakeNewtonSdk:
         return MFMCNewtonStatus.NoError
 
     def move_step(self) -> MFMCNewtonStatus:
+        self.mode = "step"
+        return MFMCNewtonStatus.NoError
+
+    def move_slid(self) -> MFMCNewtonStatus:
+        self.mode = "slide"
         return MFMCNewtonStatus.NoError
 
     def set_volt(self, voltage_v: int) -> MFMCNewtonStatus:
@@ -72,6 +78,7 @@ class FakeNewtonSdk:
             "targetUm": target_um,
             "voltageV": self.voltage_v,
             "frequencyHz": self.frequency_hz,
+            "mode": self.mode,
             "undertravel": undertravel,
         })
         if undertravel and self.target_set_error_on_undertravel:
@@ -247,6 +254,88 @@ class MCNewtonXYZStageControllerTest(unittest.TestCase):
             controller.move_absolute_and_wait_um(z_um=100.0, timeout_ms=1000)
         self.assertEqual(len(sdk.move_commands), 1)
 
+    def test_xy_rescues_five_micron_boundary_and_recorded_small_residuals(self) -> None:
+        for axis in ("x", "y"):
+            for mode, frequency, rescue_frequency in (("slide", 750, 1000), ("step", 1000, 800)):
+                for residual in (5.0, 5.001, 5.423, 6.771, 9.490, 10.0):
+                    for sign in (-1, 1):
+                        with self.subTest(axis=axis, mode=mode, residual=residual, sign=sign):
+                            sdk = FakeNewtonSdk(undertravel_profile=(50, frequency), residual_um=sign * residual)
+                            controller = self.make_controller(sdk)
+                            controller.set_axis_motion_profile(axis, mode=mode, frequency_hz=frequency)
+                            controller.move_absolute_and_wait_um(**{f"{axis}_um": 100.0}, timeout_ms=5000)
+                            self.assertEqual([c["targetUm"] for c in sdk.move_commands], [100.0, 100.0])
+                            self.assertEqual(
+                                [(c["mode"], c["voltageV"], c["frequencyHz"]) for c in sdk.move_commands],
+                                [(mode, 50, frequency), ("step", 50, rescue_frequency)],
+                            )
+                            adaptive = controller.last_settle_diagnostics["xyAdaptiveMotion"]
+                            self.assertEqual(adaptive["status"], "rescued")
+                            self.assertEqual(len(adaptive["rescueAttempts"]), 1)
+                            self.assertEqual(adaptive["rescueAttempts"][0]["axis"], axis)
+
+    def test_xy_rescue_boundary_follows_configured_arrival_tolerance(self) -> None:
+        for axis in ("x", "y"):
+            for tolerance in (5.0, 8.0):
+                for residual in (tolerance - 0.001, tolerance):
+                    with self.subTest(axis=axis, tolerance=tolerance, residual=residual):
+                        sdk = FakeNewtonSdk(undertravel_profile=(50, 1000), residual_um=residual)
+                        controller = self.make_controller(sdk)
+                        controller.set_axis_motion_profile(axis, mode="step", frequency_hz=1000)
+                        controller.set_axis_target_tolerance_um(axis, tolerance)
+                        controller.move_absolute_and_wait_um(**{f"{axis}_um": 100.0}, timeout_ms=5000)
+                        self.assertEqual(len(sdk.move_commands), 1 if residual < tolerance else 2)
+
+    def test_xy_accepts_60v_and_preserves_voltage_during_rescue(self) -> None:
+        for axis in ("x", "y"):
+            for mode, frequency, rescue_frequency in (("slide", 750, 1000), ("step", 1000, 800)):
+                with self.subTest(axis=axis, mode=mode):
+                    sdk = FakeNewtonSdk(undertravel_profile=(60, frequency))
+                    controller = self.make_controller(sdk)
+                    controller.set_axis_motion_profile(axis, mode=mode, voltage_v=60, frequency_hz=frequency)
+                    controller.move_absolute_and_wait_um(**{f"{axis}_um": 100.0}, timeout_ms=5000)
+                    self.assertEqual(
+                        [(c["voltageV"], c["frequencyHz"]) for c in sdk.move_commands],
+                        [(60, frequency), (60, rescue_frequency)],
+                    )
+
+    def test_xy_rejects_voltage_above_60_before_sending_commands(self) -> None:
+        sdk = FakeNewtonSdk()
+        controller = self.make_controller(sdk)
+        for voltage in (-1, 61):
+            for axis in ("x", "y"):
+                with self.subTest(voltage=voltage, axis=axis):
+                    with self.assertRaisesRegex(ValueError, "60 V"):
+                        controller.set_axis_motion_profile(axis, voltage_v=voltage)
+            with self.assertRaisesRegex(ValueError, "60 V"):
+                controller.apply_fast_move_profile(voltage_v=voltage)
+        self.assertEqual(sdk.profile_commands, [])
+        self.assertEqual(sdk.move_commands, [])
+
+    def test_fast_xy_profile_accepts_60v_while_z_keeps_50v_limit(self) -> None:
+        sdk = FakeNewtonSdk()
+        controller = self.make_controller(sdk)
+        controller.apply_fast_move_profile(voltage_v=60)
+        controller.move_absolute_and_wait_um(x_um=100, y_um=100, z_um=100, timeout_ms=5000)
+        self.assertEqual([c["voltageV"] for c in sdk.move_commands], [60, 60, 50])
+        with self.assertRaisesRegex(ValueError, "50 V"):
+            controller.set_z_motion_profile(voltage_v=51)
+        with self.assertRaisesRegex(ValueError, "50 V"):
+            controller.apply_fast_move_profile(z_voltage_v=51)
+
+    def test_small_xy_residual_still_times_out_after_two_rescues(self) -> None:
+        for axis in ("x", "y"):
+            with self.subTest(axis=axis):
+                sdk = FakeNewtonSdk(residual_um=6.771, never_recovers=True)
+                controller = self.make_controller(sdk)
+                controller.set_axis_motion_profile(axis, mode="step", frequency_hz=1000)
+                with self.assertRaises(StageTimeoutError):
+                    controller.move_absolute_and_wait_um(**{f"{axis}_um": 100.0}, timeout_ms=1000)
+                self.assertEqual([c["targetUm"] for c in sdk.move_commands], [100.0] * 3)
+                self.assertEqual([c["frequencyHz"] for c in sdk.move_commands], [1000, 800, 600])
+                self.assertEqual(len(controller.last_settle_diagnostics["xyAdaptiveMotion"]["rescueAttempts"]), 2)
+                self.assertEqual(controller.last_settle_diagnostics["status"], "timeout")
+
     def test_read_uses_latest_stable_window_instead_of_an_earlier_pair(self) -> None:
         controller = self.make_controller(FakeNewtonSdk())
         controller._position_read_samples = 5
@@ -266,6 +355,55 @@ class MCNewtonXYZStageControllerTest(unittest.TestCase):
                 controller.get_axis_position_um("z")
         self.assertEqual(controller.last_position_read_diagnostics["z"]["status"], "timeout")
 
+    def test_default_read_deadline_allows_feedback_to_stabilize_after_three_seconds(self) -> None:
+        controller = self.make_controller(FakeNewtonSdk())
+        controller._position_read_samples = 5
+        controller._position_read_interval_ms = 100
+        with patch.object(controller, "_read_axis_position_once_um",
+                          side_effect=lambda axis: 100 if self.clock.value >= 5 else 100 + self.clock.value * 10):
+            self.assertEqual(controller.get_axis_position_um("z"), 100)
+        evidence = controller.last_position_read_diagnostics["z"]
+        self.assertGreater(evidence["elapsedMs"], 5000)
+        self.assertLess(evidence["elapsedMs"], 10000)
+        self.assertEqual(evidence["timeoutMs"], 10000)
+        self.assertEqual(evidence["stabilityToleranceUm"], 1.0)
+
+    def test_latest_three_reads_accept_one_micron_range_on_each_axis(self) -> None:
+        for axis in ("x", "y", "z"):
+            with self.subTest(axis=axis):
+                controller = self.make_controller(FakeNewtonSdk())
+                controller._position_read_samples = 5
+                values = iter([80, 90, 95, 100, 100.5, 101])
+                with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda key: next(values)):
+                    self.assertEqual(controller.get_axis_position_um(axis), 100.5)
+                evidence = controller.last_position_read_diagnostics[axis]
+                self.assertTrue(evidence["stable"])
+                self.assertEqual(evidence["readsUm"][-3:], [100, 100.5, 101])
+                self.assertEqual(controller.position_stability_tolerance_um, 1.0)
+
+    def test_latest_three_reads_beyond_one_micron_keep_waiting_until_timeout(self) -> None:
+        controller = self.make_controller(FakeNewtonSdk())
+        controller._position_read_samples = 3
+        controller._position_read_timeout_ms = 10
+        values = iter([100, 100.5, 101.001] * 20)
+        with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda axis: next(values)):
+            with self.assertRaises(StagePositionReadTimeoutError):
+                controller.get_axis_position_um("z")
+        evidence = controller.last_position_read_diagnostics["z"]
+        self.assertFalse(evidence["stable"])
+        self.assertEqual(evidence["status"], "timeout")
+
+    def test_default_unstable_read_fails_at_ten_seconds_with_typed_cause(self) -> None:
+        controller = self.make_controller(FakeNewtonSdk())
+        controller._position_read_samples = 5
+        controller._position_read_interval_ms = 100
+        with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda axis: self.clock.value * 10):
+            with self.assertRaisesRegex(StagePositionReadTimeoutError, "10000 ms"):
+                controller.get_axis_position_um("z")
+        evidence = controller.last_position_read_diagnostics["z"]
+        self.assertGreaterEqual(evidence["elapsedMs"], 10000)
+        self.assertLess(evidence["elapsedMs"], 10200)
+
     def test_nonfinite_feedback_is_rejected_and_recorded(self) -> None:
         for value in (float("nan"), float("inf")):
             controller = self.make_controller(FakeNewtonSdk())
@@ -283,16 +421,19 @@ class MCNewtonXYZStageControllerTest(unittest.TestCase):
         self.assertEqual(controller.last_position_read_diagnostics["z"]["status"], "timeout")
 
     def test_settle_rejects_an_unstable_window_even_when_its_median_matches_target(self) -> None:
-        controller = self.make_controller(FakeNewtonSdk())
-        controller._position_read_samples = 3
-        controller._last_targets_um = {"z": 100}
-        values = iter([90.0, 100.0, 110.0] * 200)
-        with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda axis: next(values)):
-            with self.assertRaises(StageTimeoutError):
-                controller.wait_settled(500, axes={"z"})
-        self.assertEqual(controller.last_settle_diagnostics["status"], "timeout")
-        self.assertTrue(all(not sample["positionReadStable"]["z"]
-                            for sample in controller.last_settle_diagnostics["samples"]))
+        for axis in ("x", "y", "z"):
+            with self.subTest(axis=axis):
+                controller = self.make_controller(FakeNewtonSdk())
+                controller._position_read_samples = 3
+                controller._last_targets_um = {axis: 100}
+                values = iter([90.0, 100.0, 110.0] * 200)
+                with patch.object(controller, "_read_axis_position_once_um", side_effect=lambda key: next(values)):
+                    with self.assertRaises(StageTimeoutError):
+                        controller.wait_settled(500, axes={axis})
+                self.assertEqual(controller.last_settle_diagnostics["status"], "timeout")
+                self.assertTrue(all(not sample["positionReadStable"][axis]
+                                    for sample in controller.last_settle_diagnostics["samples"]))
+                self.assertEqual(controller.last_move_commands, [])
 
 
 if __name__ == "__main__":

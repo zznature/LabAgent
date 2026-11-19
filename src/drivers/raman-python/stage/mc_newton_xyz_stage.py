@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from stage.exceptions import StageCommandError, StageConnectionError, StageTimeoutError
+from stage.exceptions import StageCommandError, StageConnectionError, StagePositionReadTimeoutError, StageTimeoutError
 from stage.models import StagePosition
 
 
@@ -25,6 +25,7 @@ _Z_ADAPTIVE_STALL_MIN_ELAPSED_MS = 1500.0
 _Z_ADAPTIVE_GLOBAL_WINDOW = 10
 _Z_ADAPTIVE_GLOBAL_PROMOTE_SUCCESSES = 2
 _XY_ADAPTIVE_MAX_RESCUES_PER_MOVE = 2
+_XY_MAX_VOLTAGE_V = 60
 _XY_ADAPTIVE_ZERO_PULSE_SAMPLES = 2
 _XY_ADAPTIVE_STALL_SAMPLES = 4
 _XY_ADAPTIVE_STALL_MIN_ELAPSED_MS = 1500.0
@@ -72,7 +73,8 @@ class MCNewtonXYZStageController:
         position_read_interval_ms: float = 80.0,
         position_read_samples: int = 5,
         position_read_discard_initial: int = 1,
-        position_read_timeout_ms: float = 3000.0,
+        position_read_timeout_ms: float = 10000.0,
+        position_read_stability_tolerance_um: float = 1.0,
         disable_on_disconnect: bool = True,
         exclusive_channel: bool = True,
         x_target_tolerance_um: float = 5.0,
@@ -123,6 +125,9 @@ class MCNewtonXYZStageController:
         self._position_read_timeout_ms = float(position_read_timeout_ms)
         if not math.isfinite(self._position_read_timeout_ms) or self._position_read_timeout_ms <= 0:
             raise ValueError("position_read_timeout_ms must be finite and positive.")
+        self._position_read_stability_tolerance_um = float(position_read_stability_tolerance_um)
+        if not math.isfinite(self._position_read_stability_tolerance_um) or self._position_read_stability_tolerance_um <= 0:
+            raise ValueError("position_read_stability_tolerance_um must be finite and positive.")
         self._disable_on_disconnect = bool(disable_on_disconnect)
         self._exclusive_channel = bool(exclusive_channel)
         self._target_tolerances_um = {
@@ -234,8 +239,8 @@ class MCNewtonXYZStageController:
         z_frequency_hz: int = 1000,
         z_mode: str = "step",
     ) -> None:
-        if voltage_v > 50:
-            raise ValueError("fast move profile voltage_v must not exceed 50 V.")
+        if voltage_v < 0 or voltage_v > _XY_MAX_VOLTAGE_V:
+            raise ValueError(f"fast move profile voltage_v must be between 0 and {_XY_MAX_VOLTAGE_V} V.")
         if frequency_hz > 1000:
             raise ValueError("fast move profile frequency_hz must not exceed 1000 Hz.")
         if z_voltage_v > 50:
@@ -292,8 +297,8 @@ class MCNewtonXYZStageController:
         if normalized_mode not in {"slide", "step"}:
             raise ValueError("XY motion profile mode must be 'slide' or 'step'.")
         voltage = int(voltage_v)
-        if voltage < 0 or voltage > 50:
-            raise ValueError("XY motion profile voltage_v must be between 0 and 50 V.")
+        if voltage < 0 or voltage > _XY_MAX_VOLTAGE_V:
+            raise ValueError(f"XY motion profile voltage_v must be between 0 and {_XY_MAX_VOLTAGE_V} V.")
         frequency = int(frequency_hz)
         if frequency <= 0 or frequency > 2000:
             raise ValueError("XY motion profile frequency_hz must be between 1 and 2000 Hz.")
@@ -330,7 +335,7 @@ class MCNewtonXYZStageController:
 
     @property
     def position_stability_tolerance_um(self) -> float:
-        return self._stability_tolerance_um
+        return self._position_read_stability_tolerance_um
 
     def get_axis_position_um(
         self, axis: str, *, preserve_enabled_channels: bool = False, require_stable: bool = True,
@@ -692,7 +697,8 @@ class MCNewtonXYZStageController:
         started = time.monotonic()
         timestamps: list[float] = []
         window_size = min(3, self._position_read_samples)
-        tolerance = max(self._stability_tolerance_um, 0.001)
+        # Raw-window acceptance is separate from movement convergence/rescue.
+        tolerance = self._position_read_stability_tolerance_um
         diagnostics: dict[str, Any] = {
             "axis": axis, "status": "reading", "stable": False,
             "startedMonotonic": started, "readsUm": reads,
@@ -718,7 +724,7 @@ class MCNewtonXYZStageController:
                     raise StageCommandError(f"Non-finite {axis.upper()} position feedback: {value}.")
                 if elapsed_ms >= self._position_read_timeout_ms:
                     diagnostics["status"] = "timeout"
-                    raise StageTimeoutError(
+                    raise StagePositionReadTimeoutError(
                         f"{axis.upper()} position feedback did not stabilize within "
                         f"{self._position_read_timeout_ms:g} ms (latest reads {reads[-window_size:]})."
                     )
@@ -887,8 +893,8 @@ class MCNewtonXYZStageController:
         if mode == "slide":
             candidates = [
                 (units, "slide", voltage_v, frequency_hz),
-                (units, "step", min(50, voltage_v), 1000),
-                (units, "step", min(50, voltage_v), 800),
+                (units, "step", min(_XY_MAX_VOLTAGE_V, voltage_v), 1000),
+                (units, "step", min(_XY_MAX_VOLTAGE_V, voltage_v), 800),
             ]
         else:
             candidates = [
@@ -966,7 +972,8 @@ class MCNewtonXYZStageController:
         if not all(math.isfinite(value) for value in values) or abs(current_um - previous_um) > 2000.0:
             return None, 0, 0, best_residual_um
         residual_um = abs(current_um - target_um)
-        if residual_um <= max(self._target_tolerances_um.get(axis, 1.0) * 2.0, 8.0):
+        # XY arrival is strictly inside tolerance, so its boundary needs rescue too.
+        if residual_um < self._target_tolerances_um.get(axis, 1.0):
             return None, 0, 0, residual_um
         if abs(target_um) > 50000 or abs(current_um) > 50000:
             return None, 0, 0, best_residual_um

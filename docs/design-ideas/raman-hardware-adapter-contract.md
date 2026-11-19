@@ -124,13 +124,19 @@ MC.Newton XYZ driver 在 Z settle 等待中执行同一套自适应 motion rescu
 
 历史 live mapping 记录显示，成功 autofocus 的保存帧最大间隔约 21.3 秒，保存帧等待超时保持 `frameTimeoutMs = 30000`；失败样本集中在 `stageTimeoutMs = 10000`，Z 轴仍在进入 5 µm 容差或稳定性判定阶段，因此 live runtime 会把 autofocus 单次 stage settle timeout 夹紧到至少 `60000`，最高仍不超过 `120000`。完整 autofocus action timeout 使用 `300000`，覆盖最近 18 帧 autofocus 流程约 180 秒的历史上界并保留恢复余量。
 
+XY 到位要求残差严格小于 `targetToleranceUm`（默认 5 µm）；补发候选从残差大于等于该容差开始，包含恰好 5 µm，消除原先 5—10 µm 不到位也不补发的空档。最新原始读数窗口必须稳定，并满足连续两轮剩余脉冲为零，或等待至少 1500 ms 后残差连续四轮未改善超过 0.5 µm 的既有条件，才会重发同一目标。单次轴移动最多补发两次。粗移的默认梯度为 `slide 50 V / 750 Hz -> step 50 V / 1000 Hz -> step 50 V / 800 Hz`；精移为 `step 50 V / 1000 Hz -> step 50 V / 800 Hz -> step 50 V / 600 Hz`。profile 切换发生在移动等待期间，每次补发后继续读数判断到位；新的粗移/精移阶段重新应用该阶段的配置，XY 不使用 Z 的跨动作全局升档机制。
+
+XY coarse/fine action schema、Python 单轴 profile 与 fast-move XY profile 的电压范围现为 0–60 V，包含 60 V；默认配置仍为 50 V。显式使用 55/60 V 粗移时，切换 step 补发保留已配置的电压，不再回夹到 50 V。此处仅放宽 XY profile 上限，不自动生成 50→55→60 V 的升压策略；Z profile 与 Z 自适应上限仍为 50 V。
+
 ### 5.2 聚焦位置读取与图像绑定
 
 移动到 mapping 点时仍分别等待 X、Y、Z 到位；位置查询 action 仍读取完整 XYZ。固定范围聚焦期间，Z adapter 直接调用 `get_axis_position_um("z")`，不再为每次 Z 读数切换 X/Y 通道。聚焦 action 内不发出 X/Y 移动；这保留了移动阶段的横向到位检查，但不提供外力或机械耦合导致的连续 XY 漂移监测。
 
-MC.Newton 的位置查询默认采集 6 次、丢弃初始 1 次，然后检查最新 3 次的极差是否不超过现有稳定性容差（默认 0.2 µm）。不返回较早的稳定数值对，也不把不稳定序列的中位数当成已稳定的位置；必要时继续采样，默认位置读取期限为 3000 ms，超时明确失败。请求采样数小于 2 时提升到 2。运动等待可以观察尚未稳定的反馈以判断收敛，但只有最新原始窗口稳定且满足原有到位、脉冲结束判据时才完成；不稳定反馈不触发自适应重发。
+MC.Newton 的位置查询默认采集 6 次、丢弃初始 1 次，然后检查最新连续 3 次的极差是否不超过 1 µm（`position_read_stability_tolerance_um`，包含等于门槛）。不返回较早的稳定数值对，也不把不稳定序列的中位数当成已稳定的位置；必要时继续采样，默认位置读取期限为 10000 ms，超时返回 `StagePositionReadTimeoutError`。该期限与原始窗口判据用于共用的 XYZ 读取函数。请求采样数小于 2 时提升到 2。运动等待可以观察尚未稳定的反馈以判断收敛，但只有最新原始窗口稳定且满足原有到位、脉冲结束判据时才完成；不稳定反馈不触发自适应重发。原始窗口的 1 µm 与相邻两轮位置变化及 Z 补发改善量使用的 `stability_tolerance_um`（0.2 µm）分别配置，放宽前者不改变后者。
 
-固定范围 scanner 在预热与计分帧组成的采集批次前后分别读取稳定 Z。两次读数都必须是有限值且位于目标容差内（默认 5 µm），前后变化不得超过稳定性容差（默认 0.2 µm）。校验失败的样本不计算分数、不进入选峰，已采集帧保留。最终接近和回位读数同样校验目标误差；`zBestUm` 与 `finalScore` 必须来自同一个最终验证样本。
+固定范围 scanner 在预热与计分帧组成的采集批次前后分别读取稳定 Z。两次读数都必须是有限值，且与目标的误差不超过 10 µm，采集前后变化不超过 5 µm，等于门槛可以通过。10 µm 是移动完成后重新读取的校验容差，移动等待及补发仍使用 `targetToleranceUm` / `finalToleranceUm`（默认 5 µm）；5 µm 是整批采图前后差值，底层连续 3 次原始读数极差使用 1 µm。校验失败的样本不计算分数、不进入选峰，已采集帧保留。最终接近和回位读数同样使用 10 µm 目标误差校验；`zBestUm` 与 `finalScore` 必须来自同一个最终验证样本。
+
+读数稳定超时、目标读回误差超过 10 µm、采图前后差值超过 5 µm 分别携带 `StagePositionReadTimeoutError`、`StageTargetMismatchError`、`StageCaptureDriftError`。固定范围聚焦将其返回为 `autofocus_position_feedback`，并记录 `positionFailureReason = read_timeout | target_mismatch | capture_displacement`、`recommendation = retry`、`retrySafe = true`、`needsOperator = false`、`safeToResume = true`；移动到 XY 点期间的读数稳定超时返回 `stage_position_feedback`。kernel 按现有次数重做该 XY 点的整轮聚焦，不在 Python 中重测单个 Z 样本。三类异常不覆盖范围检查：超出既有上下边界各 5 µm 容差或非有限读数仍按 5.3 拒绝，SDK 通信错误也不会被归为可重测的位置异常。
 
 成功与失败结果均在 `confidenceDiagnostics.positionSamples` 保留固定范围聚焦每次采样/回位的角色、目标、读数、校验状态；采样条目还包含采图前后 Z、原始读取序列及单调时钟时间戳、帧路径/序号/时间戳。最终验证和低分细化验证也在其中，不能仅凭最后一次 `stageSettleDiagnostics` 推断此前扫描帧的位置。失败样本保留错误信息；整点 retry 策略由 kernel 决定。
 
@@ -141,6 +147,8 @@ MC.Newton 的位置查询默认采集 6 次、丢弃初始 1 次，然后检查�
 | `sampleRole` / `status` | 粗扫、拟合验证、细化、最终验证、接近或回位，以及接受/拒绝状态 |
 | `targetZUm` / `allowedZRangeUm` | 本次目标与原始扫描上下界，单位 µm |
 | `readbackRangeToleranceUm` | 读回位置的上下边界各自允许的误差，固定为 5 µm；目标位置仍使用原始范围 |
+| `targetToleranceUm` / `readbackTargetToleranceUm` | 移动到位容差（默认 5 µm）与后续重新读取的目标误差容差（10 µm） |
+| `captureDisplacementToleranceUm` / `stabilityToleranceUm` | 采集前后差值容差 5 µm；后者保留为旧字段别名，原始连续读数容差见 `rawRead.stabilityToleranceUm` |
 | `beforeCapture.zUm` / `afterCapture.zUm` | 整批采图前后经过稳定性检查的位置，非每帧曝光瞬间的位置 |
 | `beforeCapture.rawRead.readsUm` / `readTimestampsMonotonic` | 逐次 SDK 位置读数（由 mm 转为 µm）及其一一对应的读取时间；`afterCapture.rawRead` 同理 |
 | `score` | 本采样计分帧分数的中位数；只有 1 帧时就是该帧分数 |
@@ -159,7 +167,7 @@ MC.Newton 的位置查询默认采集 6 次、丢弃初始 1 次，然后检查�
 
 ### 5.4 固定范围聚焦质量与整点重测
 
-daemon 对固定范围和 mapping local correction 强制执行 10 点全范围扫描。已有拟合峰验证仍保留，只接受实测优于扫描最高分的拟合候选。回到候选位置复测后，必须同时满足：分数至少 0.75、达到本轮最高实测分数的 70%、现有置信度至少 0.2；非有限分数不能通过。等于门槛可以通过。
+daemon 对固定范围和 mapping local correction 强制执行 10 点全范围扫描。已有拟合峰验证仍保留，只接受实测优于扫描最高分的拟合候选。回到候选位置复测后，必须同时满足：分数至少 0.75、达到本轮最高实测分数的 50%、现有置信度至少 0.2；非有限分数不能通过。等于门槛可以通过。
 
 任一门槛未通过，围绕本轮最高实测位置执行一次 5 点细化，窗口最多 ±8 µm 且限制在原始扫描范围内。最终候选从粗扫、拟合验证、首次复测和细化的全部已测位置中取最高分，不能仅因细化点高于一次退化后的复测就替代更高的旧峰。再次回位复测后执行同样三项门槛，仍不通过则返回 `autofocus_low_confidence`、`recommendation = retry`，`retrySafe = true`、`needsOperator = false`、`safeToResume = true`，不进入采谱。`confidenceDiagnostics.qualityChecks[]` 保存每轮验收的最高实测分数/位置、最终分数/位置、比例、置信度、门槛和失败项。位置证据仍在 `positionSamples[]`。
 
@@ -167,7 +175,11 @@ daemon 对固定范围和 mapping local correction 强制执行 10 点全范围�
 
 整点重测由 kernel 现有 mapping `retryPolicy` 执行，agent 在提案中配置策略。要求“立即重测最多一次、无结束后补测”时使用 `maxImmediateRetriesPerPoint = 1`、`maxFinalRetriesPerPoint = 0`；显式 0 次或其他已批准策略不被 driver 覆盖。低质量失败不更新 accepted focus Z。禁用焦平面的 local mapping 按 5.5 持久化每点原始窗口，立即重测、结束后补测和暂停恢复都复用它；超出边界的错误不可自动重试。独立 operator autofocus 与非 mapping linear run 不会因此获得隐式整点重测。
 
+5.2 的三类位置异常记录为 `execution / position_feedback`，不会误记为低分或普通超时。新默认 execution reasons 包含 `timeout` 和 `position_feedback`；兼容既有仅列出 `timeout` 的策略，位置异常复用其整点恢复次数。重试耗尽后才按既有 `stopOnError` 和连续失败上限处理最终失败；无效样本不会触发采谱，失败焦点不会改变该点窗口或下一点中心。
+
 workspace 首次聚焦记录仍为 `unit-XXXX-autofocus.json`，重测依次保存为 `unit-XXXX-autofocus-attempt-2.json` 等，artifact ID 也独立，使用独占创建避免覆盖。JSON 和 artifact metadata 的 `autofocusAttemptNumber` 表示该点第几次聚焦调用；kernel 的 `pointAttempts[].phase/attemptIndex/artifactIds` 表示 initial、immediate_retry、final_retry 的调度记录，两者通过 artifact ID 关联。不得只读第一个 JSON 就推断最终重测结果。
+
+每点移动与聚焦独立占用重试次数，均应用冻结策略的 immediate/final 上限。聚焦中的 Z 超时、位置反馈和质量失败共同占用聚焦额度，不消耗点位移动额度。已准许的重试阶段及排程写入 `pointAttempts[].scheduledRetry`，暂停恢复沿用，具体计数及旧记录兼容规则见 `kernel-execution-model.md` 6.3。
 
 ### 5.5 禁用焦平面的 mapping 中心继承
 

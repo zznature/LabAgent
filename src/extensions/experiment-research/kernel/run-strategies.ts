@@ -1,5 +1,6 @@
 import type {
 	ExecutionUnit,
+	PointAttemptRecord,
 	RamanAcquisition,
 	RamanEvaluationDecision,
 	RamanObservationMetrics,
@@ -15,6 +16,7 @@ import {
 } from "../planner/evaluate-good-enough.ts";
 import type { LiveRamanUnitOptions } from "../runtime/raman/index.ts";
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "../schemas/index.ts";
+import { readRunStateSnapshot } from "../store/run-store.ts";
 import type { ManagedUnitResult, RunExecutionContext, UnitAttemptContext } from "./run-controller.ts";
 
 type UnitOptionsProvider = (unit: ExecutionUnit) => LiveRamanUnitOptions | undefined;
@@ -36,6 +38,14 @@ interface FinalRetryQueueItem {
 	nextAttemptIndex: number;
 }
 
+type ScheduledPointRetry = NonNullable<PointAttemptRecord["scheduledRetry"]>;
+
+function retryStage(errorCode: string): ScheduledPointRetry["stage"] {
+	if (errorCode.startsWith("autofocus_") || errorCode === "low_focus_confidence") return "autofocus";
+	if (errorCode.startsWith("stage_") || errorCode === "move_timeout") return "move";
+	return "other";
+}
+
 function artifactRefsForResult(result: ManagedUnitResult): RunState["artifactRefs"] {
 	return result.artifactRefs;
 }
@@ -45,6 +55,10 @@ function errorForResult(result: Extract<ManagedUnitResult, { status: "failed" }>
 }
 
 function classifyRuntimeFailure(failure: RuntimeError, artifacts: RunState["artifactRefs"]): ClassifiedFailure | undefined {
+	if (failure.retrySafe &&
+		(failure.errorCode === "autofocus_position_feedback" || failure.errorCode === "stage_position_feedback")) {
+		return { failure, failureType: "execution", failureReason: "position_feedback", artifacts };
+	}
 	const payload = failure.payload;
 	const stageTimeout =
 		failure.errorCode === "stage_move_failed" || failure.errorCode === "autofocus_stage_error"
@@ -104,7 +118,13 @@ function classifyMappingFailure(result: ManagedUnitResult, artifacts: RunState["
 
 function retryPolicyAllows(policy: RetryPolicy, failure: ClassifiedFailure): boolean {
 	if (failure.failureType === "execution") {
-		return failure.failureReason === "timeout" && policy.retryableFailureReasons.execution.includes(failure.failureReason);
+		const reasons = policy.retryableFailureReasons.execution;
+		// Existing frozen policies only named timeout. Position verification uses
+		// that same bounded recovery budget while retaining its actual cause.
+		if (failure.failureReason === "position_feedback") {
+			return reasons.includes("position_feedback") || reasons.includes("timeout");
+		}
+		return failure.failureReason === "timeout" && reasons.includes("timeout");
 	}
 	return failure.failureReason === "low_focus_confidence" && policy.retryableFailureReasons.quality.includes(failure.failureReason);
 }
@@ -121,6 +141,7 @@ function recordAttempt(
 	artifacts: RunState["artifactRefs"],
 	failure?: ClassifiedFailure,
 	finalForPoint?: boolean,
+	scheduledRetry?: ScheduledPointRetry,
 ): void {
 	context.recordPointAttempt({
 		pointUnitId: unit.unitId,
@@ -133,6 +154,7 @@ function recordAttempt(
 		errorCode: failure?.failure.errorCode,
 		message: failure?.failure.message,
 		finalForPoint,
+		scheduledRetry,
 		artifactIds: artifactIds(artifacts),
 	});
 }
@@ -410,18 +432,41 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 	const retryPolicy = context.activeRun.spec.retryPolicy ?? DEFAULT_RETRY_POLICY;
 	const finalRetryQueue: FinalRetryQueueItem[] = [];
 	let consecutiveMappingFailures = 0;
+	const savedAttempts = readRunStateSnapshot(activeRun.cwd, activeRun.runId)?.pointAttempts ?? [];
+	const lastSavedAttempt = new Map(savedAttempts.map(attempt => [attempt.pointUnitId, attempt]));
+
+	function scheduledRetryFor(record: PointAttemptRecord): ScheduledPointRetry | undefined {
+		if (record.scheduledRetry) return record.scheduledRetry;
+		// Older snapshots recorded the failure and ordinal, but not which budget
+		// funded its retry. Recover that original decision without granting more.
+		if (record.status !== "failed" || record.finalForPoint !== false || !record.errorCode) return undefined;
+		if (record.phase !== "final_retry" && record.attemptIndex < retryPolicy.maxImmediateRetriesPerPoint) {
+			return { stage: retryStage(record.errorCode), phase: "immediate_retry" };
+		}
+		if (retryPolicy.maxFinalRetriesPerPoint > 0) {
+			return { stage: retryStage(record.errorCode), phase: "final_retry" };
+		}
+		return undefined;
+	}
+
+	// A pause later in the main scan must not lose earlier queued final retries.
+	for (const unit of activeRun.units.slice(0, activeRun.startIndex)) {
+		const saved = lastSavedAttempt.get(unit.unitId);
+		if (saved && scheduledRetryFor(saved)?.phase === "final_retry") {
+			finalRetryQueue.push({ unit, nextAttemptIndex: saved.attemptIndex + 1 });
+		}
+	}
 
 	async function runMappingAttempt(
 		unit: ExecutionUnit,
 		attempt: UnitAttemptContext,
-		finalAttemptExhausted = true,
 	): Promise<"succeeded" | "queued_final_retry" | "failed" | "run_failed" | "paused" | "aborted"> {
 		if (activeRun.abortRequested) {
 			context.abortAt(unit);
 			return "aborted";
 		}
 
-		context.markUnitStarted(unit, attempt);
+		const state = context.markUnitStarted(unit, attempt);
 		const result = await context.executeUnit(unit);
 		const resultArtifacts = artifactRefsForResult(result);
 
@@ -470,27 +515,32 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 		}
 
 		const retryableByPolicy = retryPolicyAllows(retryPolicy, classifiedFailure);
+		const stage = retryStage(classifiedFailure.failure.errorCode);
+		const scheduled = (state.pointAttempts ?? [])
+			.filter(record => record.pointUnitId === unit.unitId)
+			.map(scheduledRetryFor)
+			.filter(retry => retry?.stage === stage);
 		const immediateRetriesAvailable =
-			attempt.phase !== "final_retry" && attempt.attemptIndex < retryPolicy.maxImmediateRetriesPerPoint;
+			attempt.phase !== "final_retry" &&
+			scheduled.filter(retry => retry?.phase === "immediate_retry").length < retryPolicy.maxImmediateRetriesPerPoint;
 		if (retryableByPolicy && immediateRetriesAvailable) {
-			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false);
+			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false,
+				{ stage, phase: "immediate_retry" });
 			return runMappingAttempt(unit, {
 				phase: "immediate_retry",
 				attemptIndex: attempt.attemptIndex + 1,
 			});
 		}
 
-		if (attempt.phase === "final_retry" && retryableByPolicy && !finalAttemptExhausted) {
-			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false);
-			return "failed";
-		}
-
 		const finalRetriesAvailable =
-			attempt.phase !== "final_retry" &&
 			retryableByPolicy &&
-			retryPolicy.maxFinalRetriesPerPoint > 0;
+			scheduled.filter(retry => retry?.phase === "final_retry").length < retryPolicy.maxFinalRetriesPerPoint;
 		if (finalRetriesAvailable) {
-			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false);
+			recordAttempt(context, unit, attempt, "failed", resultArtifacts, classifiedFailure, false,
+				{ stage, phase: "final_retry" });
+			if (attempt.phase === "final_retry") {
+				return runMappingAttempt(unit, { phase: "final_retry", attemptIndex: attempt.attemptIndex + 1 });
+			}
 			finalRetryQueue.push({
 				unit,
 				nextAttemptIndex: attempt.attemptIndex + 1,
@@ -525,7 +575,16 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 	}
 
 	for (const unit of pendingUnits(context)) {
-		const outcome = await runMappingAttempt(unit, { phase: "initial", attemptIndex: 0 });
+		const saved = lastSavedAttempt.get(unit.unitId);
+		if (saved?.finalForPoint) continue;
+		const scheduled = saved && scheduledRetryFor(saved);
+		if (scheduled?.phase === "final_retry") {
+			finalRetryQueue.push({ unit, nextAttemptIndex: saved!.attemptIndex + 1 });
+			continue;
+		}
+		const outcome = await runMappingAttempt(unit, {
+			phase: scheduled?.phase ?? "initial", attemptIndex: saved ? saved.attemptIndex + 1 : 0,
+		});
 		if (outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
 			return;
 		}
@@ -535,27 +594,12 @@ export async function executeMappingRun(context: RunExecutionContext, failureLim
 	}
 
 	for (const item of finalRetryQueue) {
-		for (let offset = 0; offset < retryPolicy.maxFinalRetriesPerPoint; offset++) {
-			const finalAttemptExhausted = offset + 1 >= retryPolicy.maxFinalRetriesPerPoint;
-			const outcome = await runMappingAttempt(item.unit, {
-				phase: "final_retry",
-				attemptIndex: item.nextAttemptIndex + offset,
-			}, finalAttemptExhausted);
-			if (outcome === "succeeded" || outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
-				if (outcome === "paused" || outcome === "aborted" || outcome === "run_failed") {
-					return;
-				}
-				break;
-			}
-			if (outcome === "failed" && !finalAttemptExhausted) {
-				continue;
-			}
-			if (outcome === "failed") {
-				if (activeRun.spec.stoppingRules?.stopOnError !== false) {
-					return;
-				}
-				break;
-			}
+		const outcome = await runMappingAttempt(item.unit, {
+			phase: "final_retry", attemptIndex: item.nextAttemptIndex,
+		});
+		if (outcome === "paused" || outcome === "aborted" || outcome === "run_failed" ||
+			(outcome === "failed" && activeRun.spec.stoppingRules?.stopOnError !== false)) {
+			return;
 		}
 	}
 

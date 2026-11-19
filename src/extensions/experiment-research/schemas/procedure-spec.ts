@@ -80,7 +80,10 @@ export const RetryFailureTypeSchema = Type.Union([
 	Type.Literal("quality"),
 ]);
 
-export const RetryExecutionFailureReasonSchema = Type.Literal("timeout");
+export const RetryExecutionFailureReasonSchema = Type.Union([
+	Type.Literal("timeout"),
+	Type.Literal("position_feedback"),
+]);
 
 export const RetryQualityFailureReasonSchema = Type.Literal("low_focus_confidence");
 
@@ -462,7 +465,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 	maxFinalRetriesPerPoint: 1,
 	finalRetryOrder: "failure_order",
 	retryableFailureReasons: {
-		execution: ["timeout"],
+		execution: ["timeout", "position_feedback"],
 		quality: ["low_focus_confidence"],
 	},
 };

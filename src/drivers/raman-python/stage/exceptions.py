@@ -17,3 +17,15 @@ class StageCommandError(StageError):
 
 class StageTimeoutError(StageError):
     """Raised when a stage move does not settle or complete within a timeout."""
+
+
+class StagePositionReadTimeoutError(StageTimeoutError):
+    """Position feedback did not stabilize within the read deadline."""
+
+
+class StageTargetMismatchError(StageError):
+    """A stable readback is too far from the requested autofocus target."""
+
+
+class StageCaptureDriftError(StageError):
+    """Position feedback changed too much across an image capture batch."""

@@ -66,6 +66,10 @@ export const PointAttemptRecordSchema = Type.Object(
 		errorCode: Type.Optional(Type.String({ minLength: 1 })),
 		message: Type.Optional(Type.String({ minLength: 1 })),
 		finalForPoint: Type.Optional(Type.Boolean()),
+		scheduledRetry: Type.Optional(Type.Object({
+			stage: Type.Union([Type.Literal("move"), Type.Literal("autofocus"), Type.Literal("other")]),
+			phase: Type.Union([Type.Literal("immediate_retry"), Type.Literal("final_retry")]),
+		}, { additionalProperties: false })),
 		artifactIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 		timestamp: Type.String({ minLength: 1 }),
 	},

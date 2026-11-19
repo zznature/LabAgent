@@ -72,10 +72,10 @@ class AutofocusBoundsTest(unittest.TestCase):
 
     def test_readback_margin_does_not_relax_error_from_the_requested_target(self):
         stage = FakeStage()
-        stage.get_position_um = Mock(return_value=11)
+        stage.get_position_um = Mock(return_value=15.001)
         strategy = Mock()
         scanner = FixedRangeScanner(stage, FakeFrames(), strategy,
-                                    FixedRangeAutofocusParams(0, 10, settle_ms=0))
+                                    FixedRangeAutofocusParams(0, 20, settle_ms=0))
         with self.assertRaisesRegex(StageError, "Invalid Z readback"):
             scanner.sample(5, ROI(0, 0, 8, 8))
         strategy.score.assert_not_called()

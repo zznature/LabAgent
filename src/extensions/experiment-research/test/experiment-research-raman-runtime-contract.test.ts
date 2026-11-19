@@ -138,6 +138,27 @@ describe("experiment research Raman runtime contract", () => {
 		expect(RamanRuntimeActionValidator.Check(spectrumAction)).toBe(true);
 	});
 
+	it("allows XY profiles up to 60 V while retaining the 50 V Z limit", () => {
+		const move = {
+			action: "stage.move_absolute_and_wait", resourceId: "stage", target: { xUm: 100, yUm: 100 }, timeoutMs: 5000,
+			zMotionProfile: { units: "mm", mode: "step", voltageV: 50, frequencyHz: 1000 },
+			xyMotionStrategy: {
+				enabled: true,
+				coarseProfile: { units: "mm", mode: "slide", voltageV: 60, frequencyHz: 750 },
+				fineProfile: { units: "mm", mode: "step", voltageV: 60, frequencyHz: 1000 },
+				segmentStepUm: 250, fineWindowUm: 80, approachOffsetUm: 15, segmentTimeoutMs: 30000, fineTimeoutMs: 40000,
+			},
+		};
+		expect(StageMoveAbsoluteAndWaitActionValidator.Check(move)).toBe(true);
+		for (const profile of [move.xyMotionStrategy.coarseProfile, move.xyMotionStrategy.fineProfile]) {
+			profile.voltageV = 61;
+			expect(StageMoveAbsoluteAndWaitActionValidator.Check(move)).toBe(false);
+			profile.voltageV = 60;
+		}
+		move.zMotionProfile.voltageV = 51;
+		expect(StageMoveAbsoluteAndWaitActionValidator.Check(move)).toBe(false);
+	});
+
 	it("normalizes action results into one unified action result contract", () => {
 		const success = successActionResult("Stage moved to the requested point.", {
 			finalPosition: { xUm: 1000, yUm: 2000, zUm: 50 },

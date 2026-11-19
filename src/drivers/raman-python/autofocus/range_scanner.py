@@ -13,10 +13,12 @@ import numpy as np
 
 from autofocus.models import FixedRangeAutofocusParams, Frame, FrameProvider, FocusStrategy, ROI, ScoredZPoint, ZStage
 from autofocus.bounds import Z_READBACK_MARGIN_UM, require_z_in_range
-from stage.exceptions import StageError
+from stage.exceptions import StageCaptureDriftError, StageTargetMismatchError
 
 
 ProgressCallback = Callable[[ScoredZPoint], None]
+Z_READBACK_TARGET_TOLERANCE_UM = 10.0
+Z_CAPTURE_DISPLACEMENT_TOLERANCE_UM = 5.0
 
 
 class FixedRangeScanner:
@@ -62,10 +64,12 @@ class FixedRangeScanner:
         sample_role: str = "scan",
     ) -> ScoredZPoint:
         tolerance = self.params.target_tolerance_um if tolerance_um is None else tolerance_um
-        stability_tolerance = float(getattr(self.stage, "position_stability_tolerance_um", 0.2))
+        stability_tolerance = Z_CAPTURE_DISPLACEMENT_TOLERANCE_UM
         diagnostics: dict[str, Any] = {
             "targetZUm": float(target_z_um), "sampleRole": sample_role,
             "targetToleranceUm": tolerance, "stabilityToleranceUm": stability_tolerance,
+            "readbackTargetToleranceUm": Z_READBACK_TARGET_TOLERANCE_UM,
+            "captureDisplacementToleranceUm": stability_tolerance,
             "startedMonotonic": time.monotonic(), "status": "pending",
             "allowedZRangeUm": [self.z_min_um, self.z_max_um],
             "readbackRangeToleranceUm": Z_READBACK_MARGIN_UM,
@@ -78,7 +82,7 @@ class FixedRangeScanner:
             self.stage.wait_settled(self.params.stage_timeout_ms)
             if self.params.settle_ms > 0:
                 time.sleep(self.params.settle_ms / 1000.0)
-            actual_z_um = self._read_verified_position(target_z_um, tolerance, "beforeCapture", diagnostics)
+            actual_z_um = self._read_verified_position(target_z_um, "beforeCapture", diagnostics)
 
             after_ts = time.monotonic()
             effective_frames_per_z = self.params.frames_per_z if frames_per_z is None else frames_per_z
@@ -88,12 +92,12 @@ class FixedRangeScanner:
             )
             # Retain frame identities even if the post-capture read rejects the sample.
             diagnostics["frames"] = self._frame_records(captured, [], sample_role)
-            after_z_um = self._read_verified_position(target_z_um, tolerance, "afterCapture", diagnostics)
+            after_z_um = self._read_verified_position(target_z_um, "afterCapture", diagnostics)
             diagnostics["captureDisplacementUm"] = after_z_um - actual_z_um
             if abs(after_z_um - actual_z_um) > stability_tolerance:
-                raise StageError(
+                raise StageCaptureDriftError(
                     f"Z changed during capture from {actual_z_um:.6f} to {after_z_um:.6f} um "
-                    f"(stability tolerance {stability_tolerance:g} um)."
+                    f"(capture displacement tolerance {stability_tolerance:g} um)."
                 )
             scoring_frames = captured[self.params.warmup_frames_per_z :]
             scored_frames: list[tuple[Frame, float]] = []
@@ -136,6 +140,8 @@ class FixedRangeScanner:
                 "targetZUm": target, "sampleRole": role, "status": "pending",
                 "allowedZRangeUm": [self.z_min_um, self.z_max_um],
                 "readbackRangeToleranceUm": Z_READBACK_MARGIN_UM,
+                "targetToleranceUm": self.params.final_tolerance_um,
+                "readbackTargetToleranceUm": Z_READBACK_TARGET_TOLERANCE_UM,
             }
             if role == "final_approach":
                 diagnostics["requestedApproachZUm"] = z_um + self.params.final_approach_offset_um
@@ -144,7 +150,7 @@ class FixedRangeScanner:
                 require_z_in_range(target, self.z_min_um, self.z_max_um, f"{role} target")
                 self.stage.move_absolute_um(target)
                 self.stage.wait_settled(self.params.stage_timeout_ms)
-                position = self._read_verified_position(target, self.params.final_tolerance_um, "afterMove", diagnostics)
+                position = self._read_verified_position(target, "afterMove", diagnostics)
                 diagnostics["status"] = "accepted"
             except Exception as exc:
                 diagnostics.update({"status": "rejected", "error": str(exc), "exceptionType": type(exc).__name__})
@@ -155,7 +161,7 @@ class FixedRangeScanner:
         return position
 
     def _read_verified_position(
-        self, target_z_um: float, tolerance_um: float, phase: str, diagnostics: dict[str, Any],
+        self, target_z_um: float, phase: str, diagnostics: dict[str, Any],
     ) -> float:
         read: dict[str, Any] = {"startedMonotonic": time.monotonic()}
         diagnostics[phase] = read
@@ -166,10 +172,10 @@ class FixedRangeScanner:
                 actual, self.z_min_um, self.z_max_um, f"{phase} readback for target {target_z_um:.6f}",
                 tolerance_um=Z_READBACK_MARGIN_UM,
             )
-            if not math.isfinite(actual) or abs(actual - target_z_um) > tolerance_um:
-                raise StageError(
+            if not math.isfinite(actual) or abs(actual - target_z_um) > Z_READBACK_TARGET_TOLERANCE_UM:
+                raise StageTargetMismatchError(
                     f"Invalid Z readback {actual:.6f} um for target {target_z_um:.6f} um "
-                    f"during {phase} (tolerance {tolerance_um:g} um)."
+                    f"during {phase} (tolerance {Z_READBACK_TARGET_TOLERANCE_UM:g} um)."
                 )
             return actual
         finally:
